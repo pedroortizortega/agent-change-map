@@ -28,9 +28,9 @@ Chain strategy: feature-branch-chain
 
 ## Phase 1: Foundation
 
-- [ ] 1.1 Create `package.json`, `tsconfig.json`, dependencies, test/quality scripts, VS Code/Python harnesses, and `test/{unit,integration,e2e,fixtures}/` first.
-- [ ] 1.2 RED DTO tests; GREEN create `src/protocol.ts`; REFACTOR IDs/schemas.
-- [ ] 1.3 RED AST tests for entities, imports, resolved/ambiguous/unresolved calls, spans, syntax diagnostics; GREEN create `python/analyzer.py` and `src/analysis/pythonAnalyzer.ts`; REFACTOR JSON-lines.
+- [x] 1.1 Create `package.json`, `tsconfig.json`, dependencies, test/quality scripts, VS Code/Python harnesses, and `test/{unit,integration,e2e,fixtures}/` first.
+- [x] 1.2 RED DTO tests; GREEN create `src/protocol.ts`; REFACTOR IDs/schemas.
+- [x] 1.3 RED AST tests for entities, imports, resolved/ambiguous/unresolved calls, spans, syntax diagnostics; GREEN create `python/analyzer.py` and `src/analysis/pythonAnalyzer.ts`; REFACTOR JSON-lines.
 
 ## Phase 2: Git and Sources
 
