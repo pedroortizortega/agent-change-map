@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFile, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
-import type { SnapshotId } from "../protocol.js";
+import { DTO_LIMITS, type SnapshotId } from "../protocol.js";
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
@@ -34,6 +34,8 @@ export interface WorktreeCaptureBegin {
   canonicalPath: string;
   fingerprint: string;
   trackedPaths: string[];
+  headOid: string | null;
+  contentFingerprint: string;
 }
 
 /** Rejected during pre-flight validation before any Git process is spawned. */
@@ -41,6 +43,12 @@ export class GitSelectionError extends Error {}
 
 /** Raised when a worktree's tracked content changes while it is being captured. */
 export class GitCaptureInstabilityError extends Error {}
+
+/** Raised when a capture exceeds the tracked-file count or per-file content size limits shared with {@link DTO_LIMITS}. */
+export class GitCaptureLimitError extends Error {}
+
+/** Raised when tracked content cannot be losslessly decoded as UTF-8 (i.e. it is binary). */
+export class GitBinaryContentError extends Error {}
 
 interface TreeEntry {
   type: string;
@@ -54,7 +62,19 @@ function assertSafeToken(token: string, label: string): void {
   if (token.includes("..") || UNSAFE_TOKEN_PATTERN.test(token)) throw new GitSelectionError(`${label} contains unsupported characters: ${token}`);
 }
 
-async function runGit(cwd: string, args: string[], options: { timeoutMs?: number } = {}): Promise<string> {
+/**
+ * Rejects flag-injection-shaped filesystem paths (a leading '-' that a spawned
+ * git process could interpret as an option) without rejecting legitimate path
+ * characters such as ':' or '\\', which occur in valid Windows absolute paths
+ * (e.g. `C:\repo\src`). Path traversal/escape safety is enforced separately by
+ * the realpath + relative() containment check in {@link validateWorktreeMembership}.
+ */
+function assertSafePathToken(token: string, label: string): void {
+  if (typeof token !== "string" || token.length === 0) throw new GitSelectionError(`${label} must be a non-empty string`);
+  if (token.startsWith("-")) throw new GitSelectionError(`${label} must not start with '-': ${token}`);
+}
+
+async function runGitBuffer(cwd: string, args: string[], options: { timeoutMs?: number } = {}): Promise<Buffer> {
   if (!isAbsolute(cwd)) throw new Error("Git operations require an absolute working directory");
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const child = spawn("git", args, { cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
@@ -93,7 +113,41 @@ async function runGit(cwd: string, args: string[], options: { timeoutMs?: number
     });
   });
 
-  return Buffer.concat(stdoutChunks).toString("utf8");
+  return Buffer.concat(stdoutChunks);
+}
+
+async function runGit(cwd: string, args: string[], options: { timeoutMs?: number } = {}): Promise<string> {
+  const output = await runGitBuffer(cwd, args, options);
+  return output.toString("utf8");
+}
+
+/**
+ * Decodes raw content bytes as UTF-8, verifying the decode round-trips losslessly
+ * (i.e. re-encoding the decoded string reproduces the original bytes exactly). This
+ * distinguishes genuine UTF-8 text - including non-ASCII UTF-8 such as accented
+ * characters - from binary content, which Node's UTF-8 decoder would otherwise
+ * silently corrupt via lossy replacement characters.
+ */
+function decodeUtf8OrThrow(content: Buffer, path: string): string {
+  const decoded = content.toString("utf8");
+  if (!Buffer.from(decoded, "utf8").equals(content)) {
+    throw new GitBinaryContentError(`Tracked file is not valid UTF-8 text and cannot be captured: ${path}`);
+  }
+  return decoded;
+}
+
+function assertWithinCaptureLimits(fileCount: number): void {
+  if (fileCount > DTO_LIMITS.maxFiles) {
+    throw new GitCaptureLimitError(`Capture exceeds the maximum tracked-file count of ${DTO_LIMITS.maxFiles} (found ${fileCount})`);
+  }
+}
+
+function assertContentWithinSizeLimit(content: Buffer, path: string): void {
+  if (content.length > DTO_LIMITS.maxFileContentBytes) {
+    throw new GitCaptureLimitError(
+      `Tracked file exceeds the maximum content size of ${DTO_LIMITS.maxFileContentBytes} bytes: ${path}`,
+    );
+  }
 }
 
 export async function resolveRepoRoot(startPath: string): Promise<string> {
@@ -109,7 +163,7 @@ export async function resolveRepoRoot(startPath: string): Promise<string> {
  * absolute foreign paths without ever invoking Git or mutating repository state.
  */
 export async function validateWorktreeMembership(repoRoot: string, candidatePath: string): Promise<string> {
-  assertSafeToken(candidatePath, "Worktree path");
+  assertSafePathToken(candidatePath, "Worktree path");
   const absoluteCandidate = isAbsolute(candidatePath) ? candidatePath : resolve(repoRoot, candidatePath);
   let canonicalCandidate: string;
   try {
@@ -127,9 +181,16 @@ export async function validateWorktreeMembership(repoRoot: string, candidatePath
 
 export async function resolveCommitOid(repoRoot: string, ref: string): Promise<string> {
   assertSafeToken(ref, "Git reference");
-  const output = await runGit(repoRoot, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+  let output: string;
+  try {
+    output = await runGit(repoRoot, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+  } catch (error) {
+    throw new GitSelectionError(`Unable to resolve commit reference: ${ref}`, { cause: error });
+  }
   const oid = output.trim();
-  if (!/^[0-9a-f]{40}$/i.test(oid)) throw new GitSelectionError(`Unable to resolve commit reference: ${ref}`);
+  if (!/^[0-9a-f]{40}$/i.test(oid) && !/^[0-9a-f]{64}$/i.test(oid)) {
+    throw new GitSelectionError(`Unable to resolve commit reference: ${ref}`);
+  }
   return oid;
 }
 
@@ -146,8 +207,8 @@ async function listTreeEntries(repoRoot: string, oid: string): Promise<TreeEntry
     .filter((entry): entry is TreeEntry => entry.type === "blob");
 }
 
-async function readBlob(repoRoot: string, sha: string): Promise<string> {
-  return runGit(repoRoot, ["cat-file", "-p", sha]);
+async function readBlobBuffer(repoRoot: string, sha: string): Promise<Buffer> {
+  return runGitBuffer(repoRoot, ["cat-file", "-p", sha]);
 }
 
 async function computeRepoId(repoRoot: string): Promise<string> {
@@ -169,7 +230,14 @@ export function computeContentDigest(files: CapturedFile[]): string {
 export async function captureCommitState(repoRoot: string, ref: string): Promise<CapturedState> {
   const oid = await resolveCommitOid(repoRoot, ref);
   const entries = await listTreeEntries(repoRoot, oid);
-  const files = await Promise.all(entries.map(async (entry) => ({ path: entry.path, content: await readBlob(repoRoot, entry.sha) })));
+  assertWithinCaptureLimits(entries.length);
+  const files = await Promise.all(
+    entries.map(async (entry) => {
+      const buffer = await readBlobBuffer(repoRoot, entry.sha);
+      assertContentWithinSizeLimit(buffer, entry.path);
+      return { path: entry.path, content: decodeUtf8OrThrow(buffer, entry.path) };
+    }),
+  );
   const repoId = await computeRepoId(repoRoot);
   return { snapshot: { repoId, kind: "commit", resolvedOid: oid, contentDigest: computeContentDigest(files) }, files };
 }
@@ -185,23 +253,87 @@ async function listTrackedPaths(canonicalPath: string): Promise<string[]> {
 }
 
 /**
- * Begins a two-phase worktree capture: records a stability fingerprint and the tracked
- * path list before reading any file content, so instability introduced mid-capture can
- * be detected deterministically by {@link finishWorktreeCapture}.
+ * Resolves the commit oid HEAD currently points to, or null when the worktree has no
+ * commits yet (e.g. a freshly initialized repository). Used to detect a clean checkout
+ * to a different commit/branch happening mid-capture, which leaves `git status
+ * --porcelain` unchanged (clean before and after) but changes which commit's content
+ * would be read.
+ */
+async function resolveHeadOidOrNull(canonicalPath: string): Promise<string | null> {
+  try {
+    return await resolveCommitOid(canonicalPath, "HEAD");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Hashes the path and content of every tracked file so instability that a porcelain
+ * status diff cannot see - e.g. a file already dirty at `begin` time being edited again
+ * during the capture window, which leaves the porcelain status letter unchanged - is
+ * still detected by comparing this fingerprint before and after the read.
+ */
+function contentFingerprintFromEntries(entries: { path: string; content: string }[]): string {
+  const hash = createHash("sha256");
+  for (const { path, content } of entries) {
+    hash.update(path, "utf8");
+    hash.update("\0");
+    hash.update(content, "utf8");
+    hash.update("\0");
+  }
+  return `sha256:${hash.digest("hex")}`;
+}
+
+async function readTrackedContentOrMarker(canonicalPath: string, path: string): Promise<string> {
+  let buffer: Buffer;
+  try {
+    buffer = await readFile(resolve(canonicalPath, path));
+  } catch {
+    return " missing ";
+  }
+  return decodeUtf8OrThrow(buffer, path);
+}
+
+async function computeTrackedContentFingerprint(canonicalPath: string, trackedPaths: string[]): Promise<string> {
+  const entries = await Promise.all(
+    trackedPaths.map(async (path) => ({ path, content: await readTrackedContentOrMarker(canonicalPath, path) })),
+  );
+  return contentFingerprintFromEntries(entries);
+}
+
+/**
+ * Begins a two-phase worktree capture: records a stability fingerprint (status,
+ * resolved HEAD oid, and per-file tracked content) and the tracked path list before
+ * reading any file content for the actual capture, so instability introduced mid-capture
+ * - including a same-status re-edit of an already-dirty file, or a clean checkout to a
+ * different commit - can be detected deterministically by {@link finishWorktreeCapture}.
  */
 export async function beginWorktreeCapture(repoRoot: string, worktreePath: string): Promise<WorktreeCaptureBegin> {
   const canonicalPath = await validateWorktreeMembership(repoRoot, worktreePath);
   const fingerprint = await statusFingerprint(canonicalPath);
   const trackedPaths = await listTrackedPaths(canonicalPath);
-  return { canonicalPath, fingerprint, trackedPaths };
+  const headOid = await resolveHeadOidOrNull(canonicalPath);
+  const contentFingerprint = await computeTrackedContentFingerprint(canonicalPath, trackedPaths);
+  return { canonicalPath, fingerprint, trackedPaths, headOid, contentFingerprint };
 }
 
 export async function finishWorktreeCapture(begin: WorktreeCaptureBegin): Promise<CapturedState> {
+  assertWithinCaptureLimits(begin.trackedPaths.length);
   const files = await Promise.all(
-    begin.trackedPaths.map(async (path) => ({ path, content: await readFile(resolve(begin.canonicalPath, path), "utf8") })),
+    begin.trackedPaths.map(async (path) => {
+      const buffer = await readFile(resolve(begin.canonicalPath, path));
+      assertContentWithinSizeLimit(buffer, path);
+      return { path, content: decodeUtf8OrThrow(buffer, path) };
+    }),
   );
   const afterFingerprint = await statusFingerprint(begin.canonicalPath);
-  if (afterFingerprint !== begin.fingerprint) {
+  const afterHeadOid = await resolveHeadOidOrNull(begin.canonicalPath);
+  const afterContentFingerprint = contentFingerprintFromEntries(files);
+  if (
+    afterFingerprint !== begin.fingerprint ||
+    afterHeadOid !== begin.headOid ||
+    afterContentFingerprint !== begin.contentFingerprint
+  ) {
     throw new GitCaptureInstabilityError("Worktree state changed while capturing the selected content; comparison refused as unstable");
   }
   const repoId = await computeRepoId(begin.canonicalPath);
