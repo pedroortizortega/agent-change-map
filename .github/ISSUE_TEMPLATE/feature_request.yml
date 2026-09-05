@@ -1,0 +1,65 @@
+name: Feature request
+description: Propose a focused improvement to Agent Change Map
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the user need without sharing secrets, private source code, or exploit payloads. Report security vulnerabilities privately from the repository Security tab.
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      options:
+        - label: I searched existing issues for this request.
+          required: true
+        - label: This request does not disclose a security vulnerability or sensitive data.
+          required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or need
+      description: What user problem should be solved, and who experiences it?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed outcome
+      description: Describe the desired behavior rather than a required implementation.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Product area
+      options:
+        - Worktree reading or comparison
+        - Guarded code editing
+        - Restricted Docker snippet runtime
+        - Python analysis
+        - VS Code user interface
+        - Documentation or contributor experience
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety and confirmation behavior
+      description: Explain any repository access, code execution, edit approval, permissions, or sandbox implications.
+      placeholder: No change, or describe how explicit confirmation and isolation should work.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What workarounds or other designs have you considered?
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add non-sensitive examples or screenshots. Do not paste private code, credentials, logs, or exploit payloads.

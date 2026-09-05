@@ -1,0 +1,72 @@
+schema: spec-driven
+
+context: |
+  Product: Agent Change Map, a planned VS Code extension.
+  Scope: Python code structure/call/import diagrams and Git comparison workflows.
+  Editing: temporary drafts by default, with optional direct-worktree mode.
+  Execution: changed snippets run only in disposable, explicitly restricted Docker containers.
+  Current state: empty project; no implementation stack, architecture, manifest, or CI exists yet.
+  Host tools detected: Git, Node.js/npm, Python, uv, pytest, Ruff, Docker, and VS Code CLI.
+  Artifact language: English.
+
+strict_tdd: false
+
+testing:
+  detected_at: "2026-09-05T11:01:53-06:00"
+  reason: "No project test runner or test configuration exists; host-installed tools are not project capabilities."
+  runner:
+    available: false
+    framework: null
+    command: ""
+  layers:
+    unit:
+      available: false
+      tool: null
+    integration:
+      available: false
+      tool: null
+    e2e:
+      available: false
+      tool: null
+  coverage:
+    available: false
+    command: ""
+  quality:
+    linter:
+      available: false
+      command: ""
+    type_checker:
+      available: false
+      command: ""
+    formatter:
+      available: false
+      command: ""
+
+rules:
+  proposal:
+    - Keep the MVP boundary explicit and identify out-of-scope behavior.
+    - Include rollback and safety implications for Git edits and code execution.
+  specs:
+    - Use RFC 2119 keywords for normative requirements.
+    - Express acceptance scenarios in Given/When/Then form.
+    - Specify trust boundaries and restrictions for Docker execution, network, resources, and filesystems.
+  design:
+    - Record architecture decisions and rationale before selecting implementation dependencies.
+    - Include sequence diagrams for Git comparison, diagram navigation, editing, and snippet execution flows.
+  tasks:
+    - Group work by phase with hierarchical numbering.
+    - Keep each task independently verifiable and small enough for one session.
+    - Do not assume host-installed tools are project dependencies.
+  apply:
+    guidelines:
+      - Follow approved proposal, specs, and design artifacts.
+      - Introduce project tooling explicitly before relying on it.
+    tdd: false
+    test_command: ""
+  verify:
+    test_command: ""
+    build_command: ""
+    coverage_threshold: 0
+  archive:
+    - Warn before merging destructive deltas.
+    - Preserve archived changes as an immutable audit trail.

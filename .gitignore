@@ -1,0 +1,58 @@
+# Local agent and coding-assistant metadata
+.atl/
+.club/
+.codex/
+.hermes/
+.opencode/
+
+# Dependencies
+node_modules/
+
+# Build and packaged extension artifacts
+out/
+dist/
+build/
+*.vsix
+
+# Test and coverage output
+coverage/
+.nyc_output/
+test-results/
+playwright-report/
+
+# Python caches and virtual environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Environment files and secrets
+.env
+.env.*
+*.env
+*.env.*
+!.env.example
+*.pem
+*.key
+
+# VS Code and Dev Container configuration
+.vscode/
+.vsc/
+.devcontainer/
+
+# Runtime and temporary state
+*.log
+*.tmp
+*.temp
+.cache/
+tmp/
+
+# Editor-local files
+.idea/
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
