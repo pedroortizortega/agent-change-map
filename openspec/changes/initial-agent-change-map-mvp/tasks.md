@@ -34,9 +34,9 @@ Chain strategy: feature-branch-chain
 
 ## Phase 2: Git and Sources
 
-- [ ] 2.1 RED `test/integration/gitSelection.test.ts`: reject `-C`-like input, relative escape, absolute foreign path without mutation; GREEN create canonical membership/fixed argv in `src/git/gitService.ts`.
-- [ ] 2.2 RED `test/integration/gitState.test.ts`: staged, commit-a-like dirty worktree, empty index; assert byte/status equality; GREEN implement stable capture, IDs, diffs, instability failure in `src/git/gitService.ts` and `src/snapshots/snapshotStore.ts`.
-- [ ] 2.3 RED exact commit/worktree span and stale-refusal tests; GREEN create `src/navigation/sourceProvider.ts` and structural/file diff correlation; REFACTOR virtual sources.
+- [x] 2.1 RED `test/integration/gitSelection.test.ts`: reject `-C`-like input, relative escape, absolute foreign path without mutation; GREEN create canonical membership/fixed argv in `src/git/gitService.ts`.
+- [x] 2.2 RED `test/integration/gitState.test.ts`: staged, commit-a-like dirty worktree, empty index; assert byte/status equality; GREEN implement stable capture, IDs, diffs, instability failure in `src/git/gitService.ts` and `src/snapshots/snapshotStore.ts`.
+- [x] 2.3 RED exact commit/worktree span and stale-refusal tests; GREEN create `src/navigation/sourceProvider.ts` and structural/file diff correlation; REFACTOR virtual sources.
 
 ## Phase 3: Guarded Editing
 

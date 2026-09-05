@@ -76,6 +76,14 @@ export const analyzeRequestSchema = z.object({
   files: z.array(z.object({ path: boundedString(DTO_LIMITS.maxPathLength), content: boundedContent })).min(1).max(DTO_LIMITS.maxFiles),
 });
 
+export const sourceIdSchema = z.object({
+  snapshot: snapshotIdSchema,
+  posixPath: boundedString(DTO_LIMITS.maxPathLength),
+  startByte: z.number().int().nonnegative(),
+  endByte: z.number().int().nonnegative(),
+  contentHash: boundedString(DTO_LIMITS.maxIdentifierLength),
+}).refine((source) => source.endByte >= source.startByte, "Source id byte span must be ordered");
+
 export type SnapshotId = z.infer<typeof snapshotIdSchema>;
 export type SourceSpan = z.infer<typeof sourceSpanSchema>;
 export type Entity = z.infer<typeof entitySchema>;
@@ -84,3 +92,4 @@ export type Edge = z.infer<typeof edgeSchema>;
 export type Diagnostic = z.infer<typeof diagnosticSchema>;
 export type AnalysisGraph = z.infer<typeof analysisGraphSchema>;
 export type AnalyzeRequest = z.infer<typeof analyzeRequestSchema>;
+export type SourceId = z.infer<typeof sourceIdSchema>;
