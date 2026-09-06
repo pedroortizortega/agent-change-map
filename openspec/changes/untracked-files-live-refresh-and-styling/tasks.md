@@ -98,13 +98,13 @@ Each slice is independently revertible per the design's Migration/Rollout sectio
 
 ## Phase 7: Slice B — Auto-Refresh Watcher (PR 2b, base: PR 2a branch)
 
-- [ ] 7.1 RED `test/unit/comparisonController.test.ts` — Case 21: auto-refresh while busy → `refreshDeferred`, no recapture; on `onIdle` the queued refresh fires exactly once.
-- [ ] 7.2 RED `test/unit/comparisonController.test.ts` — Case 22: auto-refresh debounce coalesces N watcher events into one capture.
-- [ ] 7.3 RED `test/unit/comparisonController.test.ts` — Case 23: watcher events for a non-matching path do not schedule a refresh.
-- [ ] 7.4 RED `test/unit/comparisonController.test.ts` — Case 24: `agentChangeMap.autoRefresh` defaults false → no watcher created.
-- [ ] 7.5 GREEN edit `package.json`: `contributes.configuration` adds `agentChangeMap.autoRefresh` (boolean, default `false`).
-- [ ] 7.6 GREEN implement the watcher/debounce/queue methods in `src/comparisonController.ts` (`reconcileWatcher`/`onWatchedPathChanged`/`armDebounce`/`fireAutoRefresh`/`onIdle`, `FileWatcherHandle`, and the `refreshDeferred` protocol message + `ChangeMapSession.notifyRefreshDeferred`): 750ms debounce, then `isBusy()` check — busy sets `queued = true` and posts `refreshDeferred` once and returns; `onIdle` re-arms the same debounced timer when `queued`. Watcher created only when right selection is `kind: "worktree"` AND `agentChangeMap.autoRefresh` is true, filtered by `matcher.matches(uri)`; recreated/disposed from `workspace.onDidChangeConfiguration`; disposed on `panel.onDidDispose`. Wire `src/extension.ts`'s real `vscode.FileSystemWatcher` bridge (`createWorktreeWatcher`, `isAutoRefreshEnabled`) and the `onIdle: () => controllerRef.current!.onIdle()` `SessionDeps` field back in. This exact implementation already exists (written once in the original combined PR 2 apply pass) — restore it rather than redesigning it.
-- [ ] 7.7 REFACTOR: confirm the watcher uses `RelativePattern(worktree, "**/*")` per the design's data-flow diagram.
+- [x] 7.1 RED `test/unit/comparisonController.test.ts` — Case 21: auto-refresh while busy → `refreshDeferred`, no recapture; on `onIdle` the queued refresh fires exactly once.
+- [x] 7.2 RED `test/unit/comparisonController.test.ts` — Case 22: auto-refresh debounce coalesces N watcher events into one capture.
+- [x] 7.3 RED `test/unit/comparisonController.test.ts` — Case 23: watcher events for a non-matching path do not schedule a refresh.
+- [x] 7.4 RED `test/unit/comparisonController.test.ts` — Case 24: `agentChangeMap.autoRefresh` defaults false → no watcher created.
+- [x] 7.5 GREEN edit `package.json`: `contributes.configuration` adds `agentChangeMap.autoRefresh` (boolean, default `false`).
+- [x] 7.6 GREEN implement the watcher/debounce/queue methods in `src/comparisonController.ts` (`reconcileWatcher`/`onWatchedPathChanged`/`armDebounce`/`fireAutoRefresh`/`onIdle`, `FileWatcherHandle`, and the `refreshDeferred` protocol message + `ChangeMapSession.notifyRefreshDeferred`): 750ms debounce, then `isBusy()` check — busy sets `queued = true` and posts `refreshDeferred` once and returns; `onIdle` re-arms the same debounced timer when `queued`. Watcher created only when right selection is `kind: "worktree"` AND `agentChangeMap.autoRefresh` is true, filtered by `matcher.matches(uri)`; recreated/disposed from `workspace.onDidChangeConfiguration`; disposed on `panel.onDidDispose`. Wire `src/extension.ts`'s real `vscode.FileSystemWatcher` bridge (`createWorktreeWatcher`, `isAutoRefreshEnabled`) and the `onIdle: () => controllerRef.current!.onIdle()` `SessionDeps` field back in. This exact implementation already exists (written once in the original combined PR 2 apply pass) — restore it rather than redesigning it.
+- [x] 7.7 REFACTOR: confirm the watcher uses `RelativePattern(worktree, "**/*")` per the design's data-flow diagram.
 
 ## Phase 8: Slice B — `SnapshotStore` LRU (PR 2a)
 

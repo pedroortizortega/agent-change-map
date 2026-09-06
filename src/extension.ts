@@ -8,8 +8,10 @@ import { DraftStore } from "./editing/draftStore.js";
 import { performGuardedWrite } from "./editing/writeGuard.js";
 import { runSnippet } from "./execution/dockerRunner.js";
 import { ChangeMapSession } from "./webviewHost.js";
-import { ComparisonController } from "./comparisonController.js";
+import { ComparisonController, type FileWatcherHandle } from "./comparisonController.js";
 import type { SourceId } from "./protocol.js";
+
+const AUTO_REFRESH_SETTING = "agentChangeMap.autoRefresh";
 
 const VIRTUAL_SCHEME = "agent-change-map";
 
@@ -96,6 +98,28 @@ async function pickComparisonReferences(): Promise<{ left: GitSelection; right: 
 
   const right: GitSelection = rightInput.trim().length === 0 ? { kind: "worktree", path: workspaceFolder.uri.fsPath } : parseGitSelection(rightInput);
   return { left: parseGitSelection(leftInput), right };
+}
+
+function isAutoRefreshEnabled(): boolean {
+  return vscode.workspace.getConfiguration().get<boolean>(AUTO_REFRESH_SETTING, false);
+}
+
+/**
+ * Bridges a real `vscode.FileSystemWatcher` (`RelativePattern(worktree, "**\/*")`, per the
+ * design's data-flow diagram) into the `ComparisonController`'s vscode-free `onChange`
+ * contract, so the controller stays unit-testable without a `vscode` runtime import.
+ */
+function createWorktreeWatcher(worktreePath: string, onChange: (posixPath: string) => void): FileWatcherHandle {
+  const pattern = new vscode.RelativePattern(worktreePath, "**/*");
+  const watcher = vscode.workspace.createFileSystemWatcher(pattern);
+  const forward = (uri: vscode.Uri): void => onChange(vscode.workspace.asRelativePath(uri, false));
+  const subscriptions = [watcher.onDidChange(forward), watcher.onDidCreate(forward), watcher.onDidDelete(forward)];
+  return {
+    dispose(): void {
+      for (const subscription of subscriptions) subscription.dispose();
+      watcher.dispose();
+    },
+  };
 }
 
 /**
@@ -192,6 +216,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi | undef
         performWrite: performGuardedWrite,
         runSnippet,
         requestRefresh: () => controllerRef.current!.requestRefresh(),
+        onIdle: () => controllerRef.current!.onIdle(),
       });
 
       panel.webview.onDidReceiveMessage(async (raw: unknown) => {
@@ -204,6 +229,14 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi | undef
         references,
         store,
         session,
+        isAutoRefreshEnabled,
+        createWatcher: createWorktreeWatcher,
+        onAutoRefreshConfigChange: (callback) => {
+          const subscription = vscode.workspace.onDidChangeConfiguration((event) => {
+            if (event.affectsConfiguration(AUTO_REFRESH_SETTING)) callback();
+          });
+          return { dispose: () => subscription.dispose() };
+        },
       });
       controllerRef.current = controller;
       panel.onDidDispose(() => controller.dispose());

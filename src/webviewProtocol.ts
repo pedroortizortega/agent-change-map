@@ -70,4 +70,5 @@ export type HostToWebviewMessage =
   | { type: "runResult"; requestId: string; results: RunResult[] }
   | { type: "error"; message: string }
   | { type: "refreshResult"; requestId: string; ok: true }
-  | { type: "refreshResult"; requestId: string; ok: false; reason: string };
+  | { type: "refreshResult"; requestId: string; ok: false; reason: string }
+  | { type: "refreshDeferred"; reason: string };

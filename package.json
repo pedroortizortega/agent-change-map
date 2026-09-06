@@ -15,7 +15,17 @@
         "command": "agentChangeMap.compare",
         "title": "Agent Change Map: Compare Python Changes"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Agent Change Map",
+      "properties": {
+        "agentChangeMap.autoRefresh": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically refresh an open comparison panel when worktree files change. Deferred while a write/run confirmation is pending or a Docker run is active."
+        }
+      }
+    }
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json && npm run build:webview",
