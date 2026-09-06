@@ -106,19 +106,77 @@ it("selects a section before oversized rendering and keeps filters actionable", 
   expect(dom.window.document.querySelectorAll('[data-node-id]')).toHaveLength(1);
 });
 
-it("identifies affected comparison lines and navigates a relationship at its exact edge span", async () => {
+it("renders classified diff rows with ghost cells for the missing side", async () => {
+  session.loadComparison({ ...graph, snapshot: leftSnapshot }, graph, []);
+  click('[data-node-id="module:m"]');
+  await vi.waitFor(() => expect(dom.window.document.querySelectorAll("#diff-panel .diff-row").length).toBeGreaterThan(0));
+  expect(element("#diff-panel").textContent).not.toContain("Affected lines");
+  const removedRow = element(".diff-row.op-removed");
+  expect(removedRow.querySelector(".side.left")?.textContent).toContain("initial");
+  expect(removedRow.querySelector(".side.right.ghost")?.textContent).toBe("");
+  const addedRow = element(".diff-row.op-added");
+  expect(addedRow.querySelector(".side.right")?.textContent).toContain("current");
+  expect(addedRow.querySelector(".side.left.ghost")?.textContent).toBe("");
+});
+
+it("navigates a relationship at its exact edge span (click-contract proof)", async () => {
   const edgeSpan = { ...node.span, startByte: 6, endByte: 13, startColumn: 6, endColumn: 13 };
   session.loadComparison({ ...graph, snapshot: leftSnapshot }, { ...graph, edges: [{ kind: "call", source: node.id, resolution: { kind: "resolved", target: node.id }, span: edgeSpan }] }, []);
   click('[data-node-id="module:m"]');
-  expect(element('#diff-panel').textContent).toContain("initial");
-  expect(element('#diff-panel').textContent).toContain("current");
-  expect(element('#diff-panel').textContent).toContain("Affected lines: 1");
   click('[data-edge-index="0"]');
   await vi.waitFor(() => expect(intents).toContainEqual(expect.objectContaining({
     type: "navigate",
     side: "right",
     sourceId: expect.objectContaining({ startByte: edgeSpan.startByte, endByte: edgeSpan.endByte }),
   })));
+});
+
+it("keeps both ghost columns present for a wholly one-sided (added-only) pair", async () => {
+  session.loadComparison(undefined, graph, []);
+  click('[data-node-id="module:m"]');
+  await vi.waitFor(() => expect(dom.window.document.querySelectorAll("#diff-panel .diff-row").length).toBeGreaterThan(0));
+  const rows = Array.from(dom.window.document.querySelectorAll(".diff-row.op-added"));
+  expect(rows.length).toBeGreaterThan(0);
+  for (const row of rows) {
+    expect(row.querySelector(".side.left.ghost")).not.toBeNull();
+    expect(row.querySelector(".side.right")).not.toBeNull();
+  }
+});
+
+it("collapses long unchanged runs, toggles them open/closed, and resets on a new sourcePair message", async () => {
+  const bigSnapshotRight = { ...snapshot, contentDigest: "sha256:big-right" };
+  const bigSnapshotLeft = { ...leftSnapshot, contentDigest: "sha256:big-left" };
+  const lines = Array.from({ length: 20 }, (_, i) => `line${i + 1}`);
+  // Equal-length replacements on both sides keep the full-file byte span identical for
+  // left and right, since this test node's span is shared across both comparison sides.
+  const leftLines = [...lines]; leftLines[9] = "left-line10";
+  const rightLines = [...lines]; rightLines[9] = "rght-line10";
+  const bigLeftContent = `${leftLines.join("\n")}\n`;
+  const bigRightContent = `${rightLines.join("\n")}\n`;
+  const bigStore = new SnapshotStore();
+  bigStore.store({ snapshot: bigSnapshotRight, files: [{ path: "big.py", content: bigRightContent }] });
+  bigStore.store({ snapshot: bigSnapshotLeft, files: [{ path: "big.py", content: bigLeftContent }] });
+  const bigNode = { id: "module:big", kind: "module" as const, qualifiedName: "big", span: { path: "big.py", startByte: 0, endByte: bigRightContent.length, startLine: 1, startColumn: 0, endLine: 21, endColumn: 0 } };
+  const bigGraph: AnalysisGraph = { snapshot: bigSnapshotRight, nodes: [bigNode], edges: [], diagnostics: [] };
+  // Reassigning the shared `session` binding: the webview module's `postMessage` stub closes
+  // over this outer `let`, so it dispatches into whichever session is current at call time.
+  session = new ChangeMapSession({ repoRoot: "/repo", store: bigStore, draftStore: new DraftStore(), openSource: vi.fn(), performWrite: vi.fn(), runSnippet: vi.fn(), post: message => dom.window.dispatchEvent(new dom.window.MessageEvent("message", { data: message })) });
+  session.loadComparison({ ...bigGraph, snapshot: bigSnapshotLeft }, bigGraph, []);
+
+  click('[data-node-id="module:big"]');
+  await vi.waitFor(() => expect(dom.window.document.querySelectorAll("#diff-panel .diff-row").length).toBeGreaterThan(0));
+  const collapsedButtons = () => Array.from(dom.window.document.querySelectorAll<HTMLButtonElement>(".diff-collapsed"));
+  expect(collapsedButtons().length).toBeGreaterThan(0);
+  const runKey = collapsedButtons()[0]!.getAttribute("data-run-key")!;
+  expect(runKey).toMatch(/^L\d+-\d+\/R\d+-\d+$/);
+
+  click(`[data-run-key="${runKey}"]`);
+  expect(dom.window.document.querySelector(`[data-run-key="${runKey}"]`)).toBeNull();
+  expect(dom.window.document.querySelectorAll("#diff-panel .diff-row.op-unchanged").length).toBeGreaterThan(6);
+
+  click('[data-node-id="module:big"]');
+  await vi.waitFor(() => expect(dom.window.document.querySelectorAll("#diff-panel .diff-row").length).toBeGreaterThan(0));
+  expect(collapsedButtons().some(button => button.getAttribute("data-run-key") === runKey)).toBe(true);
 });
 
 it("shows terminal run kinds with exit codes and timeout durations", async () => {

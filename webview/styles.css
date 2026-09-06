@@ -41,7 +41,6 @@ body {
 }
 
 #diff-panel {
-  white-space: pre-wrap;
   font-family: var(--vscode-editor-font-family, monospace);
   border-top: 1px solid var(--vscode-panel-border, #444);
   margin-top: 8px;
@@ -49,8 +48,50 @@ body {
 }
 
 #toolbar { flex-wrap: wrap; }
-#diff-panel { display: flex; gap: 16px; overflow-x: auto; }
-#diff-panel pre { flex: 1; min-width: 240px; }
+
+.diff {
+  display: grid;
+  grid-template-columns: auto 1fr auto 1fr;
+  column-gap: 8px;
+  row-gap: 0;
+  overflow-x: auto;
+}
+.diff-row {
+  display: contents;
+}
+.diff-row .ln {
+  text-align: right;
+  opacity: 0.6;
+  user-select: none;
+  padding: 0 4px;
+}
+.diff-row .side {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 0 4px;
+}
+.diff-row .side.ghost {
+  background: transparent;
+}
+.diff-row.op-added .side.right {
+  background: rgba(46, 160, 67, 0.2);
+}
+.diff-row.op-removed .side.left {
+  background: rgba(248, 81, 73, 0.2);
+}
+.diff-row.op-unchanged.muted {
+  opacity: 0.7;
+}
+.diff-collapsed {
+  grid-column: 1 / -1;
+  text-align: left;
+  background: transparent;
+  border: 1px dashed var(--vscode-panel-border, #444);
+  cursor: pointer;
+  opacity: 0.8;
+  padding: 4px 8px;
+  margin: 2px 0;
+}
 #source-actions { margin: 12px 0; }
 #draft-content { display: block; width: calc(100% - 16px); font-family: monospace; }
 #confirmation pre, #run-output { white-space: pre-wrap; overflow-wrap: anywhere; }

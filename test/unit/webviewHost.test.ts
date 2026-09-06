@@ -95,16 +95,19 @@ describe("ChangeMapSession navigation", () => {
     expect(openSource).toHaveBeenCalledWith(relationshipSource!.sourceId, "right", content.slice(4, 8));
   });
 
-  it("marks every extant line affected when a source has no comparison counterpart", async () => {
+  it("marks every extant line as an added op when a source has no comparison counterpart", async () => {
     const store = makeStore();
     const { session, posted } = makeDeps(store);
     const right: AnalysisGraph = { snapshot: rightSnapshot, nodes: [entity("f:a", "a")], edges: [], diagnostics: [] };
     session.loadComparison(undefined, right, []);
     await session.handleIntent({ type: "inspectSources", nodeId: "f:a" });
-    expect(posted.at(-1)).toMatchObject({
+    const message = posted.at(-1) as Extract<HostToWebviewMessage, { type: "sourcePair" }>;
+    expect(message).toMatchObject({
       type: "sourcePair",
-      sources: [expect.objectContaining({ side: "right", affectedLines: [1] })],
+      sources: [expect.objectContaining({ side: "right" })],
+      ops: [{ op: "added", rightLine: 1, text: "def f():" }],
     });
+    expect(message.sources[0]).not.toHaveProperty("affectedLines");
   });
 
   it("navigates to an exact, resolvable source and opens it", async () => {
