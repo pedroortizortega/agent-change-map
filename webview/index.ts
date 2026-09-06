@@ -61,7 +61,17 @@ function clearPendingAction(requestId: string): void {
 }
 /** Cleared before every new `sourcePair` render so expand state never leaks across nodes. */
 const expandedRuns = new Set<string>();
+/**
+ * Snapshot of `expandedRuns` taken on a `loadReason: "refresh"` `graphSummary`, restored
+ * into `expandedRuns` by the next `sourcePair` and then emptied, so a landing refresh keeps
+ * a diff panel's collapse state while a plain (non-refresh) second `sourcePair` for a fresh
+ * node click still resets to fully collapsed.
+ */
+const preservedRuns = new Set<string>();
 let lastOps: DiffOp[] = [];
+/** The node id most recently selected via {@link choosePair}, used to re-navigate after a refresh landing. */
+let selectedNodeId: string | undefined;
+let currentLoadReason: "initial" | "refresh" = "initial";
 
 function lineSpan(text: string): HTMLSpanElement {
   const span = document.createElement("span");
@@ -136,6 +146,7 @@ function renderDiffPanel(ops: DiffOp[], expanded: Set<string>): void {
   panel.append(table);
 }
 function choosePair(nodeId: string): void {
+  selectedNodeId = nodeId;
   selected = undefined;
   selectedPair = sourceIndex[nodeId];
   setEditingEnabled(false);
@@ -203,6 +214,11 @@ function initialize(): void {
     vscode.postMessage({ type: "requestRun", requestId, variants });
   });
   const cancel = button("cancel-run", "Cancel run", () => { if (activeRun) vscode.postMessage({ type: "cancelRun", requestId: activeRun }); });
+  const refresh = button("trigger-refresh", "Refresh", () => {
+    const requestId = `refresh-${++nextId}`;
+    vscode.postMessage({ type: "requestRefresh", requestId });
+  });
+  byId("toolbar").append(refresh);
   const confirmation = document.createElement("section"); confirmation.id = "confirmation"; confirmation.setAttribute("aria-live", "polite");
   const status = document.createElement("p"); status.id = "action-status"; status.setAttribute("role", "status");
   const output = document.createElement("pre"); output.id = "run-output"; output.setAttribute("aria-live", "polite");
@@ -233,8 +249,21 @@ function handleHostMessage(message: HostToWebviewMessage): void {
   initialize();
   switch (message.type) {
     case "graphSummary": {
-      graph = undefined; selected = undefined; selectedPair = undefined; setEditingEnabled(false);
-      byId("graph").textContent = "";
+      currentLoadReason = message.loadReason;
+      // The pre-refresh selection's SourceId.contentHash is stale against the new snapshot;
+      // navigation is refused until the user re-selects (or the "graph" case below
+      // re-issues inspectSources for the same node id once the refreshed graph renders).
+      selected = undefined; selectedPair = undefined; setEditingEnabled(false);
+      if (message.loadReason === "initial") {
+        graph = undefined;
+        selectedNodeId = undefined;
+        byId("graph").textContent = "";
+      } else {
+        // Captured before the coming `sourcePair` clears `expandedRuns`, so a landing
+        // refresh's diff panel re-render can restore the same collapse state.
+        preservedRuns.clear();
+        for (const key of expandedRuns) preservedRuns.add(key);
+      }
       byId("status").textContent = `${message.nodeCount} nodes / ${message.edgeCount} edges / ${message.diagnosticCount} diagnostics`;
       const scope = byId<HTMLSelectElement>("filter-scope"); scope.textContent = "";
       for (const section of [{ id: "", label: "All" }, ...(message.sections ?? [])]) {
@@ -265,11 +294,21 @@ function handleHostMessage(message: HostToWebviewMessage): void {
           vscode.postMessage({ type: "navigate", sourceId: edgeSource.sourceId, side: edgeSource.side });
         });
       }
+      // A landing refresh re-issues inspectSources for the previously selected node, if it
+      // still exists, so the diff panel re-renders without requiring a fresh click. Neither
+      // `selected` nor editing is re-enabled: the pre-refresh SourceId is stale against this
+      // new snapshot until the user explicitly re-navigates.
+      if (currentLoadReason === "refresh" && selectedNodeId && sourceIndex[selectedNodeId]) {
+        selectedPair = sourceIndex[selectedNodeId];
+        vscode.postMessage({ type: "inspectSources", nodeId: selectedNodeId });
+      }
       break;
     }
     case "sourcePair": {
       if (!selectedPair || ![selectedPair.left, selectedPair.right].some(id => id && message.sources.some(source => sameSource(id, source.sourceId)))) break;
       expandedRuns.clear();
+      for (const key of preservedRuns) expandedRuns.add(key);
+      preservedRuns.clear();
       lastOps = message.ops;
       renderDiffPanel(lastOps, expandedRuns);
       break;
@@ -297,6 +336,7 @@ function handleHostMessage(message: HostToWebviewMessage): void {
     }).join("\n"))); activeRun = undefined; clearPendingAction(message.requestId); byId("confirmation").textContent = ""; updateEffectActionAvailability(); } break;
     case "runFailed": if (message.requestId === activeRun) { byId("run-output").append(document.createTextNode(`Run failed: ${message.reason}`)); activeRun = undefined; clearPendingAction(message.requestId); byId("confirmation").textContent = ""; updateEffectActionAvailability(); } break;
     case "error": byId("action-status").textContent = `Error: ${message.message}`; break;
+    case "refreshResult": byId("action-status").textContent = message.ok ? "Refreshed." : `Refresh refused: ${message.reason}`; break;
   }
 }
 window.addEventListener("message", (event: MessageEvent<HostToWebviewMessage>) => handleHostMessage(event.data));

@@ -179,6 +179,60 @@ it("collapses long unchanged runs, toggles them open/closed, and resets on a new
   expect(collapsedButtons().some(button => button.getAttribute("data-run-key") === runKey)).toBe(true);
 });
 
+it("re-issues inspectSources for the previously selected node after a refresh landing, and preserves its expanded runs", async () => {
+  const bigSnapshotRight = { ...snapshot, contentDigest: "sha256:refresh-right" };
+  const bigSnapshotLeft = { ...leftSnapshot, contentDigest: "sha256:refresh-left" };
+  const lines = Array.from({ length: 20 }, (_, i) => `line${i + 1}`);
+  const leftLines = [...lines]; leftLines[9] = "left-line10";
+  const rightLines = [...lines]; rightLines[9] = "rght-line10";
+  const bigLeftContent = `${leftLines.join("\n")}\n`;
+  const bigRightContent = `${rightLines.join("\n")}\n`;
+  const bigStore = new SnapshotStore();
+  bigStore.store({ snapshot: bigSnapshotRight, files: [{ path: "big.py", content: bigRightContent, provenance: "tracked" }] });
+  bigStore.store({ snapshot: bigSnapshotLeft, files: [{ path: "big.py", content: bigLeftContent, provenance: "tracked" }] });
+  const bigNode = { id: "module:big", kind: "module" as const, qualifiedName: "big", span: { path: "big.py", startByte: 0, endByte: bigRightContent.length, startLine: 1, startColumn: 0, endLine: 21, endColumn: 0 } };
+  const bigGraph: AnalysisGraph = { snapshot: bigSnapshotRight, nodes: [bigNode], edges: [], diagnostics: [] };
+  session = new ChangeMapSession({ repoRoot: "/repo", store: bigStore, draftStore: new DraftStore(), openSource: vi.fn(), performWrite: vi.fn(), runSnippet: vi.fn(), post: message => dom.window.dispatchEvent(new dom.window.MessageEvent("message", { data: message })) });
+  session.loadComparison({ ...bigGraph, snapshot: bigSnapshotLeft }, bigGraph, []);
+
+  click('[data-node-id="module:big"]');
+  await vi.waitFor(() => expect(dom.window.document.querySelectorAll("#diff-panel .diff-row").length).toBeGreaterThan(0));
+  const collapsedButtons = () => Array.from(dom.window.document.querySelectorAll<HTMLButtonElement>(".diff-collapsed"));
+  expect(collapsedButtons().length).toBeGreaterThan(0);
+  const runKey = collapsedButtons()[0]!.getAttribute("data-run-key")!;
+  click(`[data-run-key="${runKey}"]`);
+  expect(dom.window.document.querySelector(`[data-run-key="${runKey}"]`)).toBeNull();
+  const inspectCountBeforeRefresh = intents.filter(m => m.type === "inspectSources").length;
+  expect(inspectCountBeforeRefresh).toBe(1);
+
+  // A landing refresh for the same selection/content: a fresh graphSummary+graph arrives
+  // with loadReason "refresh", without any node click in between. The webview must
+  // automatically re-issue "inspectSources" for the previously selected node so the diff
+  // panel re-renders, and the run that was expanded before the refresh must stay expanded.
+  session.loadComparison({ ...bigGraph, snapshot: bigSnapshotLeft }, bigGraph, [], { loadReason: "refresh" });
+  await vi.waitFor(() => expect(intents.filter(m => m.type === "inspectSources").length).toBe(inspectCountBeforeRefresh + 1));
+  await vi.waitFor(() => expect(dom.window.document.querySelectorAll("#diff-panel .diff-row").length).toBeGreaterThan(0));
+  expect(dom.window.document.querySelector(`[data-run-key="${runKey}"]`)).toBeNull();
+  expect(dom.window.document.querySelectorAll("#diff-panel .diff-row.op-unchanged").length).toBeGreaterThan(6);
+});
+
+it("preserves unsaved draft text across a refresh landing while clearing selection/editing", async () => {
+  click('[data-node-id="module:m"]');
+  click('#source-right');
+  await vi.waitFor(() => expect(element<HTMLTextAreaElement>('#draft-content').value).toBe(content));
+  const draft = element<HTMLTextAreaElement>('#draft-content');
+  draft.value = "print('unsaved edit')\n";
+  expect(element<HTMLButtonElement>('#save-draft').disabled).toBe(false);
+
+  session.loadComparison({ ...graph, snapshot: leftSnapshot }, graph, [], { loadReason: "refresh" });
+  await vi.waitFor(() => expect(element<HTMLButtonElement>('#save-draft').disabled).toBe(true));
+  expect(element<HTMLTextAreaElement>('#draft-content').value).toBe("print('unsaved edit')\n");
+  expect(element<HTMLButtonElement>('#write-snippet').disabled).toBe(true);
+
+  click('#save-draft');
+  expect(intents.some(m => m.type === "saveDraft")).toBe(false);
+});
+
 it("shows terminal run kinds with exit codes and timeout durations", async () => {
   run.mockImplementation(async source => {
     if (source.variant === "original") return { variant: source.variant, kind: "success", exitCode: 0, stdout: "", stderr: "" };

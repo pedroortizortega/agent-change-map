@@ -94,6 +94,15 @@ export interface SessionDeps {
   openSource: (sourceId: SourceId, side: "left" | "right", content: string) => void | Promise<void>;
   performWrite: (request: DirectWriteRequest) => Promise<WriteReceipt>;
   runSnippet: (source: SnippetSource, options?: RunOptions) => Promise<RunResult>;
+  /**
+   * Re-runs capture/diff/analysis for the panel's original selection and re-loads the
+   * result. Absent when the session is constructed without refresh support (e.g. a stale
+   * test double); the `requestRefresh` intent then always refuses rather than fabricating
+   * a success.
+   */
+  requestRefresh?: () => Promise<void>;
+  /** Invoked whenever the session transitions from busy to idle, so a queued auto-refresh can re-fire. */
+  onIdle?: () => void;
 }
 
 /**
@@ -115,15 +124,29 @@ export class ChangeMapSession {
   private readonly pendingRunConfirmations = new Map<string, (confirmed: boolean) => void>();
   private readonly activeRuns = new Map<string, AbortController>();
 
+  private untrackedPaths: string[] = [];
+
   constructor(private readonly deps: SessionDeps) {}
 
+  /** True while a write confirmation, a run confirmation, or an active run is outstanding. */
+  isBusy(): boolean {
+    return this.pendingWriteConfirmations.size > 0 || this.pendingRunConfirmations.size > 0 || this.activeRuns.size > 0;
+  }
+
   /** Computes the comparison summary/graph and posts it, gating the full render on explicit oversized consent. */
-  loadComparison(left: AnalysisGraph | undefined, right: AnalysisGraph | undefined, diff: CorrelatedDiffEntry[]): void {
+  loadComparison(
+    left: AnalysisGraph | undefined,
+    right: AnalysisGraph | undefined,
+    diff: CorrelatedDiffEntry[],
+    options: { untrackedPaths?: string[]; loadReason?: "initial" | "refresh" } = {},
+  ): void {
+    const loadReason = options.loadReason ?? "initial";
     this.activeSources = {};
     this.selectedSource = undefined;
     this.left = left;
     this.right = right;
     this.diff = diff;
+    this.untrackedPaths = options.untrackedPaths ?? [];
     const display = mergeGraphsForDisplay(left, right);
     this.sourceIndex = buildSourceIndex(this.deps.store, left, right);
     const oversized = isOversized(display);
@@ -134,6 +157,7 @@ export class ChangeMapSession {
       diagnosticCount: display.diagnostics.length,
       oversized,
       sections: display.nodes.map(node => ({ id: node.id, label: node.qualifiedName })),
+      loadReason,
     });
     if (!oversized) this.sendGraph();
   }
@@ -145,7 +169,7 @@ export class ChangeMapSession {
       this.deps.post({ type: "error", message: "Filtered map is still oversized. Choose a smaller section or explicitly render the full map." });
       return;
     }
-    this.deps.post({ type: "graph", graph: display, diff: this.diff, sourceIndex: this.sourceIndex, edgeSources: buildEdgeSourceIndex(this.deps.store, this.left, this.right, display) });
+    this.deps.post({ type: "graph", graph: display, diff: this.diff, sourceIndex: this.sourceIndex, edgeSources: buildEdgeSourceIndex(this.deps.store, this.left, this.right, display), untrackedPaths: this.untrackedPaths });
   }
 
   /** Records which snippet source backs each variant for the currently selected comparison item, ahead of any run request. */
@@ -213,6 +237,7 @@ export class ChangeMapSession {
       case "confirmDirectWrite":
         this.pendingWriteConfirmations.get(message.requestId)?.(message.confirmed);
         this.pendingWriteConfirmations.delete(message.requestId);
+        this.notifyIfIdle();
         return;
       case "requestRun":
         this.handleRequestRun(message.requestId, message.variants);
@@ -224,7 +249,45 @@ export class ChangeMapSession {
       case "cancelRun":
         this.activeRuns.get(message.requestId)?.abort();
         return;
+      case "requestRefresh":
+        await this.handleRequestRefresh(message.requestId);
+        return;
     }
+  }
+
+  /**
+   * Manual refresh is refused (never queued) while busy, naming the pending action, because
+   * an explicit user action deserves immediate feedback rather than silent latency (Decision
+   * 7). Absent `deps.requestRefresh`, the intent always refuses rather than fabricating a
+   * success.
+   */
+  private async handleRequestRefresh(requestId: string): Promise<void> {
+    if (!this.deps.requestRefresh) {
+      this.deps.post({ type: "refreshResult", requestId, ok: false, reason: "Refresh is not available for this panel." });
+      return;
+    }
+    if (this.isBusy()) {
+      this.deps.post({ type: "refreshResult", requestId, ok: false, reason: this.describeBusy() });
+      return;
+    }
+    try {
+      await this.deps.requestRefresh();
+      this.deps.post({ type: "refreshResult", requestId, ok: true });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.deps.post({ type: "refreshResult", requestId, ok: false, reason });
+    }
+  }
+
+  private describeBusy(): string {
+    if (this.pendingWriteConfirmations.size > 0) return "A write confirmation is pending.";
+    if (this.pendingRunConfirmations.size > 0) return "A run confirmation is pending.";
+    return "A Docker run is active.";
+  }
+
+  /** Fires `deps.onIdle` exactly when the session transitions from busy to idle. */
+  private notifyIfIdle(): void {
+    if (!this.isBusy()) this.deps.onIdle?.();
   }
 
   private async handleNavigate(sourceId: SourceId, side: "left" | "right"): Promise<void> {
@@ -286,6 +349,7 @@ export class ChangeMapSession {
             ? error.message
             : String(error);
       this.deps.post({ type: "directWriteResult", requestId, ok: false, reason });
+      this.notifyIfIdle();
     }
   }
 
@@ -322,6 +386,7 @@ export class ChangeMapSession {
     void confirmed.then(async (isConfirmed) => {
       if (!isConfirmed) {
         this.deps.post({ type: "error", message: `Run declined for request ${requestId}` });
+        this.notifyIfIdle();
         return;
       }
       await this.executeRun(requestId, variants, sources);
@@ -358,6 +423,7 @@ export class ChangeMapSession {
       this.deps.post({ type: "runFailed", requestId, reason: error instanceof Error ? `${error.constructor.name}: ${error.message}` : String(error) });
     } finally {
       this.activeRuns.delete(requestId);
+      this.notifyIfIdle();
     }
   }
 }

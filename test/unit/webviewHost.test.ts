@@ -22,7 +22,7 @@ function makeStore(): SnapshotStore {
   return store;
 }
 
-function makeDeps(store: SnapshotStore) {
+function makeDeps(store: SnapshotStore, overrides: { requestRefresh?: () => Promise<void>; onIdle?: () => void } = {}) {
   const posted: HostToWebviewMessage[] = [];
   const openSource = vi.fn();
   const performWrite = vi.fn();
@@ -35,6 +35,7 @@ function makeDeps(store: SnapshotStore) {
     openSource,
     performWrite,
     runSnippet,
+    ...overrides,
   });
   return { session, posted, openSource, performWrite, runSnippet };
 }
@@ -404,4 +405,102 @@ it("freezes later variants even when selection changes while an earlier variant 
   release();
   await vi.waitFor(() => expect(posted.at(-1)?.type).toBe("runResult"));
   expect(runSnippet.mock.calls[1][0].content).toBe("approved");
+});
+
+describe("ChangeMapSession refresh", () => {
+  it("refuses requestRefresh with a not-ok result when deps.requestRefresh is absent", async () => {
+    const { session, posted } = makeDeps(makeStore());
+    await session.handleIntent({ type: "requestRefresh", requestId: "ref1" });
+    expect(posted).toEqual([{ type: "refreshResult", requestId: "ref1", ok: false, reason: expect.any(String) }]);
+  });
+
+  it("invokes deps.requestRefresh and reports success when idle", async () => {
+    const requestRefresh = vi.fn().mockResolvedValue(undefined);
+    const { session, posted } = makeDeps(makeStore(), { requestRefresh });
+    await session.handleIntent({ type: "requestRefresh", requestId: "ref2" });
+    expect(requestRefresh).toHaveBeenCalledTimes(1);
+    expect(posted).toEqual([{ type: "refreshResult", requestId: "ref2", ok: true }]);
+  });
+
+  it("isBusy() is true with a pending write confirmation, a pending run confirmation, or an active run; false otherwise", async () => {
+    const { session, performWrite } = makeDeps(makeStore());
+    expect(session.isBusy()).toBe(false);
+    performWrite.mockImplementation(async request => {
+      const confirmed = await request.confirm({ path: "/repo/m.py", previousContent: "a", nextContent: "b", isDestructive: true });
+      if (!confirmed) throw new WriteConfirmationDeclinedError("declined");
+      return { path: "/repo/m.py", previousContent: "a", newContent: "b", backupPath: "/repo/m.py.bak-1" };
+    });
+    const writePending = session.handleIntent({ type: "requestDirectWrite", requestId: "w1", repoRoot: "/repo", targetPath: "m.py", baseHash: "sha256:x", replacement: "b" });
+    await vi.waitFor(() => expect(session.isBusy()).toBe(true));
+    await session.handleIntent({ type: "confirmDirectWrite", requestId: "w1", confirmed: false });
+    await writePending;
+    expect(session.isBusy()).toBe(false);
+  });
+
+  it("manual refresh while busy refuses with refreshResult{ok:false} naming the pending action; the pending confirmation still resolves normally afterwards", async () => {
+    const requestRefresh = vi.fn().mockResolvedValue(undefined);
+    const { session, posted, performWrite } = makeDeps(makeStore(), { requestRefresh });
+    performWrite.mockImplementation(async request => {
+      const confirmPromise = request.confirm({ path: "/repo/m.py", previousContent: "a", nextContent: "b", isDestructive: true });
+      return confirmPromise.then((confirmed: boolean) => {
+        if (!confirmed) throw new WriteConfirmationDeclinedError("declined");
+        return { path: "/repo/m.py", previousContent: "a", newContent: "b", backupPath: "/repo/m.py.bak-1" };
+      });
+    });
+    const writePending = session.handleIntent({ type: "requestDirectWrite", requestId: "w2", repoRoot: "/repo", targetPath: "m.py", baseHash: "sha256:x", replacement: "b" });
+    await vi.waitFor(() => expect(posted.some(m => m.type === "directWritePreview")).toBe(true));
+    expect(session.isBusy()).toBe(true);
+
+    await session.handleIntent({ type: "requestRefresh", requestId: "ref3" });
+    expect(requestRefresh).not.toHaveBeenCalled();
+    expect(posted.at(-1)).toMatchObject({ type: "refreshResult", requestId: "ref3", ok: false });
+
+    await session.handleIntent({ type: "confirmDirectWrite", requestId: "w2", confirmed: true });
+    await writePending;
+    expect(posted.at(-1)).toEqual({ type: "directWriteResult", requestId: "w2", ok: true, path: "/repo/m.py" });
+  });
+
+  it("invokes onIdle after a declined direct write confirmation", async () => {
+    const onIdle = vi.fn();
+    const { session, performWrite } = makeDeps(makeStore(), { onIdle });
+    performWrite.mockImplementation(async request => {
+      const confirmed = await request.confirm({ path: "/repo/m.py", previousContent: "a", nextContent: "b", isDestructive: true });
+      if (!confirmed) throw new WriteConfirmationDeclinedError("declined");
+      throw new Error("should not reach write");
+    });
+    const pending = session.handleIntent({ type: "requestDirectWrite", requestId: "w3", repoRoot: "/repo", targetPath: "m.py", baseHash: "sha256:x", replacement: "b" });
+    await vi.waitFor(() => expect(session.isBusy()).toBe(true));
+    await session.handleIntent({ type: "confirmDirectWrite", requestId: "w3", confirmed: false });
+    await pending;
+    expect(onIdle).toHaveBeenCalled();
+    expect(session.isBusy()).toBe(false);
+  });
+
+  it("invokes onIdle exactly once from handleRequestDirectWrite's own catch when performWrite throws before ever requesting confirmation", async () => {
+    const onIdle = vi.fn();
+    const { session, posted, performWrite } = makeDeps(makeStore(), { onIdle });
+    performWrite.mockRejectedValue(new Error("base hash mismatch"));
+    await session.handleIntent({ type: "requestDirectWrite", requestId: "w4", repoRoot: "/repo", targetPath: "m.py", baseHash: "sha256:x", replacement: "b" });
+    expect(posted.at(-1)).toMatchObject({ type: "directWriteResult", requestId: "w4", ok: false });
+    expect(onIdle).toHaveBeenCalledTimes(1);
+  });
+
+  it("invokes onIdle exactly once after a declined run", async () => {
+    const onIdle = vi.fn();
+    const { session } = makeDeps(makeStore(), { onIdle });
+    session.setActiveSources({ current: { variant: "current", path: "m.py", content: "print(1)" } });
+    await session.handleIntent({ type: "requestRun", requestId: "declineRun", variants: ["current"] });
+    await session.handleIntent({ type: "confirmRun", requestId: "declineRun", confirmed: false });
+    expect(onIdle).toHaveBeenCalledTimes(1);
+  });
+
+  it("invokes onIdle exactly once after executeRun's finally block", async () => {
+    const onIdle = vi.fn();
+    const { session, runSnippet } = makeDeps(makeStore(), { onIdle });
+    session.setActiveSources({ current: { variant: "current", path: "m.py", content: "print(1)" } });
+    runSnippet.mockResolvedValue({ variant: "current", kind: "success", exitCode: 0, stdout: "", stderr: "" });
+    await session.handleIntent({ type: "requestRun", requestId: "execRun", variants: ["current"] });
+    await session.handleIntent({ type: "confirmRun", requestId: "execRun", confirmed: true });
+    await vi.waitFor(() => expect(onIdle).toHaveBeenCalledTimes(1));
+  });
 });

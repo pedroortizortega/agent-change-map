@@ -2,15 +2,14 @@ import * as vscode from "vscode";
 import { randomBytes } from "node:crypto";
 import { resolve } from "node:path";
 import { buildCspMetaTag } from "../webview/graphView.js";
-import { analyzePython } from "./analysis/pythonAnalyzer.js";
-import { captureGitState, resolveRepoRoot, type GitSelection } from "./git/gitService.js";
-import { SnapshotStore, diffSnapshots } from "./snapshots/snapshotStore.js";
-import { correlateDiff } from "./navigation/sourceProvider.js";
+import { resolveRepoRoot, type GitSelection } from "./git/gitService.js";
+import { SnapshotStore } from "./snapshots/snapshotStore.js";
 import { DraftStore } from "./editing/draftStore.js";
 import { performGuardedWrite } from "./editing/writeGuard.js";
 import { runSnippet } from "./execution/dockerRunner.js";
 import { ChangeMapSession } from "./webviewHost.js";
-import type { AnalysisGraph, SourceId } from "./protocol.js";
+import { ComparisonController } from "./comparisonController.js";
+import type { SourceId } from "./protocol.js";
 
 const VIRTUAL_SCHEME = "agent-change-map";
 
@@ -99,17 +98,6 @@ async function pickComparisonReferences(): Promise<{ left: GitSelection; right: 
   return { left: parseGitSelection(leftInput), right };
 }
 
-async function buildGraphForSelection(
-  extensionRoot: string,
-  store: SnapshotStore,
-  repoRoot: string,
-  selection: GitSelection,
-): Promise<AnalysisGraph> {
-  const state = await captureGitState(repoRoot, selection);
-  store.store(state);
-  return analyzePython({ type: "analyze", snapshot: state.snapshot, files: state.files.length > 0 ? state.files : [{ path: "__empty__.py", content: "" }] }, extensionRoot);
-}
-
 /**
  * Test-only surface returned from {@link activate} exclusively when
  * `AGENT_CHANGE_MAP_E2E=1` is set in the Extension Development Host's environment. It
@@ -162,16 +150,6 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi | undef
       const store = new SnapshotStore();
       const draftStore = new DraftStore();
 
-      const [leftGraph, rightGraph] = await Promise.all([
-        buildGraphForSelection(context.extensionPath, store, repoRoot, references.left),
-        buildGraphForSelection(context.extensionPath, store, repoRoot, references.right),
-      ]);
-      const leftState = store.get(leftGraph.snapshot);
-      const rightState = store.get(rightGraph.snapshot);
-      if (!leftState || !rightState) throw new Error("Captured comparison state was unexpectedly not stored.");
-      const diff = diffSnapshots(leftState, rightState);
-      const correlated = correlateDiff(diff, leftGraph, rightGraph);
-
       const panel = vscode.window.createWebviewPanel("agentChangeMap", "Agent Change Map", vscode.ViewColumn.One, {
         enableScripts: true,
         localResourceRoots: [vscode.Uri.file(resolve(context.extensionPath, "out", "webview"))],
@@ -187,6 +165,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi | undef
       const nonce = randomBytes(16).toString("hex");
       panel.webview.html = buildWebviewHtml(nonce, panel.webview.cspSource, scriptUri, styleUri);
 
+      const controllerRef: { current?: ComparisonController } = {};
       const session = new ChangeMapSession({
         repoRoot,
         store,
@@ -212,13 +191,24 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi | undef
         },
         performWrite: performGuardedWrite,
         runSnippet,
+        requestRefresh: () => controllerRef.current!.requestRefresh(),
       });
 
       panel.webview.onDidReceiveMessage(async (raw: unknown) => {
         await session.handleIntent(raw);
       });
 
-      session.loadComparison(leftGraph, rightGraph, correlated);
+      const controller = new ComparisonController({
+        extensionRoot: context.extensionPath,
+        repoRoot,
+        references,
+        store,
+        session,
+      });
+      controllerRef.current = controller;
+      panel.onDidDispose(() => controller.dispose());
+
+      await controller.capture();
       lastSession = session;
       lastPanel = panel;
       lastStore = store;

@@ -70,48 +70,57 @@ Each slice is independently revertible per the design's Migration/Rollout sectio
 - [x] 4.7 GREEN edit `src/extension.ts`: delete `buildGraphForSelection`'s late `.endsWith(".py")` filter. Note precisely: `buildGraphForSelection` keeps working exactly as today without its own filter, because `captureGitState` now returns pre-filtered files via the matcher — this leaves no temporarily-broken intermediate state even though `buildGraphForSelection`'s extraction into `ComparisonController` is deferred to PR 2.
 - [x] 4.8 Run `npm run lint && npm run typecheck && npm run test:unit -- sourceFileMatcher gitState && npm run test:integration -- gitState && npm run test:e2e` and confirm all green before opening PR 1 against the tracker branch. All green — see Work Unit Evidence below.
 
-## Phase 5: Slice B — `ComparisonController` Scaffolding (PR 2, base: PR 1 branch)
+> **Split note**: the original PR 2 apply pass (Phases 5-9 together) landed at ~789 authored
+> lines, ~2x the design's ~380-line estimate — well past the 400-line review budget. Rather
+> than accept a `size:exception`, it was split into two sub-PRs after the fact: **PR 2a**
+> (manual refresh + `SnapshotStore` LRU — Phases 5, 6, 8, 9, and 5.2/6.5's `requestRefresh`/
+> `refreshResult`/`loadReason`/`untrackedPaths`/`isBusy`/`onIdle` plumbing, but not
+> `refreshDeferred` or any watcher code) and **PR 2b** (auto-refresh — all of Phase 7, plus
+> `refreshDeferred` and the `onIdle`-re-arms-a-queued-refresh behavior). PR 2b targets PR 2a's
+> branch. Phase 7's tasks below remain unchecked until PR 2b's own apply pass.
 
-- [ ] 5.1 RED `test/unit/comparisonController.test.ts` — Case 16: `requestRefresh` schema accepts a valid message and rejects a missing `requestId`.
-- [ ] 5.2 GREEN edit `src/webviewProtocol.ts`: add `{ type: "requestRefresh", requestId }` (webview→host), `{ type: "refreshResult", requestId, ok: true }` / `{ ok: false, reason }` (host→webview), `{ type: "refreshDeferred", reason }`, `loadReason: "initial" | "refresh"` on `graphSummary`, `untrackedPaths: string[]` on `graph`.
-- [ ] 5.3 GREEN create `src/comparisonController.ts`: owns `references`/`repoRoot`/`extensionRoot`/`store`/`session`/`matcher`, exposes `capture()` moved from `extension.ts`'s `buildGraphForSelection` closure (left/right builds, `store.get` x2, `diffSnapshots`, `correlateDiff`, `session.loadComparison(...)` with `untrackedPaths`/`loadReason`).
-- [ ] 5.4 GREEN edit `src/extension.ts`: command closure constructs the `ComparisonController` instead of owning `references`/`repoRoot`/`extensionRoot`/`store`/`session` itself directly; watcher/controller disposal wired into `panel.onDidDispose`.
-- [ ] 5.5 REFACTOR: confirm the `__empty__.py` placeholder for an empty file set is retained in the moved `buildGraphForSelection`.
+## Phase 5: Slice B — `ComparisonController` Scaffolding (PR 2a, base: PR 1 branch)
 
-## Phase 6: Slice B — Refresh Intent and Busy Guard (PR 2)
+- [x] 5.1 RED `test/unit/comparisonController.test.ts` — Case 16: `requestRefresh` schema accepts a valid message and rejects a missing `requestId`.
+- [x] 5.2 GREEN edit `src/webviewProtocol.ts`: add `{ type: "requestRefresh", requestId }` (webview→host), `{ type: "refreshResult", requestId, ok: true }` / `{ ok: false, reason }` (host→webview), `{ type: "refreshDeferred", reason }`, `loadReason: "initial" | "refresh"` on `graphSummary`, `untrackedPaths: string[]` on `graph`.
+- [x] 5.3 GREEN create `src/comparisonController.ts`: owns `references`/`repoRoot`/`extensionRoot`/`store`/`session`/`matcher`, exposes `capture()` moved from `extension.ts`'s `buildGraphForSelection` closure (left/right builds, `store.get` x2, `diffSnapshots`, `correlateDiff`, `session.loadComparison(...)` with `untrackedPaths`/`loadReason`).
+- [x] 5.4 GREEN edit `src/extension.ts`: command closure constructs the `ComparisonController` instead of owning `references`/`repoRoot`/`extensionRoot`/`store`/`session` itself directly; watcher/controller disposal wired into `panel.onDidDispose`.
+- [x] 5.5 REFACTOR: confirm the `__empty__.py` placeholder for an empty file set is retained in the moved `buildGraphForSelection`.
 
-- [ ] 6.1 RED `test/unit/webviewHost.test.ts` — Case 17: `requestRefresh` with no `deps.requestRefresh` posts `refreshResult{ok:false}` (never a fabricated success).
-- [ ] 6.2 RED `test/unit/comparisonController.test.ts` — Case 18: `requestRefresh` re-runs capture and re-posts `graphSummary` + `graph`; a file created between the two captures appears in the second graph.
-- [ ] 6.3 RED `test/unit/webviewHost.test.ts` — Case 19: `isBusy()` is true with a pending write confirmation, a pending run confirmation, and an active run; false otherwise.
-- [ ] 6.4 RED `test/unit/webviewHost.test.ts` — Case 20: manual refresh while busy → `refreshResult{ok:false}` naming the pending action, and the pending confirmation still resolves normally afterwards.
-- [ ] 6.5 GREEN edit `src/webviewHost.ts`: `SessionDeps` gains optional `requestRefresh?: () => Promise<void>` and `onIdle?: () => void`; `ChangeMapSession.isBusy()` (new, public) = `pendingWriteConfirmations.size > 0 || pendingRunConfirmations.size > 0 || activeRuns.size > 0`; wire `onIdle()` at exactly the four sites the design names: `confirmDirectWrite`, `handleRequestDirectWrite` catch, declined run, `executeRun`'s `finally`; `"requestRefresh"` intent handler refuses with `refreshResult{ok:false}` when busy (manual) or when `deps.requestRefresh` absent.
-- [ ] 6.6 REFACTOR: confirm neither manual nor auto refresh ever resolves, cancels, or drops a pending confirmation (Decision 7).
+## Phase 6: Slice B — Refresh Intent and Busy Guard (PR 2a)
 
-## Phase 7: Slice B — Auto-Refresh Watcher (PR 2)
+- [x] 6.1 RED `test/unit/webviewHost.test.ts` — Case 17: `requestRefresh` with no `deps.requestRefresh` posts `refreshResult{ok:false}` (never a fabricated success).
+- [x] 6.2 RED `test/unit/comparisonController.test.ts` — Case 18: `requestRefresh` re-runs capture and re-posts `graphSummary` + `graph`; a file created between the two captures appears in the second graph.
+- [x] 6.3 RED `test/unit/webviewHost.test.ts` — Case 19: `isBusy()` is true with a pending write confirmation, a pending run confirmation, and an active run; false otherwise.
+- [x] 6.4 RED `test/unit/webviewHost.test.ts` — Case 20: manual refresh while busy → `refreshResult{ok:false}` naming the pending action, and the pending confirmation still resolves normally afterwards.
+- [x] 6.5 GREEN edit `src/webviewHost.ts`: `SessionDeps` gains optional `requestRefresh?: () => Promise<void>` and `onIdle?: () => void`; `ChangeMapSession.isBusy()` (new, public) = `pendingWriteConfirmations.size > 0 || pendingRunConfirmations.size > 0 || activeRuns.size > 0`; wire `onIdle()` at exactly the four sites the design names: `confirmDirectWrite`, `handleRequestDirectWrite` catch, declined run, `executeRun`'s `finally`; `"requestRefresh"` intent handler refuses with `refreshResult{ok:false}` when busy (manual) or when `deps.requestRefresh` absent.
+- [x] 6.6 REFACTOR: confirm neither manual nor auto refresh ever resolves, cancels, or drops a pending confirmation (Decision 7).
+
+## Phase 7: Slice B — Auto-Refresh Watcher (PR 2b, base: PR 2a branch)
 
 - [ ] 7.1 RED `test/unit/comparisonController.test.ts` — Case 21: auto-refresh while busy → `refreshDeferred`, no recapture; on `onIdle` the queued refresh fires exactly once.
 - [ ] 7.2 RED `test/unit/comparisonController.test.ts` — Case 22: auto-refresh debounce coalesces N watcher events into one capture.
 - [ ] 7.3 RED `test/unit/comparisonController.test.ts` — Case 23: watcher events for a non-matching path do not schedule a refresh.
 - [ ] 7.4 RED `test/unit/comparisonController.test.ts` — Case 24: `agentChangeMap.autoRefresh` defaults false → no watcher created.
 - [ ] 7.5 GREEN edit `package.json`: `contributes.configuration` adds `agentChangeMap.autoRefresh` (boolean, default `false`).
-- [ ] 7.6 GREEN implement `scheduleAutoRefresh()` in `src/comparisonController.ts`: 750ms debounce, then `isBusy()` check — busy sets `queued = true` and posts `refreshDeferred` once and returns; `onIdle` re-arms the same debounced timer when `queued`. Watcher created only when right selection is `kind: "worktree"` AND `agentChangeMap.autoRefresh` is true, filtered by `matcher.matches(uri)`; recreated/disposed from `workspace.onDidChangeConfiguration`; disposed on `panel.onDidDispose`.
+- [ ] 7.6 GREEN implement the watcher/debounce/queue methods in `src/comparisonController.ts` (`reconcileWatcher`/`onWatchedPathChanged`/`armDebounce`/`fireAutoRefresh`/`onIdle`, `FileWatcherHandle`, and the `refreshDeferred` protocol message + `ChangeMapSession.notifyRefreshDeferred`): 750ms debounce, then `isBusy()` check — busy sets `queued = true` and posts `refreshDeferred` once and returns; `onIdle` re-arms the same debounced timer when `queued`. Watcher created only when right selection is `kind: "worktree"` AND `agentChangeMap.autoRefresh` is true, filtered by `matcher.matches(uri)`; recreated/disposed from `workspace.onDidChangeConfiguration`; disposed on `panel.onDidDispose`. Wire `src/extension.ts`'s real `vscode.FileSystemWatcher` bridge (`createWorktreeWatcher`, `isAutoRefreshEnabled`) and the `onIdle: () => controllerRef.current!.onIdle()` `SessionDeps` field back in. This exact implementation already exists (written once in the original combined PR 2 apply pass) — restore it rather than redesigning it.
 - [ ] 7.7 REFACTOR: confirm the watcher uses `RelativePattern(worktree, "**/*")` per the design's data-flow diagram.
 
-## Phase 8: Slice B — `SnapshotStore` LRU (PR 2)
+## Phase 8: Slice B — `SnapshotStore` LRU (PR 2a)
 
-- [ ] 8.1 RED `test/unit/snapshotStore.test.ts` (or extend existing store test) — Case 25: `SnapshotStore` evicts the least-recently-used entry past `MAX_SNAPSHOTS = 8`; `get()` refreshes recency so the displayed pair is never evicted; re-storing identical content (same `snapshotKey`) adds no entry.
-- [ ] 8.2 GREEN edit `src/snapshots/snapshotStore.ts`: `MAX_SNAPSHOTS = 8`; `store(state)` deletes-then-re-sets the key (moves to most-recent), evicts from `Map` insertion-order front while `size > MAX_SNAPSHOTS`; `get(id)` deletes-and-re-sets on hit; add `size` getter (test surface).
-- [ ] 8.3 REFACTOR: confirm `Map` iteration-order-as-recency assumption is documented in a code comment next to the eviction loop.
+- [x] 8.1 RED `test/unit/snapshotStore.test.ts` (or extend existing store test) — Case 25: `SnapshotStore` evicts the least-recently-used entry past `MAX_SNAPSHOTS = 8`; `get()` refreshes recency so the displayed pair is never evicted; re-storing identical content (same `snapshotKey`) adds no entry.
+- [x] 8.2 GREEN edit `src/snapshots/snapshotStore.ts`: `MAX_SNAPSHOTS = 8`; `store(state)` deletes-then-re-sets the key (moves to most-recent), evicts from `Map` insertion-order front while `size > MAX_SNAPSHOTS`; `get(id)` deletes-and-re-sets on hit; add `size` getter (test surface).
+- [x] 8.3 REFACTOR: confirm `Map` iteration-order-as-recency assumption is documented in a code comment next to the eviction loop.
 
-## Phase 9: Slice B — Webview State Preservation (PR 2)
+## Phase 9: Slice B — Webview State Preservation (PR 2a)
 
-- [ ] 9.1 RED `test/unit/webviewDom.test.ts` — Case 26: `expandedRuns` survive a `loadReason: "refresh"` round trip; a plain second `sourcePair` (no refresh) still collapses — explicitly keep the archived "second message resets to collapsed" test green untouched.
-- [ ] 9.2 RED `test/unit/webviewDom.test.ts` — Case 27: `#draft-content` text survives a refresh landing; `selected`/`editingEnabled` are cleared and a stale `saveDraft` is refused rather than silently applied.
-- [ ] 9.3 GREEN edit `webview/index.ts`: add `preservedRuns: Set<string>` — on `graphSummary` with `loadReason === "refresh"`, copy current `expandedRuns` into `preservedRuns`; `sourcePair` case keeps its existing `expandedRuns.clear()` then re-adds from `preservedRuns`, emptying it afterward. Guard the existing `graphSummary` reset block with `if (loadReason === "initial")` so `#draft-content` is untouched on refresh. Add `selectedNodeId`: after refreshed `graph` renders, if the id still exists, rebind `selectedPair` and re-issue `inspectSources`, but leave `selected`/`editingEnabled` false.
-- [ ] 9.4 GREEN edit `webview/index.ts`: add a refresh action (button/command) posting `requestRefresh`; handle `refreshResult`/`refreshDeferred` cases.
-- [ ] 9.5 RED `test/e2e/scenarios.ts` — Case 28: refresh scenario — create a file, refresh, see the new node without reopening the panel.
-- [ ] 9.6 GREEN wire whatever e2e harness support is needed (fixture write + refresh trigger) so Case 28 passes.
-- [ ] 9.7 Run `npm run lint && npm run typecheck && npm run test:unit -- comparisonController webviewHost webviewProtocol snapshotStore webviewDom && npm run test:e2e` and confirm all green before opening PR 2 against the PR 1 branch.
+- [x] 9.1 RED `test/unit/webviewDom.test.ts` — Case 26: `expandedRuns` survive a `loadReason: "refresh"` round trip; a plain second `sourcePair` (no refresh) still collapses — explicitly keep the archived "second message resets to collapsed" test green untouched.
+- [x] 9.2 RED `test/unit/webviewDom.test.ts` — Case 27: `#draft-content` text survives a refresh landing; `selected`/`editingEnabled` are cleared and a stale `saveDraft` is refused rather than silently applied.
+- [x] 9.3 GREEN edit `webview/index.ts`: add `preservedRuns: Set<string>` — on `graphSummary` with `loadReason === "refresh"`, copy current `expandedRuns` into `preservedRuns`; `sourcePair` case keeps its existing `expandedRuns.clear()` then re-adds from `preservedRuns`, emptying it afterward. Guard the existing `graphSummary` reset block with `if (loadReason === "initial")` so `#draft-content` is untouched on refresh. Add `selectedNodeId`: after refreshed `graph` renders, if the id still exists, rebind `selectedPair` and re-issue `inspectSources`, but leave `selected`/`editingEnabled` false.
+- [x] 9.4 GREEN edit `webview/index.ts`: add a refresh action (button/command) posting `requestRefresh`; handle `refreshResult`/`refreshDeferred` cases.
+- [x] 9.5 RED `test/e2e/scenarios.ts` — Case 28: refresh scenario — create a file, refresh, see the new node without reopening the panel.
+- [x] 9.6 GREEN wire whatever e2e harness support is needed (fixture write + refresh trigger) so Case 28 passes.
+- [x] 9.7 Run `npm run lint && npm run typecheck && npm run test:unit -- comparisonController webviewHost webviewProtocol snapshotStore webviewDom && npm run test:e2e` and confirm all green before opening PR 2 against the PR 1 branch.
 
 ## Phase 10: Slice C — Bezier Edges (PR 3, base: PR 2 branch)
 

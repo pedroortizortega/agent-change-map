@@ -48,14 +48,15 @@ export const webviewToHostMessageSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("requestRun"), requestId, variants: z.array(variant).min(1).max(3) }),
   z.object({ type: z.literal("confirmRun"), requestId, confirmed: z.boolean() }),
   z.object({ type: z.literal("cancelRun"), requestId }),
+  z.object({ type: z.literal("requestRefresh"), requestId }),
 ]);
 
 export type WebviewToHostMessage = z.infer<typeof webviewToHostMessageSchema>;
 
 export type HostToWebviewMessage =
-  | { type: "graphSummary"; nodeCount: number; edgeCount: number; diagnosticCount: number; oversized: boolean; sections?: { id: string; label: string }[] }
+  | { type: "graphSummary"; nodeCount: number; edgeCount: number; diagnosticCount: number; oversized: boolean; sections?: { id: string; label: string }[]; loadReason: "initial" | "refresh" }
   /** `edgeSources` is index-aligned with `graph.edges`; an absent entry means no exact captured edge location is available. */
-  | { type: "graph"; graph: AnalysisGraph; diff: CorrelatedDiffEntry[]; sourceIndex: Record<string, { left?: SourceId; right?: SourceId }>; edgeSources: ({ sourceId: SourceId; side: "left" | "right" } | undefined)[] }
+  | { type: "graph"; graph: AnalysisGraph; diff: CorrelatedDiffEntry[]; sourceIndex: Record<string, { left?: SourceId; right?: SourceId }>; edgeSources: ({ sourceId: SourceId; side: "left" | "right" } | undefined)[]; untrackedPaths: string[] }
   | { type: "navigateResult"; ok: true; sourceId: SourceId; content: string; draftContent?: string }
   | { type: "navigateResult"; ok: false; sourceId: SourceId; reason: string }
   | { type: "sourcePair"; sources: { side: "left" | "right"; sourceId: SourceId; content: string; startLine: number; endLine: number }[]; ops: DiffOp[] }
@@ -67,4 +68,6 @@ export type HostToWebviewMessage =
   | { type: "runEvent"; requestId: string; variant: SnippetVariant; seq: number; channel: "stdout" | "stderr" | "status"; data: string }
   | { type: "runFailed"; requestId: string; reason: string }
   | { type: "runResult"; requestId: string; results: RunResult[] }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  | { type: "refreshResult"; requestId: string; ok: true }
+  | { type: "refreshResult"; requestId: string; ok: false; reason: string };
