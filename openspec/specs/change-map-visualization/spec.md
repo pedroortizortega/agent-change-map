@@ -1,6 +1,6 @@
-# Delta for Change Map Visualization
+# Specification: Change Map Visualization
 
-## MODIFIED Requirements
+## Requirements
 
 ### Requirement: Expose affected differences
 
@@ -11,8 +11,6 @@ removed=red, unchanged de-emphasized. Long unchanged runs MUST collapse behind
 click-to-expand, keyed by line range, resetting on every new `sourcePair`
 message. A side with no counterpart MUST keep two columns via an empty ghost
 column. Diff computation MUST be unit-testable without a DOM.
-(Previously: affected lines came from a prefix/suffix trim yielding only an
-"affected lines: n, m" summary, with no classification or two-column view.)
 
 #### Scenario: Inspect a modified node
 
@@ -43,8 +41,6 @@ column. Diff computation MUST be unit-testable without a DOM.
 - GIVEN two full text sides of a source pair
 - WHEN the host computes per-line diff ops
 - THEN classification is verifiable by a unit test with no rendering environment
-
-## ADDED Requirements
 
 ### Requirement: Render entities nested inside their container
 
