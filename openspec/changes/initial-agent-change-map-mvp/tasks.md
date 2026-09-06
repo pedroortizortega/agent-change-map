@@ -40,8 +40,8 @@ Chain strategy: feature-branch-chain
 
 ## Phase 3: Guarded Editing
 
-- [ ] 3.1 RED isolated save/reopen and repository-equality tests; GREEN create SourceId overlays in `src/editing/draftStore.ts`.
-- [ ] 3.2 RED invalid target, stale race, confirmation/decline, backup, failed atomic-write tests; GREEN create `src/editing/writeGuard.ts`; REFACTOR effect receipts.
+- [x] 3.1 RED isolated save/reopen and repository-equality tests; GREEN create SourceId overlays in `src/editing/draftStore.ts`.
+- [x] 3.2 RED invalid target, stale race, confirmation/decline, backup, failed atomic-write tests; GREEN create `src/editing/writeGuard.ts`; REFACTOR effect receipts.
 
 ## Phase 4: Restricted Execution
 
