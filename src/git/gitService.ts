@@ -247,9 +247,27 @@ async function statusFingerprint(canonicalPath: string): Promise<string> {
   return `sha256:${createHash("sha256").update(output, "utf8").digest("hex")}`;
 }
 
+const GITLINK_MODE = "160000";
+
+/**
+ * Lists tracked file paths, excluding gitlink entries (submodules). A gitlink is
+ * recorded in the index but has no blob content of its own - on disk it is a
+ * directory (the submodule's checkout), so reading it as a regular file fails
+ * with EISDIR. `git ls-files` alone doesn't expose the mode, so `-s` is used to
+ * read and filter it out.
+ */
 async function listTrackedPaths(canonicalPath: string): Promise<string[]> {
-  const output = await runGit(canonicalPath, ["ls-files"]);
-  return output.split("\n").filter(Boolean);
+  const output = await runGit(canonicalPath, ["ls-files", "-s"]);
+  return output
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => {
+      const tabIndex = line.indexOf("\t");
+      const [mode] = line.slice(0, tabIndex).split(" ");
+      return { mode, path: line.slice(tabIndex + 1) };
+    })
+    .filter((entry) => entry.mode !== GITLINK_MODE)
+    .map((entry) => entry.path);
 }
 
 /**

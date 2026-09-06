@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -137,6 +137,26 @@ describe("git state capture", () => {
     execFileSync("git", ["add", "."], { cwd: repoRoot });
 
     await expect(captureGitState(repoRoot, { kind: "worktree", path: repoRoot })).rejects.toThrow(GitCaptureLimitError);
+  });
+
+  it("captures a worktree ignoring a gitlink (submodule) entry instead of failing with EISDIR", async () => {
+    await writeFile(resolve(repoRoot, "a.py"), "x = 1\n");
+    const nestedRepo = resolve(repoRoot, "vendor");
+    await mkdir(nestedRepo);
+    execFileSync("git", ["init", "-q"], { cwd: nestedRepo });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: nestedRepo });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: nestedRepo });
+    await writeFile(resolve(nestedRepo, "inner.txt"), "irrelevant\n");
+    execFileSync("git", ["add", "."], { cwd: nestedRepo });
+    execFileSync("git", ["commit", "-q", "-m", "inner"], { cwd: nestedRepo });
+    const innerOid = execFileSync("git", ["rev-parse", "HEAD"], { cwd: nestedRepo }).toString().trim();
+    execFileSync("git", ["update-index", "--add", "--cacheinfo", `160000,${innerOid},vendor`], { cwd: repoRoot });
+    execFileSync("git", ["add", "a.py"], { cwd: repoRoot });
+    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: repoRoot });
+
+    const state = await captureGitState(repoRoot, { kind: "worktree", path: repoRoot });
+
+    expect(state.files).toEqual([{ path: "a.py", content: "x = 1\n" }]);
   });
 
   it("captures small commit and worktree states unaffected by the new limits", async () => {
