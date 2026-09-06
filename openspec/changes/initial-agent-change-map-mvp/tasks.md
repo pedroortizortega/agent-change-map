@@ -45,9 +45,9 @@ Chain strategy: feature-branch-chain
 
 ## Phase 4: Restricted Execution
 
-- [ ] 4.1 RED `test/unit/runPolicy.test.ts`: reject `requirements.txt`, `CMakeLists.txt`, executable `.md/.mdx`, `README.sh` without Docker creation; accept valid `.py`; GREEN add policy to `src/execution/dockerRunner.ts`.
-- [ ] 4.2 RED required no-network, read-only, capability, privilege, PID/CPU/memory/time, tmpfs, input, and refusal tests; GREEN implement fixed-argv Docker lifecycle.
-- [ ] 4.3 RED variant labels, bounded streams, missing/timeout/cancel/failure cleanup tests; GREEN implement results/cleanup; REFACTOR states.
+- [x] 4.1 RED `test/unit/runPolicy.test.ts`: reject `requirements.txt`, `CMakeLists.txt`, executable `.md/.mdx`, `README.sh` without Docker creation; accept valid `.py`; GREEN add policy to `src/execution/dockerRunner.ts`.
+- [x] 4.2 RED required no-network, read-only, capability, privilege, PID/CPU/memory/time, tmpfs, input, and refusal tests; GREEN implement fixed-argv Docker lifecycle.
+- [x] 4.3 RED variant labels, bounded streams, missing/timeout/cancel/failure cleanup tests; GREEN implement results/cleanup; REFACTOR states.
 
 ## Phase 5: UI and Verification
 
