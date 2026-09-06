@@ -74,6 +74,17 @@ describe("Python AST analyzer", () => {
     expect(imports.find((edge) => edge.importedName === ".b.f")?.resolution).toEqual({ kind: "resolved", target: symbol?.id });
   });
 
+  it("resolves direct calls to a name bound by a from-import", async () => {
+    const graph = await analyze([
+      { path: "pkg/__init__.py", content: "" },
+      { path: "pkg/b.py", content: "def f(): pass\n" },
+      { path: "pkg/a.py", content: "from pkg.b import f\nf()\n" },
+    ]);
+    const symbol = graph.nodes.find((node) => node.qualifiedName === "pkg.b.f");
+    const call = graph.edges.find((edge) => edge.kind === "call");
+    expect(call?.resolution).toEqual({ kind: "resolved", target: symbol?.id });
+  });
+
   it("derives the analyzer only from an absolute extension installation root", async () => {
     await expect(analyzePython({ type: "analyze", snapshot, files: [{ path: "a.py", content: "" }] }, ".")).rejects.toThrow(/absolute extension root/);
   });
