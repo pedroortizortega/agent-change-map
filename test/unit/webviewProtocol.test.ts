@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { isOversized, OVERSIZED_THRESHOLDS, webviewToHostMessageSchema } from "../../src/webviewProtocol.js";
+import type { HostToWebviewMessage } from "../../src/webviewProtocol.js";
 import { DTO_LIMITS } from "../../src/protocol.js";
 
 const sourceId = {
@@ -35,5 +36,15 @@ describe("webview protocol", () => {
   it("requires an explicit confirmed boolean for direct-write and run confirmation intents", () => {
     expect(() => webviewToHostMessageSchema.parse({ type: "confirmDirectWrite", requestId: "r1" })).toThrow();
     expect(() => webviewToHostMessageSchema.parse({ type: "confirmRun", requestId: "r1", confirmed: true })).not.toThrow();
+  });
+
+  it("carries a shared ops sequence on sourcePair and drops per-source affectedLines", () => {
+    const message: Extract<HostToWebviewMessage, { type: "sourcePair" }> = {
+      type: "sourcePair",
+      sources: [{ side: "left", sourceId, content: "a\n", startLine: 1, endLine: 1 }],
+      ops: [{ op: "unchanged", leftLine: 1, rightLine: 1, text: "a" }],
+    };
+    expect(message.ops).toEqual([{ op: "unchanged", leftLine: 1, rightLine: 1, text: "a" }]);
+    expect(message.sources[0]).not.toHaveProperty("affectedLines");
   });
 });

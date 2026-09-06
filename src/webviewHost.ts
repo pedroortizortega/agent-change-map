@@ -9,6 +9,7 @@ import type { RunOptions, RunResult, SnippetSource, SnippetVariant } from "./exe
 import { isOversized, webviewToHostMessageSchema } from "./webviewProtocol.js";
 import { filterGraph, type GraphFilter } from "../webview/graphView.js";
 import type { HostToWebviewMessage } from "./webviewProtocol.js";
+import { diffLines } from "./diff/lineDiff.js";
 
 /**
  * Builds a single display graph out of up-to-two comparison sides for the webview to
@@ -81,34 +82,6 @@ function buildEdgeSourceIndex(
     if (content === undefined) return undefined;
     return { side, sourceId: createSourceId(snapshot, edge.span.path, content, edge.span.startByte, edge.span.endByte) };
   });
-}
-
-function contentLines(content: string): string[] {
-  if (!content) return [];
-  const lines = content.split("\n");
-  if (lines.at(-1) === "") lines.pop();
-  return lines;
-}
-
-/** Returns actual changed line numbers; a source with no counterpart is wholly affected. */
-function affectedLinesForSources(sources: { side: "left" | "right"; content: string; startLine: number }[]): Map<"left" | "right", number[]> {
-  const result = new Map<"left" | "right", number[]>();
-  const allLines = (source: { content: string; startLine: number }): number[] => contentLines(source.content).map((_, index) => source.startLine + index);
-  const left = sources.find(source => source.side === "left");
-  const right = sources.find(source => source.side === "right");
-  if (!left || !right) {
-    for (const source of sources) result.set(source.side, allLines(source));
-    return result;
-  }
-  const leftLines = contentLines(left.content);
-  const rightLines = contentLines(right.content);
-  let prefix = 0;
-  while (prefix < leftLines.length && prefix < rightLines.length && leftLines[prefix] === rightLines[prefix]) prefix++;
-  let suffix = 0;
-  while (suffix < leftLines.length - prefix && suffix < rightLines.length - prefix && leftLines[leftLines.length - 1 - suffix] === rightLines[rightLines.length - 1 - suffix]) suffix++;
-  result.set("left", leftLines.slice(prefix, leftLines.length - suffix).map((_, index) => left.startLine + prefix + index));
-  result.set("right", rightLines.slice(prefix, rightLines.length - suffix).map((_, index) => right.startLine + prefix + index));
-  return result;
 }
 
 export interface SessionDeps {
@@ -212,19 +185,20 @@ export class ChangeMapSession {
       }
       case "inspectSources": {
         const entry = this.sourceIndex[message.nodeId];
-        const sources: { side: "left" | "right"; sourceId: SourceId; content: string; startLine: number; endLine: number; affectedLines: number[] }[] = [];
+        const sources: { side: "left" | "right"; sourceId: SourceId; content: string; startLine: number; endLine: number }[] = [];
         for (const side of ["left", "right"] as const) {
           const sourceId = entry?.[side];
           if (sourceId) {
             const content = resolveSource(this.deps.store, sourceId);
             const full = this.deps.store.getFileContent(sourceId.snapshot, sourceId.posixPath)!;
             const startLine = Buffer.from(full).subarray(0, sourceId.startByte).toString("utf8").split("\n").length;
-            sources.push({ side, sourceId, content, startLine, endLine: startLine + content.split("\n").length - 1, affectedLines: [] });
+            sources.push({ side, sourceId, content, startLine, endLine: startLine + content.split("\n").length - 1 });
           }
         }
-        const affectedBySide = affectedLinesForSources(sources);
-        for (const source of sources) source.affectedLines = affectedBySide.get(source.side) ?? [];
-        this.deps.post({ type: "sourcePair", sources });
+        const left = sources.find(source => source.side === "left");
+        const right = sources.find(source => source.side === "right");
+        const ops = diffLines(left?.content ?? "", right?.content ?? "", { leftStartLine: left?.startLine ?? 1, rightStartLine: right?.startLine ?? 1 });
+        this.deps.post({ type: "sourcePair", sources, ops });
         return;
       }
       case "navigate":

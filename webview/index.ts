@@ -2,6 +2,12 @@ import { renderGraphSvg } from "./graphView.js";
 import type { HostToWebviewMessage, WebviewToHostMessage } from "../src/webviewProtocol.js";
 import type { AnalysisGraph, SourceId } from "../src/protocol.js";
 import type { SnippetVariant } from "../src/execution/dockerRunner.js";
+import type { DiffOp } from "../src/diff/lineDiff.js";
+
+/** Consecutive `unchanged` ops at or above this length collapse behind a click-to-expand summary. */
+const COLLAPSE_MIN_RUN = 6;
+/** Rows kept visible at each boundary of a collapsed run. */
+const CONTEXT = 3;
 
 declare function acquireVsCodeApi(): { postMessage(message: WebviewToHostMessage): void };
 const vscode = acquireVsCodeApi();
@@ -52,6 +58,82 @@ function clearPendingAction(requestId: string): void {
   if (pendingAction?.requestId !== requestId) return;
   pendingAction = undefined;
   updateEffectActionAvailability();
+}
+/** Cleared before every new `sourcePair` render so expand state never leaks across nodes. */
+const expandedRuns = new Set<string>();
+let lastOps: DiffOp[] = [];
+
+function lineSpan(text: string): HTMLSpanElement {
+  const span = document.createElement("span");
+  span.className = "ln";
+  span.textContent = text;
+  return span;
+}
+function sideCode(side: "left" | "right", text: string | undefined): HTMLElement {
+  const code = document.createElement("code");
+  code.className = text === undefined ? `side ${side} ghost` : `side ${side}`;
+  if (text === undefined) code.setAttribute("aria-hidden", "true");
+  code.textContent = text ?? "";
+  return code;
+}
+function diffRowElement(op: DiffOp): HTMLDivElement {
+  const row = document.createElement("div");
+  row.className = `diff-row op-${op.op}${op.op === "unchanged" ? " muted" : ""}`;
+  const leftLine = op.op === "added" ? undefined : op.leftLine;
+  const rightLine = op.op === "removed" ? undefined : op.rightLine;
+  const leftText = op.op === "added" ? undefined : op.text;
+  const rightText = op.op === "removed" ? undefined : op.text;
+  row.append(lineSpan(leftLine !== undefined ? String(leftLine) : ""), sideCode("left", leftText));
+  row.append(lineSpan(rightLine !== undefined ? String(rightLine) : ""), sideCode("right", rightText));
+  return row;
+}
+/** `L{leftStart}-{leftEnd}/R{rightStart}-{rightEnd}` from a run's first/last op; an absent side contributes `-`. */
+function runKeyFor(run: DiffOp[]): string {
+  const first = run[0]!;
+  const last = run[run.length - 1]!;
+  const leftStart = first.op === "added" ? undefined : first.leftLine;
+  const leftEnd = last.op === "added" ? undefined : last.leftLine;
+  const rightStart = first.op === "removed" ? undefined : first.rightLine;
+  const rightEnd = last.op === "removed" ? undefined : last.rightLine;
+  return `L${leftStart ?? "-"}-${leftEnd ?? "-"}/R${rightStart ?? "-"}-${rightEnd ?? "-"}`;
+}
+function renderDiffPanel(ops: DiffOp[], expanded: Set<string>): void {
+  const panel = byId("diff-panel");
+  panel.textContent = "";
+  const table = document.createElement("div");
+  table.className = "diff";
+  table.setAttribute("role", "table");
+  let index = 0;
+  while (index < ops.length) {
+    const op = ops[index]!;
+    if (op.op !== "unchanged") {
+      table.append(diffRowElement(op));
+      index++;
+      continue;
+    }
+    let end = index;
+    while (end < ops.length && ops[end]!.op === "unchanged") end++;
+    const run = ops.slice(index, end);
+    if (run.length >= COLLAPSE_MIN_RUN && !expanded.has(runKeyFor(run))) {
+      const key = runKeyFor(run);
+      for (const contextOp of run.slice(0, CONTEXT)) table.append(diffRowElement(contextOp));
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "diff-collapsed";
+      button.dataset.runKey = key;
+      button.textContent = `⋯ ${run.length - 2 * CONTEXT} unchanged lines ⋯`;
+      button.addEventListener("click", () => {
+        expanded.add(key);
+        renderDiffPanel(lastOps, expanded);
+      });
+      table.append(button);
+      for (const contextOp of run.slice(run.length - CONTEXT)) table.append(diffRowElement(contextOp));
+    } else {
+      for (const runOp of run) table.append(diffRowElement(runOp));
+    }
+    index = end;
+  }
+  panel.append(table);
 }
 function choosePair(nodeId: string): void {
   selected = undefined;
@@ -187,13 +269,9 @@ function handleHostMessage(message: HostToWebviewMessage): void {
     }
     case "sourcePair": {
       if (!selectedPair || ![selectedPair.left, selectedPair.right].some(id => id && message.sources.some(source => sameSource(id, source.sourceId)))) break;
-      byId("diff-panel").textContent = "";
-      for (const source of message.sources) {
-        const code = document.createElement("pre");
-        const affected = source.affectedLines.length ? source.affectedLines.join(", ") : "none";
-        code.textContent = `${source.side === "left" ? "Left (original)" : "Right (current)"} — ${source.sourceId.posixPath} — lines ${source.startLine}–${source.endLine} — bytes ${source.sourceId.startByte}–${source.sourceId.endByte}\nAffected lines: ${affected}\n${source.content}`;
-        byId("diff-panel").append(code);
-      }
+      expandedRuns.clear();
+      lastOps = message.ops;
+      renderDiffPanel(lastOps, expandedRuns);
       break;
     }
     case "navigateResult": {

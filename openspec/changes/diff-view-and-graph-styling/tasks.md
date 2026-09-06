@@ -27,25 +27,25 @@ Slices are independent per design (no shared runtime code); each is revertible w
 
 ## Phase 1: Slice A — Vendored Line Diff (`src/diff/lineDiff.ts`)
 
-- [ ] 1.1 RED `test/unit/lineDiff.test.ts`: identical sides → all `unchanged`; pure insertion; pure deletion; empty side (all-`added`/all-`removed`); one-side-missing; non-1 `leftStartLine`/`rightStartLine` offsets reflected in `leftLine`/`rightLine`.
-- [ ] 1.2 GREEN create `src/diff/lineDiff.ts`: BSD-3-Clause header (verbatim jsdiff notice, not MIT), vendored Myers `diffLines(left, right, offsets)` returning `DiffOp[]`, trailing-newline handling matching current `contentLines` semantics.
-- [ ] 1.3 REFACTOR: confirm no runtime imports outside `src/diff/`; `tsconfig.webview.json` still excludes it (webview only imports the `DiffOp` type, erased).
+- [x] 1.1 RED `test/unit/lineDiff.test.ts`: identical sides → all `unchanged`; pure insertion; pure deletion; empty side (all-`added`/all-`removed`); one-side-missing; non-1 `leftStartLine`/`rightStartLine` offsets reflected in `leftLine`/`rightLine`.
+- [x] 1.2 GREEN create `src/diff/lineDiff.ts`: BSD-3-Clause header (verbatim jsdiff notice, not MIT), vendored Myers `diffLines(left, right, offsets)` returning `DiffOp[]`, trailing-newline handling matching current `contentLines` semantics.
+- [x] 1.3 REFACTOR: confirm no runtime imports outside `src/diff/`; `tsconfig.webview.json` still excludes it (webview only imports the `DiffOp` type, erased).
 
 ## Phase 2: Slice A — Wire Protocol and Host
 
-- [ ] 2.1 RED update `sourcePair` schema test coverage in protocol tests: `sources[]` entries drop `affectedLines`; new top-level `ops: DiffOp[]` field required.
-- [ ] 2.2 GREEN edit `src/webviewProtocol.ts`: `sourcePair` gains `ops: DiffOp[]`, drops `affectedLines` from each source entry.
-- [ ] 2.3 RED rewrite `test/unit/webviewHost.test.ts` L98-108 (`"marks every extant line affected when a source has no counterpart"`) to assert `ops` are all `{ op: "added", rightLine: 1 }` (or `"removed"` for the missing-right case) and that no `affectedLines` key is posted.
-- [ ] 2.4 GREEN edit `src/webviewHost.ts`: delete `affectedLinesForSources` and `contentLines`; in `inspectSources` build `sources` without `affectedLines`, call `diffLines(left?.content ?? "", right?.content ?? "", { leftStartLine: left?.startLine ?? 1, rightStartLine: right?.startLine ?? 1 })`, post `{ type: "sourcePair", sources, ops }`.
+- [x] 2.1 RED update `sourcePair` schema test coverage in protocol tests: `sources[]` entries drop `affectedLines`; new top-level `ops: DiffOp[]` field required.
+- [x] 2.2 GREEN edit `src/webviewProtocol.ts`: `sourcePair` gains `ops: DiffOp[]`, drops `affectedLines` from each source entry.
+- [x] 2.3 RED rewrite `test/unit/webviewHost.test.ts` L98-108 (`"marks every extant line affected when a source has no counterpart"`) to assert `ops` are all `{ op: "added", rightLine: 1 }` (or `"removed"` for the missing-right case) and that no `affectedLines` key is posted.
+- [x] 2.4 GREEN edit `src/webviewHost.ts`: delete `affectedLinesForSources` and `contentLines`; in `inspectSources` build `sources` without `affectedLines`, call `diffLines(left?.content ?? "", right?.content ?? "", { leftStartLine: left?.startLine ?? 1, rightStartLine: right?.startLine ?? 1 })`, post `{ type: "sourcePair", sources, ops }`.
 
 ## Phase 3: Slice A — Diff Panel Rendering and Collapse State
 
-- [ ] 3.1 RED split `test/unit/webviewDom.test.ts` L109-122 (`"identifies affected comparison lines and navigates…"`): drop `toContain("Affected lines: 1")` and flat `<pre>` expectations; assert `.diff-row.op-removed`/`.op-added` DOM content and ghost cells. Leave the edge-navigation half of this test file untouched — it is the click-contract proof and must stay green throughout this phase.
-- [ ] 3.2 RED new case: ghost column — a one-sided pair (all-added or all-removed `ops`) still emits both `.side` cells per row, with the missing side's `<code class="side ghost">` empty.
-- [ ] 3.3 RED new case: click-to-expand — a collapsed run (`COLLAPSE_MIN_RUN = 6` unchanged ops, `CONTEXT = 3` visible at each boundary) toggles open then closed via `data-run-key`; a second `sourcePair` message resets `expandedRuns` to empty (collapsed).
-- [ ] 3.4 GREEN edit `webview/index.ts`: add `renderDiffPanel(ops, expandedRuns)` building the four-column CSS grid DOM (`.diff-row`, `.ln`, `.side`/`.side ghost`, `.diff-collapsed` buttons) via `createElement`/`textContent` only; module-level `expandedRuns: Set<string>` and `lastOps: DiffOp[]`; `sourcePair` case calls `expandedRuns.clear()` before rendering and stores `lastOps`; click handler toggles run key and re-renders from `lastOps`.
-- [ ] 3.5 GREEN edit `webview/styles.css`: add diff grid, ghost-column, `.muted` (unchanged rows), and `.diff-collapsed` run rules.
-- [ ] 3.6 REFACTOR: confirm `webviewDom.test.ts` L100-107 (oversized/section test) is unchanged and still passes, guarding the 300-node host gate precedes rendering.
+- [x] 3.1 RED split `test/unit/webviewDom.test.ts` L109-122 (`"identifies affected comparison lines and navigates…"`): drop `toContain("Affected lines: 1")` and flat `<pre>` expectations; assert `.diff-row.op-removed`/`.op-added` DOM content and ghost cells. Leave the edge-navigation half of this test file untouched — it is the click-contract proof and must stay green throughout this phase.
+- [x] 3.2 RED new case: ghost column — a one-sided pair (all-added or all-removed `ops`) still emits both `.side` cells per row, with the missing side's `<code class="side ghost">` empty.
+- [x] 3.3 RED new case: click-to-expand — a collapsed run (`COLLAPSE_MIN_RUN = 6` unchanged ops, `CONTEXT = 3` visible at each boundary) toggles open then closed via `data-run-key`; a second `sourcePair` message resets `expandedRuns` to empty (collapsed).
+- [x] 3.4 GREEN edit `webview/index.ts`: add `renderDiffPanel(ops, expandedRuns)` building the four-column CSS grid DOM (`.diff-row`, `.ln`, `.side`/`.side ghost`, `.diff-collapsed` buttons) via `createElement`/`textContent` only; module-level `expandedRuns: Set<string>` and `lastOps: DiffOp[]`; `sourcePair` case calls `expandedRuns.clear()` before rendering and stores `lastOps`; click handler toggles run key and re-renders from `lastOps`.
+- [x] 3.5 GREEN edit `webview/styles.css`: add diff grid, ghost-column, `.muted` (unchanged rows), and `.diff-collapsed` run rules.
+- [x] 3.6 REFACTOR: confirm `webviewDom.test.ts` L100-107 (oversized/section test) is unchanged and still passes, guarding the 300-node host gate precedes rendering.
 
 ## Phase 4: Slice B — Nested Containment Geometry (`webview/graphView.ts`)
 

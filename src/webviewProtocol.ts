@@ -3,6 +3,7 @@ import { DTO_LIMITS, sourceIdSchema, type AnalysisGraph, type SourceId } from ".
 import type { CorrelatedDiffEntry } from "./navigation/sourceProvider.js";
 import type { RunResult, SnippetVariant } from "./execution/dockerRunner.js";
 import type { WriteEffectPreview } from "./editing/writeGuard.js";
+import type { DiffOp } from "./diff/lineDiff.js";
 
 /**
  * Usability thresholds for rendering a map without an explicit opt-in. These are
@@ -57,7 +58,7 @@ export type HostToWebviewMessage =
   | { type: "graph"; graph: AnalysisGraph; diff: CorrelatedDiffEntry[]; sourceIndex: Record<string, { left?: SourceId; right?: SourceId }>; edgeSources: ({ sourceId: SourceId; side: "left" | "right" } | undefined)[] }
   | { type: "navigateResult"; ok: true; sourceId: SourceId; content: string; draftContent?: string }
   | { type: "navigateResult"; ok: false; sourceId: SourceId; reason: string }
-  | { type: "sourcePair"; sources: { side: "left" | "right"; sourceId: SourceId; content: string; startLine: number; endLine: number; affectedLines: number[] }[] }
+  | { type: "sourcePair"; sources: { side: "left" | "right"; sourceId: SourceId; content: string; startLine: number; endLine: number }[]; ops: DiffOp[] }
   | { type: "draftSaved"; sourceId: SourceId; content: string }
   | { type: "directWritePreview"; requestId: string; preview: WriteEffectPreview }
   | { type: "directWriteResult"; requestId: string; ok: true; path: string }
