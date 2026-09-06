@@ -28,47 +28,47 @@ Each slice is independently revertible per the design's Migration/Rollout sectio
 
 ## Phase 1: Slice A — `SourceFileMatcher` (PR 1)
 
-- [ ] 1.1 RED `test/unit/sourceFileMatcher.test.ts` — Case 1: `.py` matches, `.PY` matches (case-insensitive), `.pyc`/`.txt`/extensionless do not match, `a.python.txt` (mid-string `.py`) does not match.
-- [ ] 1.2 RED `test/unit/sourceFileMatcher.test.ts` — Case 2: `createSourceFileMatcher([".py", ".sql"])` matches both extensions, proving extensibility without pipeline rework.
-- [ ] 1.3 GREEN create `src/analysis/sourceFileMatcher.ts` (zero imports): `SourceFileMatcher` interface (`extensions`, `matches(posixPath)`), `createSourceFileMatcher(extensions)` factory, `defaultSourceFileMatcher = createSourceFileMatcher([".py"])`.
-- [ ] 1.4 REFACTOR: confirm the module has no runtime dependency on `src/git` or `src/analysis` internals — it stays a pure predicate.
+- [x] 1.1 RED `test/unit/sourceFileMatcher.test.ts` — Case 1: `.py` matches, `.PY` matches (case-insensitive), `.pyc`/`.txt`/extensionless do not match, `a.python.txt` (mid-string `.py`) does not match.
+- [x] 1.2 RED `test/unit/sourceFileMatcher.test.ts` — Case 2: `createSourceFileMatcher([".py", ".sql"])` matches both extensions, proving extensibility without pipeline rework.
+- [x] 1.3 GREEN create `src/analysis/sourceFileMatcher.ts` (zero imports): `SourceFileMatcher` interface (`extensions`, `matches(posixPath)`), `createSourceFileMatcher(extensions)` factory, `defaultSourceFileMatcher = createSourceFileMatcher([".py"])`.
+- [x] 1.4 REFACTOR: confirm the module has no runtime dependency on `src/git` or `src/analysis` internals — it stays a pure predicate.
 
 ## Phase 2: Slice A — Untracked Capture Wiring (PR 1)
 
-- [ ] 2.1 RED `test/integration/gitState.test.ts` — Case 3: a never-staged `.py` file appears in a worktree capture with `provenance: "untracked"`.
-- [ ] 2.2 RED `test/integration/gitState.test.ts` — Case 4 (Threat Matrix row "Documentation-like paths"): untracked `.txt`/`README.sh`/`requirements.txt` excluded.
-- [ ] 2.3 RED `test/integration/gitState.test.ts` — Case 5 (Threat Matrix row "Documentation-like paths"): untracked `setup.py` included and analyzed.
-- [ ] 2.4 RED `test/integration/gitState.test.ts` — Case 6: a `.gitignore`d untracked `.py` is excluded by `--exclude-standard`.
-- [ ] 2.5 GREEN edit `src/git/gitService.ts`: add `listUntrackedPaths(canonicalPath)` running `git ls-files --others --exclude-standard` through existing `runGit` (`shell: false`, argv array, timeout, output cap), filtered by the matcher.
-- [ ] 2.6 GREEN edit `src/git/gitService.ts`: add optional `matcher: SourceFileMatcher = defaultSourceFileMatcher` last parameter to `captureCommitState`, `beginWorktreeCapture`, `captureWorktreeState`, `captureGitState`; apply matcher to commit tree entries and both tracked/untracked worktree lists; add `provenance: "tracked" | "untracked"` to `CapturedFile`; add `untrackedPaths: string[]` to `WorktreeCaptureBegin`; merge tracked-then-untracked into one `paths` list (disjoint by git definition).
-- [ ] 2.7 GREEN switch `statusFingerprint` invocation from `--untracked-files=no` to `--untracked-files=all`.
-- [ ] 2.8 REFACTOR: confirm `finishWorktreeCapture`'s two-phase stability comparison, size guard, and binary-content guard run unchanged (no new silent-skip path) for both tracked and untracked entries.
+- [x] 2.1 RED `test/integration/gitState.test.ts` — Case 3: a never-staged `.py` file appears in a worktree capture with `provenance: "untracked"`.
+- [x] 2.2 RED `test/integration/gitState.test.ts` — Case 4 (Threat Matrix row "Documentation-like paths"): untracked `.txt`/`README.sh`/`requirements.txt` excluded.
+- [x] 2.3 RED `test/integration/gitState.test.ts` — Case 5 (Threat Matrix row "Documentation-like paths"): untracked `setup.py` included and analyzed.
+- [x] 2.4 RED `test/integration/gitState.test.ts` — Case 6: a `.gitignore`d untracked `.py` is excluded by `--exclude-standard`.
+- [x] 2.5 GREEN edit `src/git/gitService.ts`: add `listUntrackedPaths(canonicalPath)` running `git ls-files --others --exclude-standard` through existing `runGit` (`shell: false`, argv array, timeout, output cap), filtered by the matcher.
+- [x] 2.6 GREEN edit `src/git/gitService.ts`: add optional `matcher: SourceFileMatcher = defaultSourceFileMatcher` last parameter to `captureCommitState`, `beginWorktreeCapture`, `captureWorktreeState`, `captureGitState`; apply matcher to commit tree entries and both tracked/untracked worktree lists; add `provenance: "tracked" | "untracked"` to `CapturedFile`; add `untrackedPaths: string[]` to `WorktreeCaptureBegin`; merge tracked-then-untracked into one `paths` list (disjoint by git definition).
+- [x] 2.7 GREEN switch `statusFingerprint` invocation from `--untracked-files=no` to `--untracked-files=all`.
+- [x] 2.8 REFACTOR: confirm `finishWorktreeCapture`'s two-phase stability comparison, size guard, and binary-content guard run unchanged (no new silent-skip path) for both tracked and untracked entries.
 
 ## Phase 3: Slice A — Stability, Limits, and Commit Isolation (PR 1)
 
-- [ ] 3.1 RED `test/integration/gitState.test.ts` — Case 7: untracked file created after `begin` → `GitCaptureInstabilityError`.
-- [ ] 3.2 RED `test/integration/gitState.test.ts` — Case 8: untracked file deleted after `begin` → `GitCaptureInstabilityError`.
-- [ ] 3.3 RED `test/integration/gitState.test.ts` — Case 9: untracked file edited after `begin` (status letter unchanged) → `GitCaptureInstabilityError`.
-- [ ] 3.4 RED `test/integration/gitState.test.ts` — Case 10: oversized untracked `.py` → `GitCaptureLimitError`; binary untracked `.py` → `GitBinaryContentError`.
-- [ ] 3.5 RED `test/integration/gitState.test.ts` — Case 11: tracked + untracked count crossing `DTO_LIMITS.maxFiles` → `GitCaptureLimitError`.
-- [ ] 3.6 RED `test/integration/gitState.test.ts` — Case 12: `captureCommitState` of the same repo contains no untracked file, every entry `provenance: "tracked"` (Threat Matrix row "Commit state" — empty index, commit capture case).
-- [ ] 3.7 RED `test/integration/gitState.test.ts` — Case 13: `computeContentDigest` byte-identical for the same files with differing `provenance` (Decision 4 proof — provenance excluded from hashing).
-- [ ] 3.8 RED `test/integration/gitState.test.ts` — Case 14 (Threat Matrix row "Git repository selection"): a worktree path escaping the repo still throws `GitSelectionError` before any untracked listing runs.
-- [ ] 3.9 RED `test/integration/gitState.test.ts` — Case 15 (Threat Matrix row "Commit state"): a staged-new file is `provenance: "tracked"`, not `"untracked"` (not `--others`).
-- [ ] 3.10 RED `test/integration/gitState.test.ts` — Threat Matrix row "Commit state", third planned RED test: an empty index plus one untracked `.py` captures that file with correct provenance.
-- [ ] 3.11 GREEN: implement/adjust `finishWorktreeCapture`, `assertWithinCaptureLimits`, `assertContentWithinSizeLimit`, `decodeUtf8OrThrow`, and disjointness assertion so 3.1–3.10 pass with no behavior beyond what the design specifies.
-- [ ] 3.12 REFACTOR: confirm no capture code path performs an inline extension check outside `sourceFileMatcher` (spec requirement "Filter capture through a single file matcher").
+- [x] 3.1 RED `test/integration/gitState.test.ts` — Case 7: untracked file created after `begin` → `GitCaptureInstabilityError`.
+- [x] 3.2 RED `test/integration/gitState.test.ts` — Case 8: untracked file deleted after `begin` → `GitCaptureInstabilityError`.
+- [x] 3.3 RED `test/integration/gitState.test.ts` — Case 9: untracked file edited after `begin` (status letter unchanged) → `GitCaptureInstabilityError`.
+- [x] 3.4 RED `test/integration/gitState.test.ts` — Case 10: oversized untracked `.py` → `GitCaptureLimitError`; binary untracked `.py` → `GitBinaryContentError`.
+- [x] 3.5 RED `test/integration/gitState.test.ts` — Case 11: tracked + untracked count crossing `DTO_LIMITS.maxFiles` → `GitCaptureLimitError`.
+- [x] 3.6 RED `test/integration/gitState.test.ts` — Case 12: `captureCommitState` of the same repo contains no untracked file, every entry `provenance: "tracked"` (Threat Matrix row "Commit state" — empty index, commit capture case).
+- [x] 3.7 RED `test/integration/gitState.test.ts` — Case 13: `computeContentDigest` byte-identical for the same files with differing `provenance` (Decision 4 proof — provenance excluded from hashing).
+- [x] 3.8 RED `test/integration/gitState.test.ts` — Case 14 (Threat Matrix row "Git repository selection"): a worktree path escaping the repo still throws `GitSelectionError` before any untracked listing runs.
+- [x] 3.9 RED `test/integration/gitState.test.ts` — Case 15 (Threat Matrix row "Commit state"): a staged-new file is `provenance: "tracked"`, not `"untracked"` (not `--others`).
+- [x] 3.10 RED `test/integration/gitState.test.ts` — Threat Matrix row "Commit state", third planned RED test: an empty index plus one untracked `.py` captures that file with correct provenance.
+- [x] 3.11 GREEN: implement/adjust `finishWorktreeCapture`, `assertWithinCaptureLimits`, `assertContentWithinSizeLimit`, `decodeUtf8OrThrow`, and disjointness assertion so 3.1–3.10 pass with no behavior beyond what the design specifies. (Also added `readCaptureFileOrThrowInstability` to translate an ENOENT from a file disappearing mid-capture into `GitCaptureInstabilityError` instead of a raw filesystem error — required for 3.2 to pass, not previously covered for the tracked path either.)
+- [x] 3.12 REFACTOR: confirm no capture code path performs an inline extension check outside `sourceFileMatcher` (spec requirement "Filter capture through a single file matcher").
 
 ## Phase 4: Slice A — Existing Test Rewrites and Late-Filter Removal (PR 1)
 
-- [ ] 4.1 REQUIRED REVIEW (explicit design flag, not an assumption): confirm `gitState.test.ts` L79/L90/L106 (the three worktree-capture instability tests using only `a.py` in an otherwise clean tmp repo) stay green byte-unchanged under `--untracked-files=all`, and confirm no stray file (e.g. an editor backup) exists in those fixture repos that would break them.
-- [ ] 4.2 Rewrite `gitState.test.ts` L183 (`"rejects a worktree capture containing a non-UTF-8 tracked file"`): rename fixture `binary.dat` → `binary.py` so the matcher still routes it to the binary-content guard instead of silently excluding it.
-- [ ] 4.3 Rewrite `gitState.test.ts` L174 (commit-capture binary test) identically: `binary.dat` → `binary.py`.
-- [ ] 4.4 Review `gitState.test.ts` L142 (gitlink test): keep the mode-`160000` filter and assert it still runs before the matcher (`vendor` has no extension, now filtered twice over).
-- [ ] 4.5 Review and update `gitState.test.ts` L43/L61/L124/L134/L162 (staged-dirty, empty index, limits, small-state): add `provenance: "tracked"` to every existing `state.files` `toEqual` assertion (all fixtures are `.py`).
-- [ ] 4.6 Confirm `test/unit/webviewHost.test.ts`'s `SessionDeps` literals need zero edits (`requestRefresh`/`onIdle` are optional — not part of this slice's runtime change, only confirming no incidental breakage).
-- [ ] 4.7 GREEN edit `src/extension.ts`: delete `buildGraphForSelection`'s late `.endsWith(".py")` filter. Note precisely: `buildGraphForSelection` keeps working exactly as today without its own filter, because `captureGitState` now returns pre-filtered files via the matcher — this leaves no temporarily-broken intermediate state even though `buildGraphForSelection`'s extraction into `ComparisonController` is deferred to PR 2.
-- [ ] 4.8 Run `npm run lint && npm run typecheck && npm run test:unit -- sourceFileMatcher gitState && npm run test:integration -- gitState && npm run test:e2e` and confirm all green before opening PR 1 against the tracker branch.
+- [x] 4.1 REQUIRED REVIEW (explicit design flag, not an assumption): confirm `gitState.test.ts` L79/L90/L106 (the three worktree-capture instability tests using only `a.py` in an otherwise clean tmp repo) stay green byte-unchanged under `--untracked-files=all`, and confirm no stray file (e.g. an editor backup) exists in those fixture repos that would break them. Reviewed and confirmed: fixtures are freshly `mkdtemp`'d per test, contain no stray files, and all three tests pass unchanged.
+- [x] 4.2 Rewrite `gitState.test.ts` L183 (`"rejects a worktree capture containing a non-UTF-8 tracked file"`): rename fixture `binary.dat` → `binary.py` so the matcher still routes it to the binary-content guard instead of silently excluding it.
+- [x] 4.3 Rewrite `gitState.test.ts` L174 (commit-capture binary test) identically: `binary.dat` → `binary.py`.
+- [x] 4.4 Review `gitState.test.ts` L142 (gitlink test): keep the mode-`160000` filter and assert it still runs before the matcher (`vendor` has no extension, now filtered twice over).
+- [x] 4.5 Review and update `gitState.test.ts` L43/L61/L124/L134/L162 (staged-dirty, empty index, limits, small-state): add `provenance: "tracked"` to every existing `state.files` `toEqual` assertion (all fixtures are `.py`). Actual current line numbers had drifted from the design's citations; every `state.files` `toEqual` assertion in the file (including the commit-capture and accented-UTF-8 tests) was updated by content/description rather than line number, since `CapturedFile.provenance` is now a required field on every such literal.
+- [x] 4.6 Confirm `test/unit/webviewHost.test.ts`'s `SessionDeps` literals need zero edits (`requestRefresh`/`onIdle` are optional — not part of this slice's runtime change, only confirming no incidental breakage). Confirmed — `SessionDeps` literals unchanged; the only `webviewHost.test.ts` edits were two pre-existing `CapturedFile` object literals (used to seed `SnapshotStore`, unrelated to `SessionDeps`) that needed `provenance: "tracked"` added to satisfy the now-required field (see Deviations).
+- [x] 4.7 GREEN edit `src/extension.ts`: delete `buildGraphForSelection`'s late `.endsWith(".py")` filter. Note precisely: `buildGraphForSelection` keeps working exactly as today without its own filter, because `captureGitState` now returns pre-filtered files via the matcher — this leaves no temporarily-broken intermediate state even though `buildGraphForSelection`'s extraction into `ComparisonController` is deferred to PR 2.
+- [x] 4.8 Run `npm run lint && npm run typecheck && npm run test:unit -- sourceFileMatcher gitState && npm run test:integration -- gitState && npm run test:e2e` and confirm all green before opening PR 1 against the tracker branch. All green — see Work Unit Evidence below.
 
 ## Phase 5: Slice B — `ComparisonController` Scaffolding (PR 2, base: PR 1 branch)
 

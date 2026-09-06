@@ -31,8 +31,8 @@ beforeEach(async () => {
   vi.stubGlobal("document", dom.window.document);
   vi.stubGlobal("acquireVsCodeApi", () => ({ postMessage: (message: WebviewToHostMessage) => { intents.push(message); void session.handleIntent(message); } }));
   const store = new SnapshotStore();
-  store.store({ snapshot, files: [{ path: "m.py", content }] });
-  store.store({ snapshot: leftSnapshot, files: [{ path: "m.py", content: "print('initial')\n" }] });
+  store.store({ snapshot, files: [{ path: "m.py", content, provenance: "tracked" }] });
+  store.store({ snapshot: leftSnapshot, files: [{ path: "m.py", content: "print('initial')\n", provenance: "tracked" }] });
   run = vi.fn(async source => ({ variant: source.variant, kind: "success", exitCode: 0, stdout: "ok\n", stderr: "" }));
   session = new ChangeMapSession({ repoRoot: "/repo", store, draftStore: new DraftStore(), openSource: vi.fn(), performWrite: vi.fn(async request => {
     await writePreviewGate;
@@ -154,8 +154,8 @@ it("collapses long unchanged runs, toggles them open/closed, and resets on a new
   const bigLeftContent = `${leftLines.join("\n")}\n`;
   const bigRightContent = `${rightLines.join("\n")}\n`;
   const bigStore = new SnapshotStore();
-  bigStore.store({ snapshot: bigSnapshotRight, files: [{ path: "big.py", content: bigRightContent }] });
-  bigStore.store({ snapshot: bigSnapshotLeft, files: [{ path: "big.py", content: bigLeftContent }] });
+  bigStore.store({ snapshot: bigSnapshotRight, files: [{ path: "big.py", content: bigRightContent, provenance: "tracked" }] });
+  bigStore.store({ snapshot: bigSnapshotLeft, files: [{ path: "big.py", content: bigLeftContent, provenance: "tracked" }] });
   const bigNode = { id: "module:big", kind: "module" as const, qualifiedName: "big", span: { path: "big.py", startByte: 0, endByte: bigRightContent.length, startLine: 1, startColumn: 0, endLine: 21, endColumn: 0 } };
   const bigGraph: AnalysisGraph = { snapshot: bigSnapshotRight, nodes: [bigNode], edges: [], diagnostics: [] };
   // Reassigning the shared `session` binding: the webview module's `postMessage` stub closes

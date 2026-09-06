@@ -18,7 +18,7 @@ const span = { path: "m.py", startByte: 0, endByte: content.indexOf(":") + 1, st
 
 function makeStore(): SnapshotStore {
   const store = new SnapshotStore();
-  store.store({ snapshot: rightSnapshot, files: [{ path: "m.py", content }] });
+  store.store({ snapshot: rightSnapshot, files: [{ path: "m.py", content, provenance: "tracked" }] });
   return store;
 }
 
@@ -374,7 +374,7 @@ it("preserves other file bytes when applying a snippet through the real writer",
     const full = "# prefix π\nprint('old')\n# suffix\n";
     const startByte = Buffer.byteLength("# prefix π\n");
     const endByte = startByte + Buffer.byteLength("print('old')\n");
-    const store = new SnapshotStore(); store.store({ snapshot: rightSnapshot, files: [{ path: "m.py", content: full }] });
+    const store = new SnapshotStore(); store.store({ snapshot: rightSnapshot, files: [{ path: "m.py", content: full, provenance: "tracked" }] });
     await writeFile(join(repoRoot, "m.py"), full);
     const posted: HostToWebviewMessage[] = [];
     const session = new ChangeMapSession({ repoRoot, store, draftStore: new DraftStore(), openSource: vi.fn(), runSnippet: vi.fn(), performWrite: performGuardedWrite, post: m => posted.push(m) });

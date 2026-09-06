@@ -107,8 +107,7 @@ async function buildGraphForSelection(
 ): Promise<AnalysisGraph> {
   const state = await captureGitState(repoRoot, selection);
   store.store(state);
-  const pythonFiles = state.files.filter((file) => file.path.endsWith(".py"));
-  return analyzePython({ type: "analyze", snapshot: state.snapshot, files: pythonFiles.length > 0 ? pythonFiles : [{ path: "__empty__.py", content: "" }] }, extensionRoot);
+  return analyzePython({ type: "analyze", snapshot: state.snapshot, files: state.files.length > 0 ? state.files : [{ path: "__empty__.py", content: "" }] }, extensionRoot);
 }
 
 /**
