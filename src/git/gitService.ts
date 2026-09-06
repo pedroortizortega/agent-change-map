@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { readFile, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { DTO_LIMITS, type SnapshotId } from "../protocol.js";
+import { defaultSourceFileMatcher, type SourceFileMatcher } from "../analysis/sourceFileMatcher.js";
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
@@ -11,6 +12,7 @@ const UNSAFE_TOKEN_PATTERN = /[\s:^~?*[\]\\]/;
 export interface CapturedFile {
   path: string;
   content: string;
+  provenance: "tracked" | "untracked";
 }
 
 export interface CapturedState {
@@ -34,6 +36,7 @@ export interface WorktreeCaptureBegin {
   canonicalPath: string;
   fingerprint: string;
   trackedPaths: string[];
+  untrackedPaths: string[];
   headOid: string | null;
   contentFingerprint: string;
 }
@@ -227,15 +230,19 @@ export function computeContentDigest(files: CapturedFile[]): string {
   return `sha256:${hash.digest("hex")}`;
 }
 
-export async function captureCommitState(repoRoot: string, ref: string): Promise<CapturedState> {
+export async function captureCommitState(
+  repoRoot: string,
+  ref: string,
+  matcher: SourceFileMatcher = defaultSourceFileMatcher,
+): Promise<CapturedState> {
   const oid = await resolveCommitOid(repoRoot, ref);
-  const entries = await listTreeEntries(repoRoot, oid);
+  const entries = (await listTreeEntries(repoRoot, oid)).filter((entry) => matcher.matches(entry.path));
   assertWithinCaptureLimits(entries.length);
   const files = await Promise.all(
     entries.map(async (entry) => {
       const buffer = await readBlobBuffer(repoRoot, entry.sha);
       assertContentWithinSizeLimit(buffer, entry.path);
-      return { path: entry.path, content: decodeUtf8OrThrow(buffer, entry.path) };
+      return { path: entry.path, content: decodeUtf8OrThrow(buffer, entry.path), provenance: "tracked" as const };
     }),
   );
   const repoId = await computeRepoId(repoRoot);
@@ -243,7 +250,7 @@ export async function captureCommitState(repoRoot: string, ref: string): Promise
 }
 
 async function statusFingerprint(canonicalPath: string): Promise<string> {
-  const output = await runGit(canonicalPath, ["status", "--porcelain=v1", "--untracked-files=no"]);
+  const output = await runGit(canonicalPath, ["status", "--porcelain=v1", "--untracked-files=all"]);
   return `sha256:${createHash("sha256").update(output, "utf8").digest("hex")}`;
 }
 
@@ -256,7 +263,7 @@ const GITLINK_MODE = "160000";
  * with EISDIR. `git ls-files` alone doesn't expose the mode, so `-s` is used to
  * read and filter it out.
  */
-async function listTrackedPaths(canonicalPath: string): Promise<string[]> {
+async function listTrackedPaths(canonicalPath: string, matcher: SourceFileMatcher): Promise<string[]> {
   const output = await runGit(canonicalPath, ["ls-files", "-s"]);
   return output
     .split("\n")
@@ -267,7 +274,22 @@ async function listTrackedPaths(canonicalPath: string): Promise<string[]> {
       return { mode, path: line.slice(tabIndex + 1) };
     })
     .filter((entry) => entry.mode !== GITLINK_MODE)
-    .map((entry) => entry.path);
+    .map((entry) => entry.path)
+    .filter((path) => matcher.matches(path));
+}
+
+/**
+ * Lists never-staged, non-ignored file paths already filtered by the matcher.
+ * `--exclude-standard` applies `.gitignore`/`.git/info/exclude`/global excludes so
+ * ignored noise never reaches capture; `--others` never reports gitlink entries, so no
+ * additional mode filter is needed here (unlike {@link listTrackedPaths}).
+ */
+async function listUntrackedPaths(canonicalPath: string, matcher: SourceFileMatcher): Promise<string[]> {
+  const output = await runGit(canonicalPath, ["ls-files", "--others", "--exclude-standard"]);
+  return output
+    .split("\n")
+    .filter(Boolean)
+    .filter((path) => matcher.matches(path));
 }
 
 /**
@@ -286,10 +308,12 @@ async function resolveHeadOidOrNull(canonicalPath: string): Promise<string | nul
 }
 
 /**
- * Hashes the path and content of every tracked file so instability that a porcelain
- * status diff cannot see - e.g. a file already dirty at `begin` time being edited again
- * during the capture window, which leaves the porcelain status letter unchanged - is
- * still detected by comparing this fingerprint before and after the read.
+ * Hashes the path and content of every tracked or untracked file selected for capture so
+ * instability that a porcelain status diff cannot see - e.g. a file already dirty at
+ * `begin` time being edited again during the capture window, which leaves the porcelain
+ * status letter unchanged (an untracked file's status letter is always `??`, so this is
+ * the only signal that catches a mid-capture edit to an untracked file) - is still
+ * detected by comparing this fingerprint before and after the read.
  */
 function contentFingerprintFromEntries(entries: { path: string; content: string }[]): string {
   const hash = createHash("sha256");
@@ -312,6 +336,7 @@ async function readTrackedContentOrMarker(canonicalPath: string, path: string): 
   return decodeUtf8OrThrow(buffer, path);
 }
 
+/** Fingerprints the combined tracked-plus-untracked path list captured at `begin` time. */
 async function computeTrackedContentFingerprint(canonicalPath: string, trackedPaths: string[]): Promise<string> {
   const entries = await Promise.all(
     trackedPaths.map(async (path) => ({ path, content: await readTrackedContentOrMarker(canonicalPath, path) })),
@@ -326,24 +351,61 @@ async function computeTrackedContentFingerprint(canonicalPath: string, trackedPa
  * - including a same-status re-edit of an already-dirty file, or a clean checkout to a
  * different commit - can be detected deterministically by {@link finishWorktreeCapture}.
  */
-export async function beginWorktreeCapture(repoRoot: string, worktreePath: string): Promise<WorktreeCaptureBegin> {
+export async function beginWorktreeCapture(
+  repoRoot: string,
+  worktreePath: string,
+  matcher: SourceFileMatcher = defaultSourceFileMatcher,
+): Promise<WorktreeCaptureBegin> {
   const canonicalPath = await validateWorktreeMembership(repoRoot, worktreePath);
   const fingerprint = await statusFingerprint(canonicalPath);
-  const trackedPaths = await listTrackedPaths(canonicalPath);
+  const trackedPaths = await listTrackedPaths(canonicalPath, matcher);
+  const untrackedPaths = await listUntrackedPaths(canonicalPath, matcher);
   const headOid = await resolveHeadOidOrNull(canonicalPath);
-  const contentFingerprint = await computeTrackedContentFingerprint(canonicalPath, trackedPaths);
-  return { canonicalPath, fingerprint, trackedPaths, headOid, contentFingerprint };
+  const contentFingerprint = await computeTrackedContentFingerprint(canonicalPath, [...trackedPaths, ...untrackedPaths]);
+  return { canonicalPath, fingerprint, trackedPaths, untrackedPaths, headOid, contentFingerprint };
+}
+
+/**
+ * Reads a file selected during {@link beginWorktreeCapture} for the actual capture.
+ * A file vanishing between `begin` and this read (e.g. deleted mid-capture) is itself an
+ * instability, so ENOENT is translated to {@link GitCaptureInstabilityError} instead of
+ * bubbling up as a raw filesystem error.
+ */
+async function readCaptureFileOrThrowInstability(canonicalPath: string, path: string): Promise<Buffer> {
+  try {
+    return await readFile(resolve(canonicalPath, path));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new GitCaptureInstabilityError(`File disappeared while capturing the selected content: ${path}`);
+    }
+    throw error;
+  }
 }
 
 export async function finishWorktreeCapture(begin: WorktreeCaptureBegin): Promise<CapturedState> {
-  assertWithinCaptureLimits(begin.trackedPaths.length);
-  const files = await Promise.all(
+  assertWithinCaptureLimits(begin.trackedPaths.length + begin.untrackedPaths.length);
+  const seenPaths = new Set<string>();
+  for (const path of [...begin.trackedPaths, ...begin.untrackedPaths]) {
+    if (seenPaths.has(path)) {
+      throw new GitCaptureLimitError(`Path reported as both tracked and untracked, refusing ambiguous capture: ${path}`);
+    }
+    seenPaths.add(path);
+  }
+  const trackedFiles = await Promise.all(
     begin.trackedPaths.map(async (path) => {
-      const buffer = await readFile(resolve(begin.canonicalPath, path));
+      const buffer = await readCaptureFileOrThrowInstability(begin.canonicalPath, path);
       assertContentWithinSizeLimit(buffer, path);
-      return { path, content: decodeUtf8OrThrow(buffer, path) };
+      return { path, content: decodeUtf8OrThrow(buffer, path), provenance: "tracked" as const };
     }),
   );
+  const untrackedFiles = await Promise.all(
+    begin.untrackedPaths.map(async (path) => {
+      const buffer = await readCaptureFileOrThrowInstability(begin.canonicalPath, path);
+      assertContentWithinSizeLimit(buffer, path);
+      return { path, content: decodeUtf8OrThrow(buffer, path), provenance: "untracked" as const };
+    }),
+  );
+  const files = [...trackedFiles, ...untrackedFiles];
   const afterFingerprint = await statusFingerprint(begin.canonicalPath);
   const afterHeadOid = await resolveHeadOidOrNull(begin.canonicalPath);
   const afterContentFingerprint = contentFingerprintFromEntries(files);
@@ -358,12 +420,20 @@ export async function finishWorktreeCapture(begin: WorktreeCaptureBegin): Promis
   return { snapshot: { repoId, kind: "worktree", contentDigest: computeContentDigest(files) }, files };
 }
 
-export async function captureWorktreeState(repoRoot: string, worktreePath: string): Promise<CapturedState> {
-  const begin = await beginWorktreeCapture(repoRoot, worktreePath);
+export async function captureWorktreeState(
+  repoRoot: string,
+  worktreePath: string,
+  matcher: SourceFileMatcher = defaultSourceFileMatcher,
+): Promise<CapturedState> {
+  const begin = await beginWorktreeCapture(repoRoot, worktreePath, matcher);
   return finishWorktreeCapture(begin);
 }
 
-export async function captureGitState(repoRoot: string, selection: GitSelection): Promise<CapturedState> {
-  if (selection.kind === "commit") return captureCommitState(repoRoot, selection.ref);
-  return captureWorktreeState(repoRoot, selection.path);
+export async function captureGitState(
+  repoRoot: string,
+  selection: GitSelection,
+  matcher: SourceFileMatcher = defaultSourceFileMatcher,
+): Promise<CapturedState> {
+  if (selection.kind === "commit") return captureCommitState(repoRoot, selection.ref, matcher);
+  return captureWorktreeState(repoRoot, selection.path, matcher);
 }
