@@ -194,6 +194,36 @@ export async function runScenarios(): Promise<void> {
     assert.equal(afterConsent.type, "graph");
     console.log("[e2e] oversized consent scenario ok");
 
+    // --- Refresh: create a file in the worktree, refresh, see the new node without reopening ---
+    {
+      await vscode.commands.executeCommand("agentChangeMap.compare", { left: fixture.baseOid, right: "" });
+      const refreshHooks = (await activateExtensionApi()).__test!;
+      const refreshSession = refreshHooks.getSession();
+      assert.ok(refreshSession, "Expected a ChangeMapSession for the worktree-right comparison");
+      await waitFor(() => refreshHooks.getLastReceivedMessages().some((m) => (m as { type?: string }).type === "graph"));
+      const beforeRefreshGraph = refreshHooks.getLastReceivedMessages().filter((m) => (m as { type?: string }).type === "graph").at(-1) as { graph: AnalysisGraph };
+      assert.equal(beforeRefreshGraph.graph.nodes.some((node) => node.span.path === "refreshed.py"), false, "New file must not yet exist in the pre-refresh graph");
+
+      const newFilePath = resolve(fixture.root, "refreshed.py");
+      try {
+        await writeFile(newFilePath, "def refreshed():\n    return 'new'\n");
+        const beforeRefreshCount = refreshHooks.getLastReceivedMessages().length;
+        await refreshSession!.handleIntent({ type: "requestRefresh", requestId: "e2e-refresh-1" });
+        await waitFor(() => refreshHooks.getLastReceivedMessages().length > beforeRefreshCount);
+        const refreshResult = refreshHooks
+          .getLastReceivedMessages()
+          .find((m) => (m as { type?: string; requestId?: string }).type === "refreshResult" && (m as { requestId?: string }).requestId === "e2e-refresh-1") as { ok: boolean } | undefined;
+        assert.ok(refreshResult, "Expected a refreshResult message for the manual refresh request");
+        assert.equal(refreshResult!.ok, true);
+        const afterRefreshGraph = refreshHooks.getLastReceivedMessages().filter((m) => (m as { type?: string }).type === "graph").at(-1) as { graph: AnalysisGraph; untrackedPaths: string[] };
+        assert.ok(afterRefreshGraph.graph.nodes.some((node) => node.span.path === "refreshed.py"), "Expected the newly created file's node after refresh");
+        assert.ok(afterRefreshGraph.untrackedPaths.includes("refreshed.py"), "Expected the newly created file to be reported as untracked");
+        console.log("[e2e] refresh scenario ok: new file visible without reopening the panel");
+      } finally {
+        await rm(newFilePath, { force: true });
+      }
+    }
+
     // --- Explicit run / stream / cancel (only if a real Docker daemon is reachable) ---
     const dockerAvailable = await isDockerAvailable();
     if (dockerAvailable) {
