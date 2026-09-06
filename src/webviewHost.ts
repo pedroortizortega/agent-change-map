@@ -133,6 +133,11 @@ export class ChangeMapSession {
     return this.pendingWriteConfirmations.size > 0 || this.pendingRunConfirmations.size > 0 || this.activeRuns.size > 0;
   }
 
+  /** Posts a `refreshDeferred` notification (auto-refresh queued rather than dropped while busy). */
+  notifyRefreshDeferred(reason: string): void {
+    this.deps.post({ type: "refreshDeferred", reason });
+  }
+
   /** Computes the comparison summary/graph and posts it, gating the full render on explicit oversized consent. */
   loadComparison(
     left: AnalysisGraph | undefined,

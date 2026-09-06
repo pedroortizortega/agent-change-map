@@ -337,6 +337,7 @@ function handleHostMessage(message: HostToWebviewMessage): void {
     case "runFailed": if (message.requestId === activeRun) { byId("run-output").append(document.createTextNode(`Run failed: ${message.reason}`)); activeRun = undefined; clearPendingAction(message.requestId); byId("confirmation").textContent = ""; updateEffectActionAvailability(); } break;
     case "error": byId("action-status").textContent = `Error: ${message.message}`; break;
     case "refreshResult": byId("action-status").textContent = message.ok ? "Refreshed." : `Refresh refused: ${message.reason}`; break;
+    case "refreshDeferred": byId("action-status").textContent = `Auto-refresh deferred: ${message.reason}`; break;
   }
 }
 window.addEventListener("message", (event: MessageEvent<HostToWebviewMessage>) => handleHostMessage(event.data));
