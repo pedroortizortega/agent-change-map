@@ -53,6 +53,9 @@ venv/
 .cache/
 tmp/
 
+# Personal reference material (not part of the project)
+docs/
+
 # Editor-local files
 .idea/
 
