@@ -18,26 +18,42 @@ body {
   margin-bottom: 8px;
 }
 
+.node-box {
+  fill: none;
+}
+
 .node-box.status-added {
-  fill: #2ea043;
+  stroke: #2ea043;
 }
 
 .node-box.status-removed {
-  fill: #f85149;
+  stroke: #f85149;
 }
 
 .node-box.status-modified {
-  fill: #d29922;
+  stroke: #d29922;
 }
 
 .node-box.status-unchanged {
-  fill: #3a3d41;
+  stroke: #6e7681;
 }
 
-.edge-label.resolution-ambiguous,
-.edge-label.resolution-unresolved {
-  font-style: italic;
-  fill: #f0883e;
+.edge-import,
+.arrow-import {
+  stroke: #4f9cf9;
+  fill: #4f9cf9;
+}
+
+.edge-call,
+.arrow-call {
+  stroke: #c586c0;
+  fill: #c586c0;
+}
+
+.resolution-ambiguous,
+.resolution-unresolved {
+  stroke: #f0883e;
+  fill: none;
 }
 
 #diff-panel {
@@ -96,7 +112,7 @@ body {
 #draft-content { display: block; width: calc(100% - 16px); font-family: monospace; }
 #confirmation pre, #run-output { white-space: pre-wrap; overflow-wrap: anywhere; }
 .node, .edge { cursor: pointer; }
-.node text, .edge-label { fill: var(--vscode-editor-foreground, #ccc); }
+.node text { fill: var(--vscode-editor-foreground, #ccc); }
 button, select, textarea { color: var(--vscode-input-foreground, #ccc); background: var(--vscode-input-background, #333); }
 button { margin: 4px; padding: 6px; }
 button:disabled { opacity: 0.5; }
