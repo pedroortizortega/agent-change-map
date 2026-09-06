@@ -1,0 +1,61 @@
+body {
+  margin: 0;
+  padding: 8px;
+  font-family: var(--vscode-font-family, sans-serif);
+  color: var(--vscode-editor-foreground, #ccc);
+  background: var(--vscode-editor-background, #1e1e1e);
+}
+
+#toolbar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+#oversized-consent {
+  border: 1px solid var(--vscode-inputValidation-warningBorder, #b89500);
+  padding: 8px;
+  margin-bottom: 8px;
+}
+
+.node-box.status-added {
+  fill: #2ea043;
+}
+
+.node-box.status-removed {
+  fill: #f85149;
+}
+
+.node-box.status-modified {
+  fill: #d29922;
+}
+
+.node-box.status-unchanged {
+  fill: #3a3d41;
+}
+
+.edge-label.resolution-ambiguous,
+.edge-label.resolution-unresolved {
+  font-style: italic;
+  fill: #f0883e;
+}
+
+#diff-panel {
+  white-space: pre-wrap;
+  font-family: var(--vscode-editor-font-family, monospace);
+  border-top: 1px solid var(--vscode-panel-border, #444);
+  margin-top: 8px;
+  padding-top: 8px;
+}
+
+#toolbar { flex-wrap: wrap; }
+#diff-panel { display: flex; gap: 16px; overflow-x: auto; }
+#diff-panel pre { flex: 1; min-width: 240px; }
+#source-actions { margin: 12px 0; }
+#draft-content { display: block; width: calc(100% - 16px); font-family: monospace; }
+#confirmation pre, #run-output { white-space: pre-wrap; overflow-wrap: anywhere; }
+.node, .edge { cursor: pointer; }
+.node text, .edge-label { fill: var(--vscode-editor-foreground, #ccc); }
+button, select, textarea { color: var(--vscode-input-foreground, #ccc); background: var(--vscode-input-background, #333); }
+button { margin: 4px; padding: 6px; }
+button:disabled { opacity: 0.5; }

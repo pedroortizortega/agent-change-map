@@ -51,6 +51,6 @@ Chain strategy: feature-branch-chain
 
 ## Phase 5: UI and Verification
 
-- [ ] 5.1 RED CSP/intents, whole/section SVG, filters, uncertainty/status, diffs, oversized-consent tests; GREEN create `webview/{index.ts,graphView.ts,styles.css}`.
-- [ ] 5.2 RED VS Code e2e selection, exact/stale navigation, draft/direct save, explicit run/stream/cancel, oversized consent; GREEN wire `src/extension.ts`.
-- [ ] 5.3 REFACTOR; run `npm run lint && npm run typecheck && npm test && npm run test:e2e` plus gated `npm run test:docker`; document skips in `README.md`.
+- [x] 5.1 RED CSP/intents, whole/section SVG, filters, uncertainty/status, diffs, oversized-consent tests; GREEN create `webview/{index.ts,graphView.ts,styles.css}`.
+- [x] 5.2 RED VS Code e2e selection, exact/stale navigation, draft/direct save, explicit run/stream/cancel, oversized consent; GREEN wire `src/extension.ts`.
+- [x] 5.3 REFACTOR; run `npm run lint && npm run typecheck && npm test && npm run test:e2e` plus gated `npm run test:docker`; document skips in `README.md`.

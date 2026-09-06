@@ -7,15 +7,21 @@
   "engines": {
     "vscode": "^1.95.0"
   },
-  "main": "./out/extension.js",
+  "main": "./out/src/extension.js",
   "activationEvents": [],
   "contributes": {
-    "commands": []
+    "commands": [
+      {
+        "command": "agentChangeMap.compare",
+        "title": "Agent Change Map: Compare Python Changes"
+      }
+    ]
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
-    "lint": "eslint src test --max-warnings=0",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.build.json && npm run build:webview",
+    "build:webview": "tsc -p tsconfig.webview.json && node scripts/copy-webview-assets.mjs",
+    "lint": "eslint src test webview --max-warnings=0",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.webview.json --noEmit",
     "test": "vitest run",
     "test:unit": "vitest run test/unit",
     "test:integration": "vitest run test/integration",
@@ -26,9 +32,12 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.35.0",
+    "@types/jsdom": "^30.0.0",
     "@types/node": "^24.3.1",
     "@types/vscode": "^1.95.0",
+    "@vscode/test-electron": "^3.1.0",
     "eslint": "^9.35.0",
+    "jsdom": "^30.0.1",
     "typescript": "^5.9.2",
     "typescript-eslint": "^8.42.0",
     "vitest": "^3.2.4"
