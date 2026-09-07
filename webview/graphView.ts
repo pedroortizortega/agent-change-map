@@ -1,6 +1,6 @@
 import type { AnalysisGraph, Edge, Entity, EdgeResolution } from "../src/protocol.js";
 import type { CorrelatedDiffEntry } from "../src/navigation/sourceProvider.js";
-import { edgePathFor, type Rect } from "./edgeGeometry.js";
+import { edgePathsFor, type Rect } from "./edgeGeometry.js";
 
 /**
  * Builds the exact strict Content-Security-Policy meta tag this webview emits. No remote
@@ -334,9 +334,9 @@ const RESOLVED_ARROW: Record<"import" | "call", string> = {
 
 const DEFS = [
   "<defs>",
-  '<marker id="acm-arrow-import" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">',
+  '<marker id="acm-arrow-import" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto-start-reverse">',
   '<path d="M0,0 L10,5 L0,10 z" class="arrow-import"></path></marker>',
-  '<marker id="acm-arrow-call" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">',
+  '<marker id="acm-arrow-call" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto-start-reverse">',
   '<path d="M0,0 L10,5 L0,10 z" class="arrow-call"></path></marker>',
   "</defs>",
 ].join("");
@@ -346,36 +346,68 @@ const DEFS = [
  * (containment is expressed only via nesting - the caller must still iterate `graph.edges`
  * by array index so surviving edges keep their true index). Resolved `import`/`call` edges
  * whose target is laid out draw an elbowed line with an arrowhead at the target; ambiguous,
- * unresolved, and resolved-but-target-not-in-view edges draw a dashed downward stub with no
- * arrowhead, retaining `<title>` and `data-resolution` verbatim.
+ * unresolved, and resolved-but-target-not-in-view edges retain metadata and are grouped
+ * into their source box's relationship indicator instead of drawing dangling stubs.
  */
-function renderEdge(edge: Edge, index: number, boxes: Map<string, Rect>): string | undefined {
+function renderEdge(edge: Edge, index: number, boxes: Map<string, Rect>, path: string | undefined): string | undefined {
   if (edge.kind === "contains") return undefined;
   const sourceBox = boxes.get(edge.source);
   if (!sourceBox) return undefined;
   const targetId = edge.resolution.kind === "resolved" ? edge.resolution.target : undefined;
   const targetBox = targetId ? boxes.get(targetId) : undefined;
   const label = resolutionLabel(edge.resolution);
-  const path = edgePathFor(boxes, edge.source, targetId);
+  if (!targetBox) {
+    const reason = edge.resolution.kind === "resolved" ? `Known target outside current view: ${edge.resolution.target}` : label;
+    return `<g class="edge edge-detail" data-edge-index="${index}" data-edge-kind="${edge.kind}" data-resolution="${edge.resolution.kind}"><title>${escapeXml(reason)}</title></g>`;
+  }
   if (path === undefined) return undefined;
 
-  let markerAttr = "";
-  let dashAttr = "";
-  let colorClass: string;
-  if (targetBox) {
-    markerAttr = ` marker-end="url(#${RESOLVED_ARROW[edge.kind]})"`;
-    colorClass = `edge-${edge.kind}`;
-  } else {
-    dashAttr = ' stroke-dasharray="4 3"';
-    colorClass = `resolution-${edge.resolution.kind === "resolved" ? "unresolved" : edge.resolution.kind}`;
-  }
+  const markerAttr = ` marker-end="url(#${RESOLVED_ARROW[edge.kind]})"`;
+  const colorClass = `edge-${edge.kind}`;
 
   return [
     `<g class="edge" data-edge-index="${index}" data-edge-kind="${edge.kind}" data-resolution="${edge.resolution.kind}">`,
     `<title>${escapeXml(label)}</title>`,
-    `<path class="${colorClass}" d="${path}" fill="none"${dashAttr}${markerAttr}></path>`,
+    `<path class="${colorClass}" d="${path}" fill="none" stroke-linejoin="round" stroke-linecap="round"${markerAttr}></path>`,
     `</g>`,
   ].join("");
+}
+
+/** Exclude containment before allocating connector ports, while preserving protocol indices. */
+function routedPaths(edges: readonly Edge[], boxes: Map<string, Rect>): Map<number, string | undefined> {
+  const visible = edges.map((edge, index) => ({ edge, index })).filter(({ edge }) => edge.kind !== "contains" && edge.resolution.kind === "resolved" && boxes.has(edge.resolution.target));
+  const paths = edgePathsFor(boxes, visible.map(({ edge }) => ({
+    source: edge.source,
+    target: edge.resolution.kind === "resolved" ? edge.resolution.target : undefined,
+  })));
+  return new Map(visible.map(({ index }, i) => [index, paths[i]]));
+}
+
+/** One compact control per source; graph data (not serialized HTML) populates its popup. */
+function renderRelationshipIndicators(graph: AnalysisGraph, boxes: ReadonlyMap<string, Rect>): string {
+  const counts = new Map<string, number>();
+  for (const edge of graph.edges) {
+    if (edge.kind !== "contains" && boxes.has(edge.source) && (edge.resolution.kind !== "resolved" || !boxes.has(edge.resolution.target))) {
+      counts.set(edge.source, (counts.get(edge.source) ?? 0) + 1);
+    }
+  }
+  return graph.nodes.map(node => {
+    const count = counts.get(node.id); const box = boxes.get(node.id);
+    if (!count || !box) return "";
+    const label = `Show ${count} relationship ${count === 1 ? "detail" : "details"} for ${node.qualifiedName}`;
+    return `<g class="relationship-indicator" data-relationship-source="${escapeXml(node.id)}" transform="translate(${box.x + box.w - 34},${box.y + 7})" role="button" tabindex="0" aria-haspopup="dialog" aria-expanded="false" aria-label="${escapeXml(label)}"><title>${escapeXml(label)}</title><rect width="24" height="18" rx="5"></rect><text x="12" y="13" text-anchor="middle">${count > 99 ? "99+" : count}</text></g>`;
+  }).join("");
+}
+
+/** Include outside lanes and arrowheads rather than clipping them at the old node-only bounds. */
+function routeViewport(paths: ReadonlyMap<number, string | undefined>, width: number, height: number): string {
+  let minX = 0; let minY = 0; let maxX = width; let maxY = height;
+  for (const path of paths.values()) for (const match of (path ?? "").matchAll(/(-?[\d.]+),(-?[\d.]+)/g)) {
+    const x = Number(match[1]); const y = Number(match[2]);
+    minX = Math.min(minX, x - MARGIN); minY = Math.min(minY, y - MARGIN);
+    maxX = Math.max(maxX, x + MARGIN); maxY = Math.max(maxY, y + MARGIN);
+  }
+  return `width="${maxX - minX}" height="${maxY - minY}" viewBox="${minX} ${minY} ${maxX - minX} ${maxY - minY}"`;
 }
 
 /**
@@ -384,8 +416,8 @@ function renderEdge(edge: Edge, index: number, boxes: Map<string, Rect>): string
  * which `renderFlatSvg` takes over; both paths share `renderNodeRect`/`renderEdge` so
  * outline-only kind encoding and drawn edges are preserved either way. Every node and edge
  * carries `data-*` attributes identifying its id/kind and, for edges, its exact resolution
- * status - `ambiguous`/`unresolved` edges are always rendered as an explicit dashed stub with
- * no arrowhead rather than being hidden or silently treated as resolved.
+ * status. Relationships without visible targets are disclosed through per-box indicators,
+ * never silently treated as resolved connectors.
  */
 export function renderGraphSvg(graph: AnalysisGraph, diff: CorrelatedDiffEntry[], untrackedPaths: readonly string[] = []): string {
   if (graph.nodes.length > NESTED_LAYOUT_LIMITS.nodes || graph.edges.length > NESTED_LAYOUT_LIMITS.edges) {
@@ -407,13 +439,15 @@ export function renderGraphSvg(graph: AnalysisGraph, diff: CorrelatedDiffEntry[]
   const height = Math.max(120, rootY === MARGIN ? 120 : rootY - ROOT_GAP + MARGIN);
   const width = Math.max(960, maxRight + MARGIN);
 
+  const paths = routedPaths(graph.edges, boxes);
   const edgeLines: string[] = [];
   graph.edges.forEach((edge, index) => {
-    const rendered = renderEdge(edge, index, boxes);
+    const rendered = renderEdge(edge, index, boxes, paths.get(index));
     if (rendered) edgeLines.push(rendered);
   });
 
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="Change map">${DEFS}${nodeLines.join("")}${edgeLines.join("")}</svg>`;
+  const viewport = routeViewport(paths, width, height);
+  return `<svg xmlns="http://www.w3.org/2000/svg" ${viewport} role="img" aria-label="Change map">${DEFS}${nodeLines.join("")}${edgeLines.join("")}${renderRelationshipIndicators(graph, boxes)}</svg>`;
 }
 
 /**
@@ -440,14 +474,16 @@ function renderFlatSvg(graph: AnalysisGraph, diff: CorrelatedDiffEntry[], untrac
     ].join("");
   });
 
+  const paths = routedPaths(graph.edges, boxes);
   const edgeLines: string[] = [];
   graph.edges.forEach((edge, index) => {
-    const rendered = renderEdge(edge, index, boxes);
+    const rendered = renderEdge(edge, index, boxes, paths.get(index));
     if (rendered) edgeLines.push(rendered);
   });
 
   const height = Math.max(120, 24 + graph.nodes.length * nodeSpacingY + 40);
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="960" height="${height}" viewBox="0 0 960 ${height}" role="img" aria-label="Change map">${DEFS}${nodeLines.join("")}${edgeLines.join("")}</svg>`;
+  const viewport = routeViewport(paths, 960, height);
+  return `<svg xmlns="http://www.w3.org/2000/svg" ${viewport} role="img" aria-label="Change map">${DEFS}${nodeLines.join("")}${edgeLines.join("")}${renderRelationshipIndicators(graph, boxes)}</svg>`;
 }
 
 /**

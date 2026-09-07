@@ -3,13 +3,16 @@ import {
   CURVE_MIN_DROP,
   DETOUR_CLEARANCE,
   MAX_DETOURS,
+  SIDE_ANCHOR_INSET,
   STUB_LEN,
   edgePathFor,
   obstaclesFor,
   routeWaypoints,
   segmentIntersectsRect,
   sourceAnchor,
+  sourceSideAnchor,
   targetAnchor,
+  targetSideAnchor,
   type Point,
   type Rect,
 } from "../../webview/edgeGeometry.js";
@@ -268,8 +271,11 @@ describe("edgePathFor — outer-lane fallback", () => {
   // target spans (close to) the diagram's own full width, the local L-elbow detour has no
   // free side to swing out to within the panel - both `leftX` and `rightX` land at or past the
   // diagram's own edges. `edgePathFor` must recognize this and fall back to a shared outer
-  // vertical lane (right of every box in the whole graph) instead of producing a detour that is
-  // effectively as wide as the diagram itself.
+  // vertical lane instead of producing a detour that is effectively as wide as the diagram
+  // itself. Since a follow-up fix, the fallback supports lanes on BOTH sides and picks
+  // whichever is closer to the edge's own from/to position (mirroring `routeWaypoints`' local
+  // detour side selection) - it is no longer hardcoded to "source exits right, target enters
+  // left".
   function assertPathClears(points: Point[], obstacles: readonly Rect[]): void {
     for (let i = 0; i < points.length - 1; i += 1) {
       for (const obstacle of obstacles) {
@@ -281,20 +287,54 @@ describe("edgePathFor — outer-lane fallback", () => {
     }
   }
 
-  it("routes through the outer lane, exiting/entering by side anchors, when the obstacle spans nearly the whole diagram width", () => {
+  it("routes through the LEFT outer lane, exiting/entering by side anchors near the box top, when source/target sit near the diagram's left edge", () => {
+    // Source/target sit at x=10 (near the diagram's own left edge, since the wide obstacle
+    // spans x=[0,500]); their from/to midpoint (x=20) is far closer to the left lane
+    // (leftX=-12) than to the right lane (rightX=512) - so the fix must pick the LEFT lane here,
+    // not hardcode the right one the way the previous (buggy) version always did.
     const boxes = new Map<string, Rect>([
       ["source", { x: 10, y: 0, w: 20, h: 20 }],
       ["target", { x: 10, y: 400, w: 20, h: 20 }],
       ["obstacle", { x: 0, y: 200, w: 500, h: 20 }],
     ]);
     const d = edgePathFor(boxes, "source", "target")!;
-    // Must exit the source from its right-center side, not the usual bottom-center.
-    expect(d).toBe("M30,10 L512,10 L512,410 L10,410");
+    // Exits the source and enters the target from their LEFT, near-lane
+    // sides - and both anchors' y sit SIDE_ANCHOR_INSET below the box's own top
+    // edge (y=0 / y=400), not dead vertical center (y=10 / y=410) which would overlap the
+    // node-label row drawn at local y="20".
+    expect(d).toBe(`M10,${0 + SIDE_ANCHOR_INSET} L-12,${0 + SIDE_ANCHOR_INSET} L-12,${400 + SIDE_ANCHOR_INSET} L10,${400 + SIDE_ANCHOR_INSET}`);
     const points = Array.from(d.matchAll(/-?[\d.]+,-?[\d.]+/g)).map((match) => {
       const [x, y] = match[0].split(",").map(Number);
       return { x, y };
     });
     assertPathClears(points, [boxes.get("obstacle")!]);
+    // Real clearance from the obstacle's own bounds, not a couple-pixel hug: the lane run sits
+    // a full DETOUR_CLEARANCE outside the obstacle's [0, 500] span.
+    for (const p of points) {
+      if (p.y > 200 && p.y < 220) expect(p.x).toBeLessThanOrEqual(0 - DETOUR_CLEARANCE);
+    }
+  });
+
+  it("routes through the RIGHT outer lane when source/target sit near the diagram's right edge instead", () => {
+    // Mirror image of the left-lane case above: source/target now sit at x=470 (near the wide
+    // obstacle's right end), so their midpoint is far closer to the right lane than the left
+    // one - the fix must still pick the right lane in that situation, proving both sides are
+    // genuinely reachable rather than one hardcoded direction.
+    const boxes = new Map<string, Rect>([
+      ["source", { x: 470, y: 0, w: 20, h: 20 }],
+      ["target", { x: 470, y: 400, w: 20, h: 20 }],
+      ["obstacle", { x: 0, y: 200, w: 500, h: 20 }],
+    ]);
+    const d = edgePathFor(boxes, "source", "target")!;
+    expect(d).toBe(`M490,${0 + SIDE_ANCHOR_INSET} L512,${0 + SIDE_ANCHOR_INSET} L512,${400 + SIDE_ANCHOR_INSET} L490,${400 + SIDE_ANCHOR_INSET}`);
+    const points = Array.from(d.matchAll(/-?[\d.]+,-?[\d.]+/g)).map((match) => {
+      const [x, y] = match[0].split(",").map(Number);
+      return { x, y };
+    });
+    assertPathClears(points, [boxes.get("obstacle")!]);
+    for (const p of points) {
+      if (p.y > 200 && p.y < 220) expect(p.x).toBeGreaterThanOrEqual(500 + DETOUR_CLEARANCE);
+    }
   });
 
   it("never triggers the outer lane for an ordinary obstacle far narrower than the diagram", () => {
@@ -306,6 +346,170 @@ describe("edgePathFor — outer-lane fallback", () => {
     const d = edgePathFor(boxes, "source", "target")!;
     expect(d).not.toContain("L512"); // sanity: not the outer-lane shape
     expect(d).toMatch(/^M[-\d.]+,[-\d.]+ L/); // still the ordinary local L-elbow + C path
+  });
+
+  it("stays on the ordinary local detour (no outer-lane trigger) for a borderline obstacle whose span is genuinely narrower than the diagram, with real DETOUR_CLEARANCE clearance", () => {
+    // Investigates whether needsOuterLaneFallback's width-based trigger still needs adjustment
+    // now that a genuine left lane exists as a fallback option. This obstacle sits hard against
+    // the diagram's own left edge (x=0) while a distant, unrelated box far to the right (x=600)
+    // sets a large diagramWidth - exactly the "boxes starting near the diagram's own left edge"
+    // shape called out as the risk. The relevant obstacle's own span (leftX..rightX) is still
+    // far narrower than diagramWidth, so the trigger correctly stays off; the local detour still
+    // clears the obstacle by the full DETOUR_CLEARANCE (not a tighter hug), and `pathClears`
+    // (already exercised by `edgePathFor`) is the real safety net for any residual crossing -
+    // confirming no further trigger-threshold adjustment is needed.
+    const boxes = new Map<string, Rect>([
+      ["source", { x: 0, y: 0, w: 20, h: 20 }],
+      ["target", { x: 0, y: 200, w: 20, h: 20 }],
+      ["obstacle", { x: 0, y: 100, w: 20, h: 20 }],
+      ["farContext", { x: 580, y: 5000, w: 20, h: 20 }], // makes diagramWidth large (600) without being a relevant obstacle
+    ]);
+    const d = edgePathFor(boxes, "source", "target")!;
+    expect(d).not.toContain("L580"); // not the outer lane
+    expect(d).toMatch(/^M[-\d.]+,[-\d.]+ L/);
+    const waypointMatch = /L(-?[\d.]+),(-?[\d.]+)/.exec(d);
+    expect(waypointMatch).not.toBeNull();
+    const wpX = Number(waypointMatch![1]);
+    expect(wpX).toBe(0 - DETOUR_CLEARANCE); // exactly the designed local-detour clearance, not tighter
+  });
+});
+
+describe("sourceSideAnchor / targetSideAnchor — near-top, not dead-center", () => {
+  // Regression: reported live-testing bug (screenshot, twice). These anchors used to land at
+  // dead vertical center (`box.y + box.h / 2`), which for typical leaf-node box heights sits
+  // very close to the node-label's fixed local `y="20"` baseline (see `graphView.ts`'s
+  // `<text class="node-label" x="8" y="20">` and its `NODE_H = 32` leaf box height), so the
+  // outer-lane fallback's arrowhead visually landed on top of the target's own name text.
+  //
+  // A real leaf box is 32px tall (`NODE_H` in graphView.ts), not the 20px this test used to use
+  // - at 20px the label's `y="20"` baseline sits exactly on the box's own bottom edge, so
+  // "clears the label row by 5px" passed trivially for almost any inset and didn't actually
+  // catch the first attempted fix (`SIDE_ANCHOR_INSET = 8`), which still visibly touched the
+  // label in practice. Mirroring the real 32px box height, with an estimated glyph-top ~11px
+  // above the `y="20"` baseline (~`box.y + 9`), makes this test exercise the real geometry.
+  const box: Rect = { x: 10, y: 100, w: 20, h: 32 };
+  const labelGlyphTopY = box.y + 9; // estimated top of the label glyphs, above the y="20" baseline
+
+  it("targetSideAnchor's y sits near the box's own top edge, clearly above the label's own glyph top", () => {
+    const anchor = targetSideAnchor(box, "right");
+    expect(anchor.y).toBeLessThan(labelGlyphTopY - 3);
+  });
+
+  it("sourceSideAnchor's y sits near the box's own top edge, clearly above the label's own glyph top", () => {
+    const anchor = sourceSideAnchor(box, "right");
+    expect(anchor.y).toBeLessThan(labelGlyphTopY - 3);
+  });
+
+  it("clamps the inset to half the box height for a very short box, never landing below its own center", () => {
+    const shortBox: Rect = { x: 0, y: 0, w: 20, h: 4 };
+    const anchor = targetSideAnchor(shortBox, "right");
+    expect(anchor.y).toBeLessThanOrEqual(shortBox.y + shortBox.h / 2);
+  });
+
+  it("sourceSideAnchor exits from the right side when laneSide is right, left side when laneSide is left", () => {
+    expect(sourceSideAnchor(box, "right").x).toBe(box.x + box.w);
+    expect(sourceSideAnchor(box, "left").x).toBe(box.x);
+  });
+
+  it("targetSideAnchor enters from the side NEAREST the lane (right side for a right lane, left side for a left lane)", () => {
+    expect(targetSideAnchor(box, "right").x).toBe(box.x + box.w);
+    expect(targetSideAnchor(box, "left").x).toBe(box.x);
+  });
+});
+
+describe("edgePathFor — Bezier curve must clear obstacles too, not just the straight line", () => {
+  // Regression: reported live-testing bug (screenshot). When routeWaypoints finds no obstacle
+  // crossing the STRAIGHT line from source to target, edgePathFor draws a smooth Bezier curve
+  // between them instead - but that curve is a genuinely different shape from the straight line
+  // that was actually tested. For an edge whose target sits ABOVE its source (e.g. a call edge
+  // going "backward" up the page), the curve's control points pull it below the source's own y
+  // before it swings back up to approach the target from above - it can bulge well outside the
+  // straight line's own [minY, maxY] span. An obstacle sitting in that bulge - like a sibling box
+  // stacked right below the source - was never tested by the old straight-line-only pathClears
+  // check, so the rendered curve visibly cut through it despite the check reporting "clear".
+  const source: Rect = { x: 90, y: 280, w: 20, h: 20 }; // sourceAnchor -> (100, 300)
+  const target: Rect = { x: 90, y: 30, w: 20, h: 20 }; // targetAnchor -> (100, 50), ABOVE source
+  // A sibling box stacked directly below the source (like app.Main.run below app.Main.__init__
+  // in the reported layout) - outside [50, 300], so the straight line never reaches it, but
+  // squarely in the curve's downward bulge at x=100.
+  const siblingBelowSource: Rect = { x: 80, y: 305, w: 40, h: 30 };
+
+  it("falls back to the outer lane when the Bezier curve (not just the straight line) would cross an obstacle", () => {
+    const boxes = new Map<string, Rect>([
+      ["source", source],
+      ["target", target],
+      ["obstacle", siblingBelowSource],
+    ]);
+    const d = edgePathFor(boxes, "source", "target")!;
+    // The straight line from (100,300) to (100,50) never crosses the obstacle - only the
+    // rendered curve's bulge does - so this is a real regression test for curve-awareness, not
+    // a restatement of the existing straight-line obstacle tests above.
+    expect(segmentIntersectsRect({ x: 100, y: 300 }, { x: 100, y: 50 }, siblingBelowSource)).toBe(false);
+    expect(d).not.toMatch(/^M[-\d.]+,[-\d.]+ C/); // not the unchecked plain-curve shape
+  });
+});
+
+describe("edgePathFor — an edge whose target is nested inside its own source", () => {
+  // Regression: reported live-testing bug, confirmed against REAL analyzer output for a module-
+  // level `Main(x)` constructor call (i.e. an edge from module:app straight to class:app.Main -
+  // the module literally contains the class it's calling, e.g. code in an
+  // `if __name__ == "__main__":` block). The ordinary sourceAnchor is the bottom-center of the
+  // WHOLE module box, which sits far below the nested class; the plain Bezier curve back up to
+  // the class's own top-center target anchor necessarily sweeps through the class's own methods
+  // along the way. Those methods are deliberately excluded from obstaclesFor (as descendants of
+  // both source and target) - by design, for the ordinary "entering a target from outside" case
+  // - so `pathClears` never flags this, even though the rendered curve visibly cuts through them.
+  // Exact boxes from the real analyzer output for this repo's own `test/` fixture (module app ->
+  // class app.Main, with methods __init__ and run nested inside the class).
+  const sourceBox: Rect = { x: 16, y: 288, w: 248, h: 152 }; // module:app
+  const targetBox: Rect = { x: 28, y: 318, w: 224, h: 112 }; // class:app.Main, nested inside source
+  const initBox: Rect = { x: 40, y: 348, w: 200, h: 32 }; // app.Main.__init__, nested inside target
+  const runBox: Rect = { x: 40, y: 388, w: 200, h: 32 }; // app.Main.run, nested inside target
+
+  it("anchors near the target's own row instead of the source's own far bottom edge, when the target is fully nested inside the source", () => {
+    const boxes = new Map<string, Rect>([
+      ["source", sourceBox],
+      ["target", targetBox],
+      ["init", initBox],
+      ["run", runBox],
+    ]);
+    const d = edgePathFor(boxes, "source", "target")!;
+    const points = Array.from(d.matchAll(/-?[\d.]+,-?[\d.]+/g)).map((m) => {
+      const [x, y] = m[0].split(",").map(Number);
+      return { x, y };
+    });
+    // Every point of the rendered path (endpoints and Bezier control points alike) stays well
+    // above initBox's own top edge (348) - a short local hop near the target's row, not a long
+    // sweep from the source's own bottom (440) back up past the target's nested descendants.
+    for (const p of points) {
+      expect(p.y).toBeLessThan(initBox.y);
+    }
+  });
+
+  it("also anchors from the source's top when the target is a SIBLING module above it, not nested inside the source", () => {
+    // Same root cause, different trigger: this is `from route2 import funcion2`, a module-level
+    // import statement (not a call), where the target (route2.funcion2) is a completely
+    // separate module, not nested inside source at all. What matters is only that the source
+    // (module:app) is a container whose own bottom-center anchor sits below its own methods,
+    // and the target is above that anchor - confirmed against the real analyzer output for this
+    // repo's own `test/` fixture, where this exact edge was found (by hand-verified sampling of
+    // its rendered curve) to cut through app.Main.run and app.Main.__init__ on the way up.
+    const targetBox: Rect = { x: 28, y: 222, w: 200, h: 32 }; // route2.funcion2, a sibling module's function
+    const boxes = new Map<string, Rect>([
+      ["source", sourceBox],
+      ["target", targetBox],
+      ["class", { x: 28, y: 318, w: 224, h: 112 }], // class:app.Main - makes source a container
+      ["init", initBox],
+      ["run", runBox],
+    ]);
+    const d = edgePathFor(boxes, "source", "target")!;
+    const points = Array.from(d.matchAll(/-?[\d.]+,-?[\d.]+/g)).map((m) => {
+      const [x, y] = m[0].split(",").map(Number);
+      return { x, y };
+    });
+    for (const p of points) {
+      expect(p.y).toBeLessThan(initBox.y);
+    }
   });
 });
 
