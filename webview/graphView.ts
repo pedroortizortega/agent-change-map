@@ -1,5 +1,6 @@
 import type { AnalysisGraph, Edge, Entity, EdgeResolution } from "../src/protocol.js";
 import type { CorrelatedDiffEntry } from "../src/navigation/sourceProvider.js";
+import { edgePathFor, type Rect } from "./edgeGeometry.js";
 
 /**
  * Builds the exact strict Content-Security-Policy meta tag this webview emits. No remote
@@ -38,14 +39,6 @@ function resolutionLabel(resolution: EdgeResolution): string {
   return "unresolved";
 }
 
-/** Absolute geometry recorded per node for edge anchoring. */
-interface Rect {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
-
 interface Size {
   w: number;
   h: number;
@@ -60,11 +53,6 @@ const GAP_Y = 8;
 const NODE_MIN_W = 200;
 const ROOT_GAP = 24;
 const MARGIN = 16;
-
-/** Minimum vertical offset for a Bezier edge's control points (edges never point upward flat). */
-const CURVE_MIN_DROP = 16;
-/** Length of the dashed stub drawn for ambiguous/unresolved/target-not-in-view edges. */
-const STUB_LEN = 28;
 
 /**
  * Threshold above which nested containment layout degrades to the flat vertical stack.
@@ -102,7 +90,7 @@ function renderNodeRect(kind: Entity["kind"], status: ChangeStatus, w: number, h
  * node (orphan), or part of a containment cycle (cycle guard mirroring `sectionScope`'s
  * existing seen-set walk) - all three cases are treated as loose roots with no placeholder.
  */
-function computeChildrenOf(nodes: Entity[]): Map<string | undefined, Entity[]> {
+function computeChildrenOf(nodes: Entity[], edges: readonly Edge[] = []): Map<string | undefined, Entity[]> {
   const byId = new Map(nodes.map((node) => [node.id, node] as const));
   const map = new Map<string | undefined, Entity[]>();
   for (const node of nodes) {
@@ -127,7 +115,88 @@ function computeChildrenOf(nodes: Entity[]): Map<string | undefined, Entity[]> {
     if (bucket) bucket.push(node);
     else map.set(key, [node]);
   }
+  for (const [key, bucket] of map) {
+    map.set(key, orderSiblings(bucket, edges, byId));
+  }
   return map;
+}
+
+/**
+ * Walks `nodeId`'s `containerId` chain (inclusive of `nodeId` itself) until it reaches a
+ * member of `bucketMembers` (a `Set` of ids that are direct children in the current sibling
+ * bucket), returning that member's id, or `undefined` if the chain never reaches this bucket.
+ */
+function siblingRootOf(nodeId: string, bucketMembers: ReadonlySet<string>, byId: Map<string, Entity>): string | undefined {
+  let current: Entity | undefined = byId.get(nodeId);
+  const seen = new Set<string>();
+  while (current) {
+    if (bucketMembers.has(current.id)) return current.id;
+    if (seen.has(current.id)) return undefined;
+    seen.add(current.id);
+    current = current.containerId ? byId.get(current.containerId) : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * Orders one sibling bucket via Kahn's topological sort over the sibling-restricted
+ * non-`contains` subgraph (see design.md "Sibling ordering"): a resolved edge whose source and
+ * target both resolve (via `siblingRootOf`) to two different members of this bucket adds an
+ * arc between those members. The ready queue always pops the smallest original array index; a
+ * cycle is broken by emitting the remaining node with the smallest original index and
+ * continuing. No arcs means the output is exactly the input array order.
+ */
+function orderSiblings(bucket: Entity[], edges: readonly Edge[], byId: Map<string, Entity>): Entity[] {
+  if (bucket.length <= 1) return bucket;
+  const memberIndex = new Map(bucket.map((node, index) => [node.id, index] as const));
+  const bucketMembers = new Set(bucket.map((node) => node.id));
+  const adjacency = new Map<string, Set<string>>();
+  const indegree = new Map<string, number>();
+  for (const node of bucket) {
+    adjacency.set(node.id, new Set());
+    indegree.set(node.id, 0);
+  }
+
+  for (const edge of edges) {
+    if (edge.kind === "contains") continue;
+    if (edge.resolution.kind !== "resolved") continue;
+    const sourceRoot = siblingRootOf(edge.source, bucketMembers, byId);
+    const targetRoot = siblingRootOf(edge.resolution.target, bucketMembers, byId);
+    if (!sourceRoot || !targetRoot || sourceRoot === targetRoot) continue;
+    // An edge's target must render before its source (a callee/import target sits above its
+    // caller/importer), so the topological arc runs target -> source.
+    const outSet = adjacency.get(targetRoot)!;
+    if (!outSet.has(sourceRoot)) {
+      outSet.add(sourceRoot);
+      indegree.set(sourceRoot, (indegree.get(sourceRoot) ?? 0) + 1);
+    }
+  }
+
+  const byOriginalIndex = (a: string, b: string): number => memberIndex.get(a)! - memberIndex.get(b)!;
+  const remaining = new Set(bucketMembers);
+  const ready = bucket.filter((node) => (indegree.get(node.id) ?? 0) === 0).map((node) => node.id);
+  ready.sort(byOriginalIndex);
+  const order: string[] = [];
+
+  while (order.length < bucket.length) {
+    if (ready.length === 0) {
+      const remainingIds = Array.from(remaining).sort(byOriginalIndex);
+      ready.push(remainingIds[0]);
+    }
+    const next = ready.shift()!;
+    if (!remaining.has(next)) continue;
+    order.push(next);
+    remaining.delete(next);
+    for (const target of adjacency.get(next) ?? []) {
+      if (!remaining.has(target)) continue;
+      const deg = (indegree.get(target) ?? 0) - 1;
+      indegree.set(target, deg);
+      if (deg === 0) ready.push(target);
+    }
+    ready.sort(byOriginalIndex);
+  }
+
+  return order.map((id) => byId.get(id)!);
 }
 
 function measure(node: Entity, childrenOf: Map<string | undefined, Entity[]>, memo: Map<string, Size>): Size {
@@ -220,22 +289,16 @@ function renderEdge(edge: Edge, index: number, boxes: Map<string, Rect>): string
   const targetId = edge.resolution.kind === "resolved" ? edge.resolution.target : undefined;
   const targetBox = targetId ? boxes.get(targetId) : undefined;
   const label = resolutionLabel(edge.resolution);
-  const sax = sourceBox.x + sourceBox.w / 2;
-  const say = sourceBox.y + sourceBox.h;
+  const path = edgePathFor(boxes, edge.source, targetId);
+  if (path === undefined) return undefined;
 
-  let path: string;
   let markerAttr = "";
   let dashAttr = "";
   let colorClass: string;
   if (targetBox) {
-    const tax = targetBox.x + targetBox.w / 2;
-    const tay = targetBox.y;
-    const dy = Math.max(Math.round(Math.abs(tay - say) / 2), CURVE_MIN_DROP);
-    path = `M${sax},${say} C${sax},${say + dy} ${tax},${tay - dy} ${tax},${tay}`;
     markerAttr = ` marker-end="url(#${RESOLVED_ARROW[edge.kind]})"`;
     colorClass = `edge-${edge.kind}`;
   } else {
-    path = `M${sax},${say} L${sax},${say + STUB_LEN}`;
     dashAttr = ' stroke-dasharray="4 3"';
     colorClass = `resolution-${edge.resolution.kind === "resolved" ? "unresolved" : edge.resolution.kind}`;
   }
@@ -243,7 +306,7 @@ function renderEdge(edge: Edge, index: number, boxes: Map<string, Rect>): string
   return [
     `<g class="edge" data-edge-index="${index}" data-edge-kind="${edge.kind}" data-resolution="${edge.resolution.kind}">`,
     `<title>${escapeXml(label)}</title>`,
-    `<path class="${colorClass}" d="${path}"${dashAttr}${markerAttr}></path>`,
+    `<path class="${colorClass}" d="${path}" fill="none"${dashAttr}${markerAttr}></path>`,
     `</g>`,
   ].join("");
 }
@@ -262,7 +325,7 @@ export function renderGraphSvg(graph: AnalysisGraph, diff: CorrelatedDiffEntry[]
     return renderFlatSvg(graph, diff, untrackedPaths);
   }
 
-  const childrenOf = computeChildrenOf(graph.nodes);
+  const childrenOf = computeChildrenOf(graph.nodes, graph.edges);
   const memo = new Map<string, Size>();
   const boxes = new Map<string, Rect>();
   const nodeLines: string[] = [];
@@ -283,7 +346,7 @@ export function renderGraphSvg(graph: AnalysisGraph, diff: CorrelatedDiffEntry[]
     if (rendered) edgeLines.push(rendered);
   });
 
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" role="img" aria-label="Change map">${DEFS}${nodeLines.join("")}${edgeLines.join("")}</svg>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="Change map">${DEFS}${nodeLines.join("")}${edgeLines.join("")}</svg>`;
 }
 
 /**
@@ -317,7 +380,7 @@ function renderFlatSvg(graph: AnalysisGraph, diff: CorrelatedDiffEntry[], untrac
   });
 
   const height = Math.max(120, 24 + graph.nodes.length * nodeSpacingY + 40);
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="960" height="${height}" role="img" aria-label="Change map">${DEFS}${nodeLines.join("")}${edgeLines.join("")}</svg>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="960" height="${height}" viewBox="0 0 960 ${height}" role="img" aria-label="Change map">${DEFS}${nodeLines.join("")}${edgeLines.join("")}</svg>`;
 }
 
 /**

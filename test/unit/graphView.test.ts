@@ -274,6 +274,20 @@ describe("directional edges and ambiguity", () => {
     expect(unresolvedD).not.toContain("C");
   });
 
+  it("renders every edge path outline-only (fill=none), never filled with the stroke color", () => {
+    // Regression: .edge-import/.edge-call previously shared a combined CSS selector with
+    // .arrow-import/.arrow-call (the marker arrowhead), which legitimately needs a fill.
+    // A simple 2-point Bezier edge path implicitly closed-and-filled to a barely-visible
+    // sliver, but a routed multi-waypoint path (M...L...L...C...) fills to a large,
+    // visibly wrong polygon once auto-closed. The edge <path> itself must always be
+    // outline-only; only the arrowhead marker triangle should be filled.
+    const svg = renderGraphSvg(nestedGraph(), []);
+    const doc = parseSvg(svg);
+    for (const path of Array.from(doc.querySelectorAll("g.edge path"))) {
+      expect(path.getAttribute("fill")).toBe("none");
+    }
+  });
+
   it("renders no element for contains edges while surviving edges keep their original graph.edges indices", () => {
     const svg = renderGraphSvg(nestedGraph(), []);
     const doc = parseSvg(svg);
@@ -294,7 +308,21 @@ describe("Bezier edges", () => {
   }
 
   it("renders a resolved edge as a cubic Bezier with control points offset vertically by at least CURVE_MIN_DROP", () => {
-    const svg = renderGraphSvg(nestedGraph(), []);
+    // Uses a minimal two-node fixture (no other boxes exist to obstruct) rather than
+    // nestedGraph(), since sibling ordering (Phase 3) legitimately reorders nestedGraph's root
+    // bucket and introduces a real detour waypoint on its call edge for an unrelated reason
+    // (a nested descendant's call target now sits above its ancestor); this test's intent is
+    // the CURVE_MIN_DROP invariant on the final curve segment, independent of routing.
+    const minimalGraph: AnalysisGraph = {
+      snapshot,
+      nodes: [
+        { id: "function:pkg.a", kind: "function", qualifiedName: "pkg.a", span },
+        { id: "function:pkg.b", kind: "function", qualifiedName: "pkg.b", span },
+      ],
+      edges: [{ kind: "call", source: "function:pkg.a", resolution: { kind: "resolved", target: "function:pkg.b" }, span }],
+      diagnostics: [],
+    };
+    const svg = renderGraphSvg(minimalGraph, []);
     const doc = parseSvg(svg);
     const callEdge = doc.querySelector('[data-edge-kind="call"][data-resolution="resolved"]')!;
     const path = callEdge.querySelector("path")!;
@@ -429,8 +457,10 @@ describe("CSS custom properties", () => {
     expect(css).toMatch(/\.node-box\.status-removed\s*\{[^}]*var\(--acm-status-removed\)/);
     expect(css).toMatch(/\.node-box\.status-modified\s*\{[^}]*var\(--acm-status-modified\)/);
     expect(css).toMatch(/\.node-box\.status-unchanged\s*\{[^}]*var\(--acm-status-unchanged\)/);
-    expect(css).toMatch(/\.edge-import,\s*\n?\s*\.arrow-import\s*\{[^}]*var\(--acm-edge-import\)/);
-    expect(css).toMatch(/\.edge-call,\s*\n?\s*\.arrow-call\s*\{[^}]*var\(--acm-edge-call\)/);
+    expect(css).toMatch(/\.edge-import\s*\{[^}]*var\(--acm-edge-import\)/);
+    expect(css).toMatch(/\.arrow-import\s*\{[^}]*var\(--acm-edge-import\)/);
+    expect(css).toMatch(/\.edge-call\s*\{[^}]*var\(--acm-edge-call\)/);
+    expect(css).toMatch(/\.arrow-call\s*\{[^}]*var\(--acm-edge-call\)/);
     expect(css).toMatch(/\.resolution-ambiguous,\s*\n?\s*\.resolution-unresolved\s*\{[^}]*var\(--acm-edge-ambiguous\)/);
     expect(css).toMatch(/\.provenance-untracked\s*\{[^}]*var\(--acm-provenance-untracked\)/);
   });
@@ -456,6 +486,180 @@ describe("flat-degradation threshold", () => {
   });
 });
 
+describe("edge routing via edgeGeometry", () => {
+  it("routes an edge whose straight path crosses an unrelated sibling box with L waypoints", () => {
+    // Array order is [target, obstacle, source]: with the source->call->target arc reordering
+    // siblings so the target renders above the source (see "sibling ordering" describe block),
+    // this order places the obstacle exactly between them post-reorder, matching the direct
+    // pre-reorder stacking intent (root-level nodes share the same x range).
+    const routingGraph: AnalysisGraph = {
+      snapshot,
+      nodes: [
+        { id: "function:pkg.c", kind: "function", qualifiedName: "pkg.c", span },
+        { id: "function:pkg.b", kind: "function", qualifiedName: "pkg.b", span },
+        { id: "function:pkg.a", kind: "function", qualifiedName: "pkg.a", span },
+      ],
+      edges: [{ kind: "call", source: "function:pkg.a", resolution: { kind: "resolved", target: "function:pkg.c" }, span }],
+      diagnostics: [],
+    };
+    const svg = renderGraphSvg(routingGraph, []);
+    const doc = parseSvg(svg);
+    const edge = doc.querySelector('[data-edge-kind="call"][data-resolution="resolved"]')!;
+    const d = edge.querySelector("path")!.getAttribute("d")!;
+    expect(d).toContain("L");
+  });
+
+  it("keeps a non-crossing edge's d byte-unchanged through the edgeGeometry wiring", () => {
+    // A minimal two-node fixture (no other boxes exist to obstruct, regardless of sibling
+    // ordering) isolates the wiring proof from the sibling-ordering behavior covered above.
+    const minimalGraph: AnalysisGraph = {
+      snapshot,
+      nodes: [
+        { id: "function:pkg.a", kind: "function", qualifiedName: "pkg.a", span },
+        { id: "function:pkg.b", kind: "function", qualifiedName: "pkg.b", span },
+      ],
+      edges: [{ kind: "call", source: "function:pkg.a", resolution: { kind: "resolved", target: "function:pkg.b" }, span }],
+      diagnostics: [],
+    };
+    const svg = renderGraphSvg(minimalGraph, []);
+    const doc = parseSvg(svg);
+    const callEdge = doc.querySelector('[data-edge-kind="call"][data-resolution="resolved"]')!;
+    const d = callEdge.querySelector("path")!.getAttribute("d")!;
+    // Independently recomputed via the pre-routing formula (sourceAnchor bottom-center,
+    // targetAnchor top-center, CURVE_MIN_DROP=16) to prove byte-identity, not merely a d.match.
+    function absoluteBox(id: string): { x: number; y: number; w: number; h: number } {
+      const el = doc.querySelector(`[data-node-id="${id}"]`)!;
+      const transform = el.getAttribute("transform") ?? "";
+      const match = /translate\(([\d.-]+),([\d.-]+)\)/.exec(transform);
+      const rect = doc.querySelector(`[data-node-id="${id}"] > rect.node-box`)!;
+      return {
+        x: Number(match![1]),
+        y: Number(match![2]),
+        w: Number(rect.getAttribute("width")),
+        h: Number(rect.getAttribute("height")),
+      };
+    }
+    const source = absoluteBox("function:pkg.a");
+    const target = absoluteBox("function:pkg.b");
+    const sax = source.x + source.w / 2;
+    const say = source.y + source.h;
+    const tax = target.x + target.w / 2;
+    const tay = target.y;
+    const dy = Math.max(Math.round(Math.abs(tay - say) / 2), 16);
+    const expected = `M${sax},${say} C${sax},${say + dy} ${tax},${tay - dy} ${tax},${tay}`;
+    expect(d).toBe(expected);
+  });
+});
+
+describe("sibling ordering", () => {
+  function siblingY(doc: Document, id: string): number {
+    const el = doc.querySelector(`[data-node-id="${id}"]`)!;
+    const transform = el.getAttribute("transform") ?? "";
+    const match = /translate\(([\d.-]+),([\d.-]+)\)/.exec(transform);
+    return Number(match![2]);
+  }
+
+  it("places a sibling ordered after another sibling due to a call edge below it (B->A places A above B)", () => {
+    const orderedGraph: AnalysisGraph = {
+      snapshot,
+      nodes: [
+        { id: "module:pkg.m", kind: "module", qualifiedName: "pkg.m", span },
+        { id: "function:pkg.m.b", kind: "function", qualifiedName: "pkg.m.b", containerId: "module:pkg.m", span },
+        { id: "function:pkg.m.a", kind: "function", qualifiedName: "pkg.m.a", containerId: "module:pkg.m", span },
+      ],
+      edges: [
+        { kind: "contains", source: "module:pkg.m", resolution: { kind: "resolved", target: "function:pkg.m.b" }, span },
+        { kind: "contains", source: "module:pkg.m", resolution: { kind: "resolved", target: "function:pkg.m.a" }, span },
+        { kind: "call", source: "function:pkg.m.b", resolution: { kind: "resolved", target: "function:pkg.m.a" }, span },
+      ],
+      diagnostics: [],
+    };
+    const svg = renderGraphSvg(orderedGraph, []);
+    const doc = parseSvg(svg);
+    const yA = siblingY(doc, "function:pkg.m.a");
+    const yB = siblingY(doc, "function:pkg.m.b");
+    expect(yA).toBeLessThan(yB);
+  });
+
+  it("keeps exact array order for siblings with no non-contains edges between them", () => {
+    const svg = renderGraphSvg(nestedGraph(), []);
+    const doc = parseSvg(svg);
+    // nestedGraph's package:pkg module bucket has only one member (module:pkg.a); use the
+    // class:pkg.a.C -> method:pkg.a.C.m + function:pkg.a.f bucket under module:pkg.a instead.
+    const yClass = siblingY(doc, "class:pkg.a.C");
+    const yFn = siblingY(doc, "function:pkg.a.f");
+    expect(yClass).toBeLessThan(yFn); // original array order: class before function
+  });
+
+  it("emits every sibling exactly once, deterministically, even with a sibling cycle", () => {
+    const cyclicGraph: AnalysisGraph = {
+      snapshot,
+      nodes: [
+        { id: "module:pkg.m", kind: "module", qualifiedName: "pkg.m", span },
+        { id: "function:pkg.m.a", kind: "function", qualifiedName: "pkg.m.a", containerId: "module:pkg.m", span },
+        { id: "function:pkg.m.b", kind: "function", qualifiedName: "pkg.m.b", containerId: "module:pkg.m", span },
+      ],
+      edges: [
+        { kind: "contains", source: "module:pkg.m", resolution: { kind: "resolved", target: "function:pkg.m.a" }, span },
+        { kind: "contains", source: "module:pkg.m", resolution: { kind: "resolved", target: "function:pkg.m.b" }, span },
+        { kind: "call", source: "function:pkg.m.a", resolution: { kind: "resolved", target: "function:pkg.m.b" }, span },
+        { kind: "call", source: "function:pkg.m.b", resolution: { kind: "resolved", target: "function:pkg.m.a" }, span },
+      ],
+      diagnostics: [],
+    };
+    const svg1 = renderGraphSvg(cyclicGraph, []);
+    const svg2 = renderGraphSvg(cyclicGraph, []);
+    const doc1 = parseSvg(svg1);
+    expect(doc1.querySelectorAll('[data-node-id="function:pkg.m.a"]').length).toBe(1);
+    expect(doc1.querySelectorAll('[data-node-id="function:pkg.m.b"]').length).toBe(1);
+    expect(svg1).toBe(svg2); // deterministic
+  });
+
+  it("applies the same ordering rule to root-level nodes", () => {
+    const rootGraph: AnalysisGraph = {
+      snapshot,
+      nodes: [
+        { id: "function:pkg.b", kind: "function", qualifiedName: "pkg.b", span },
+        { id: "function:pkg.a", kind: "function", qualifiedName: "pkg.a", span },
+      ],
+      edges: [{ kind: "call", source: "function:pkg.b", resolution: { kind: "resolved", target: "function:pkg.a" }, span }],
+      diagnostics: [],
+    };
+    const svg = renderGraphSvg(rootGraph, []);
+    const doc = parseSvg(svg);
+    const yA = siblingY(doc, "function:pkg.a");
+    const yB = siblingY(doc, "function:pkg.b");
+    expect(yA).toBeLessThan(yB);
+  });
+});
+
+describe("viewBox", () => {
+  it("carries viewBox=\"0 0 {width} {height}\" matching width/height on the nested-layout root", () => {
+    const svg = renderGraphSvg(nestedGraph(), []);
+    const doc = parseSvg(svg);
+    const root = doc.querySelector("svg")!;
+    const width = root.getAttribute("width");
+    const height = root.getAttribute("height");
+    expect(root.getAttribute("viewBox")).toBe(`0 0 ${width} ${height}`);
+  });
+
+  it("carries viewBox=\"0 0 {width} {height}\" matching width/height on the flat-layout root", () => {
+    const nodes: Entity[] = Array.from({ length: NESTED_LAYOUT_LIMITS.nodes + 1 }, (_, index) => ({
+      id: `function:pkg.f${index}`,
+      kind: "function" as const,
+      qualifiedName: `pkg.f${index}`,
+      span,
+    }));
+    const bigGraph: AnalysisGraph = { snapshot, nodes, edges: [], diagnostics: [] };
+    const svg = renderGraphSvg(bigGraph, []);
+    const doc = parseSvg(svg);
+    const root = doc.querySelector("svg")!;
+    const width = root.getAttribute("width");
+    const height = root.getAttribute("height");
+    expect(root.getAttribute("viewBox")).toBe(`0 0 ${width} ${height}`);
+  });
+});
+
 describe("data-* contract stability", () => {
   it("preserves the full node/edge data-* attribute set with exact current values", () => {
     const svg = renderGraphSvg(nestedGraph(), []);
@@ -468,5 +672,38 @@ describe("data-* contract stability", () => {
     expect(callEdge.getAttribute("data-edge-index")).not.toBeNull();
     expect(callEdge.getAttribute("data-edge-kind")).toBe("call");
     expect(callEdge.getAttribute("data-resolution")).toBe("resolved");
+  });
+
+  it("preserves the full data-* contract, KIND_STYLE, and status classes on a routed fixture", () => {
+    const routedGraph: AnalysisGraph = {
+      snapshot,
+      nodes: [
+        { id: "function:pkg.c", kind: "function", qualifiedName: "pkg.c", span },
+        { id: "function:pkg.b", kind: "function", qualifiedName: "pkg.b", span },
+        { id: "function:pkg.a", kind: "function", qualifiedName: "pkg.a", span },
+      ],
+      edges: [{ kind: "call", source: "function:pkg.a", resolution: { kind: "resolved", target: "function:pkg.c" }, span }],
+      diagnostics: [],
+    };
+    const svg = renderGraphSvg(routedGraph, []);
+    const doc = parseSvg(svg);
+    const edge = doc.querySelector('[data-edge-kind="call"][data-resolution="resolved"]')!;
+    const d = edge.querySelector("path")!.getAttribute("d")!;
+    expect(d).toContain("L"); // confirm this fixture is genuinely routed
+
+    for (const id of ["function:pkg.a", "function:pkg.b", "function:pkg.c"]) {
+      const node = doc.querySelector(`[data-node-id="${id}"]`)!;
+      expect(node.getAttribute("data-node-kind")).toBe("function");
+      expect(node.getAttribute("data-change-status")).toBe("unchanged");
+      expect(node.getAttribute("data-provenance")).toBe("tracked");
+      const rect = node.querySelector("rect.node-box")!;
+      expect(rect.getAttribute("fill")).toBe("none");
+      expect(rect.getAttribute("stroke-width")).toBe("2.5");
+      expect(rect.getAttribute("rx")).toBe("10");
+      expect(rect.getAttribute("class")).toBe("node-box status-unchanged");
+    }
+    expect(edge.getAttribute("data-edge-index")).not.toBeNull();
+    expect(edge.getAttribute("data-edge-kind")).toBe("call");
+    expect(edge.getAttribute("data-resolution")).toBe("resolved");
   });
 });
