@@ -30,42 +30,42 @@ override map; dropping PR 1 restores the inline fixed-anchor Bezier and array-or
 
 ## Phase 1: Slice A — `edgeGeometry.ts` (PR 1)
 
-- [ ] 1.1 RED `test/unit/edgeGeometry.test.ts` — Case 1: `segmentIntersectsRect` true through a box, false on a boundary touch, false for a box aside.
-- [ ] 1.2 RED `test/unit/edgeGeometry.test.ts` — Case 2: `edgePathFor` with no obstacles and a resolved target matches the existing byte-identical Bezier golden.
-- [ ] 1.3 RED `test/unit/edgeGeometry.test.ts` — Case 3: missing target box → unchanged dashed stub, never routed even with intersecting obstacles.
-- [ ] 1.4 RED `test/unit/edgeGeometry.test.ts` — Case 4: one intervening box → `d` contains `M`/`L`/`C`, waypoint x is `DETOUR_CLEARANCE` clear of the obstacle.
-- [ ] 1.5 RED `test/unit/edgeGeometry.test.ts` — Case 5: side choice — obstacle left of the line detours right, mirrored fixture detours left, centred tie → left.
-- [ ] 1.6 RED `test/unit/edgeGeometry.test.ts` — Case 6: two stacked obstacles → two waypoints in top-to-bottom encounter order.
-- [ ] 1.7 RED `test/unit/edgeGeometry.test.ts` — Case 7: more obstacles than `MAX_DETOURS` terminates, `<= MAX_DETOURS` waypoints, well-formed `d`, no throw.
-- [ ] 1.8 RED `test/unit/edgeGeometry.test.ts` — Case 8: `obstaclesFor` excludes source/target boxes, any ancestor box containing an anchor, and any box fully inside source/target.
-- [ ] 1.9 RED `test/unit/edgeGeometry.test.ts` — Case 9: every routed `d` ends with a `C` landing exactly on the target top-center anchor.
-- [ ] 1.10 GREEN create `webview/edgeGeometry.ts` (pure, no DOM, no imports): `Rect`, `Point`, `CURVE_MIN_DROP=16`, `STUB_LEN=28`, `DETOUR_CLEARANCE=12`, `MAX_DETOURS=3`, `sourceAnchor`, `targetAnchor`, `segmentIntersectsRect` (Liang–Barsky slab, `EPS=1e-6`), `obstaclesFor`, `routeWaypoints`, `edgePathFor` — implement exactly the design's path-string format table and detour-loop pseudocode. Make cases 1.1–1.9 pass.
-- [ ] 1.11 GREEN edit `tsconfig.build.json`: add `webview/edgeGeometry.ts` to `include` (`tsconfig.webview.json` needs no change — `webview/**/*.ts` already covers it).
-- [ ] 1.12 REFACTOR: confirm `edgeGeometry.ts` has zero imports and zero DOM references (dual-compile safety).
+- [x] 1.1 RED `test/unit/edgeGeometry.test.ts` — Case 1: `segmentIntersectsRect` true through a box, false on a boundary touch, false for a box aside.
+- [x] 1.2 RED `test/unit/edgeGeometry.test.ts` — Case 2: `edgePathFor` with no obstacles and a resolved target matches the existing byte-identical Bezier golden.
+- [x] 1.3 RED `test/unit/edgeGeometry.test.ts` — Case 3: missing target box → unchanged dashed stub, never routed even with intersecting obstacles.
+- [x] 1.4 RED `test/unit/edgeGeometry.test.ts` — Case 4: one intervening box → `d` contains `M`/`L`/`C`, waypoint x is `DETOUR_CLEARANCE` clear of the obstacle.
+- [x] 1.5 RED `test/unit/edgeGeometry.test.ts` — Case 5: side choice — obstacle left of the line detours right, mirrored fixture detours left, centred tie → left.
+- [x] 1.6 RED `test/unit/edgeGeometry.test.ts` — Case 6: two stacked obstacles → two waypoints in top-to-bottom encounter order.
+- [x] 1.7 RED `test/unit/edgeGeometry.test.ts` — Case 7: more obstacles than `MAX_DETOURS` terminates, `<= MAX_DETOURS` waypoints, well-formed `d`, no throw.
+- [x] 1.8 RED `test/unit/edgeGeometry.test.ts` — Case 8: `obstaclesFor` excludes source/target boxes, any ancestor box containing an anchor, and any box fully inside source/target.
+- [x] 1.9 RED `test/unit/edgeGeometry.test.ts` — Case 9: every routed `d` ends with a `C` landing exactly on the target top-center anchor.
+- [x] 1.10 GREEN create `webview/edgeGeometry.ts` (pure, no DOM, no imports): `Rect`, `Point`, `CURVE_MIN_DROP=16`, `STUB_LEN=28`, `DETOUR_CLEARANCE=12`, `MAX_DETOURS=3`, `sourceAnchor`, `targetAnchor`, `segmentIntersectsRect` (Liang–Barsky slab, `EPS=1e-6`), `obstaclesFor`, `routeWaypoints`, `edgePathFor` — implement exactly the design's path-string format table and detour-loop pseudocode. Make cases 1.1–1.9 pass.
+- [x] 1.11 GREEN edit `tsconfig.build.json`: add `webview/edgeGeometry.ts` to `include` (`tsconfig.webview.json` needs no change — `webview/**/*.ts` already covers it).
+- [x] 1.12 REFACTOR: confirm `edgeGeometry.ts` has zero imports and zero DOM references (dual-compile safety).
 
 ## Phase 2: Slice A — Wire `graphView.ts` to `edgeGeometry` (PR 1)
 
-- [ ] 2.1 GREEN edit `webview/graphView.ts`: delete local `Rect`, `CURVE_MIN_DROP`, `STUB_LEN`, and `renderEdge`'s inline path computation; import `edgePathFor` from `./edgeGeometry.js` and call `edgePathFor(boxes, edge.source, targetId)`.
-- [ ] 2.2 RED `test/unit/graphView.test.ts` — Case 13: a fixture whose straight edge crosses an unrelated box renders a `d` containing `L` waypoints.
-- [ ] 2.3 RED `test/unit/graphView.test.ts` — Case 14: the existing non-crossing fixture's `d` is byte-unchanged (majority-case regression proof).
-- [ ] 2.4 GREEN confirm 2.2/2.3 pass through the wired `edgePathFor` call from 2.1.
+- [x] 2.1 GREEN edit `webview/graphView.ts`: delete local `Rect`, `CURVE_MIN_DROP`, `STUB_LEN`, and `renderEdge`'s inline path computation; import `edgePathFor` from `./edgeGeometry.js` and call `edgePathFor(boxes, edge.source, targetId)`.
+- [x] 2.2 RED `test/unit/graphView.test.ts` — Case 13: a fixture whose straight edge crosses an unrelated box renders a `d` containing `L` waypoints.
+- [x] 2.3 RED `test/unit/graphView.test.ts` — Case 14: the existing non-crossing fixture's `d` is byte-unchanged (majority-case regression proof).
+- [x] 2.4 GREEN confirm 2.2/2.3 pass through the wired `edgePathFor` call from 2.1.
 
 ## Phase 3: Slice A — Sibling Ordering (PR 1)
 
-- [ ] 3.1 RED `test/unit/graphView.test.ts` — Case 15: siblings with a `call` edge B→A place A above B (rendered `transform` y order).
-- [ ] 3.2 RED `test/unit/graphView.test.ts` — Case 16: siblings with no non-`contains` edges keep exact array order.
-- [ ] 3.3 RED `test/unit/graphView.test.ts` — Case 17: a sibling cycle (A→B, B→A) emits every sibling exactly once, deterministically.
-- [ ] 3.4 RED `test/unit/graphView.test.ts` — Case 18: root-level nodes obey the same ordering.
-- [ ] 3.5 GREEN edit `webview/graphView.ts`: add `edges` param to `computeChildrenOf`, implement the Kahn topological sort per bucket exactly as the design specifies (smallest-original-index tie-break, cycle handling), plugged in after bucketing and before `place()`. `renderFlatSvg` stays array-order/untouched.
-- [ ] 3.6 REQUIRED VERIFICATION (design's own flagged, unverified analytic claim — not an assumption): run the existing `graphView.test.ts` fixtures against the new sibling-ordering algorithm and confirm zero coordinate/`transform` rewrites, per the design's stated prediction that `nestedGraph`'s module bucket has no cross-sibling arc and the root bucket's single arc already matches array order. If any existing assertion DOES move, declare and explain the rewrite explicitly in the PR description — do not silently edit it.
+- [x] 3.1 RED `test/unit/graphView.test.ts` — Case 15: siblings with a `call` edge B→A place A above B (rendered `transform` y order).
+- [x] 3.2 RED `test/unit/graphView.test.ts` — Case 16: siblings with no non-`contains` edges keep exact array order.
+- [x] 3.3 RED `test/unit/graphView.test.ts` — Case 17: a sibling cycle (A→B, B→A) emits every sibling exactly once, deterministically.
+- [x] 3.4 RED `test/unit/graphView.test.ts` — Case 18: root-level nodes obey the same ordering.
+- [x] 3.5 GREEN edit `webview/graphView.ts`: add `edges` param to `computeChildrenOf`, implement the Kahn topological sort per bucket exactly as the design specifies (smallest-original-index tie-break, cycle handling), plugged in after bucketing and before `place()`. `renderFlatSvg` stays array-order/untouched.
+- [x] 3.6 REQUIRED VERIFICATION — RAN and the design's own prediction did **NOT** fully hold; declared explicitly (not silently edited), see "Deviations" in the apply report. Root cause: the design's literal "add arc source→target" pseudocode, read with standard Kahn convention (u before v), places the caller before the callee — but tasks.md Case 15 explicitly requires the opposite ("call edge B→A place A above B"). Implemented the arc as `target -> source` (callee ready before caller) to satisfy Case 15/18, which are the concrete, unambiguous acceptance criteria. This exposed a second-order effect the design didn't anticipate: `nestedGraph()`'s root bucket has exactly the "single arc" the design describes (from `function:pkg.a.f`, nested inside `package:pkg`, calling root-level `function:pkg.b.g`), and with the corrected arc direction this reverses `package:pkg` vs `function:pkg.b.g`'s root order (design predicted it would match array order under the literal, non-reversed arc reading). Two pre-existing assertions were rewritten as a result (not silently): the "Bezier edges: control-point drop" test and the Phase-2 "byte-unchanged" golden test were switched from `nestedGraph()` to minimal two-node fixtures, since their intent (pure-formula/no-obstacle invariants) is independent of `nestedGraph()`'s specific layout, which now legitimately produces a routed (waypointed) edge for that one call edge.
 
 ## Phase 4: Slice A — `viewBox` Attribute and Data Contract (PR 1)
 
-- [ ] 4.1 RED `test/unit/graphView.test.ts` — Case 19: both `renderGraphSvg` and `renderFlatSvg` roots carry `viewBox="0 0 {width} {height}"` matching their `width`/`height`.
-- [ ] 4.2 GREEN edit `webview/graphView.ts`: emit `viewBox="0 0 {width} {height}"` on both SVG roots (attribute only — no wheel logic here; that belongs to PR 3's `webview/index.ts` work per the design's File Changes table).
-- [ ] 4.3 RED `test/unit/graphView.test.ts` — Case 20: `KIND_STYLE`, status classes, and every `data-*` attribute are unchanged on the routed fixture.
-- [ ] 4.4 GREEN confirm case 20 passes with no incidental `data-*` change from Phases 1–3's edits.
-- [ ] 4.5 Run `npm run lint && npm run typecheck && npm run test:unit -- edgeGeometry graphView && npm run test:e2e` and confirm all green before opening PR 1 against the tracker branch.
+- [x] 4.1 RED `test/unit/graphView.test.ts` — Case 19: both `renderGraphSvg` and `renderFlatSvg` roots carry `viewBox="0 0 {width} {height}"` matching their `width`/`height`.
+- [x] 4.2 GREEN edit `webview/graphView.ts`: emit `viewBox="0 0 {width} {height}"` on both SVG roots (attribute only — no wheel logic here; that belongs to PR 3's `webview/index.ts` work per the design's File Changes table).
+- [x] 4.3 RED `test/unit/graphView.test.ts` — Case 20: `KIND_STYLE`, status classes, and every `data-*` attribute are unchanged on the routed fixture.
+- [x] 4.4 GREEN confirm case 20 passes with no incidental `data-*` change from Phases 1–3's edits.
+- [x] 4.5 Run `npm run lint && npm run typecheck && npm run test:unit -- edgeGeometry graphView && npm run test:e2e` and confirm all green before opening PR 1 against the tracker branch.
 
 ## Phase 5: Slice B — `positionOverrides.ts` (PR 2, base: PR 1 branch)
 
