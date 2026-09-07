@@ -227,6 +227,24 @@ describe("routeWaypoints — full-path clearance", () => {
     expect(waypoints.length).toBe(2);
     expect(waypoints[0].x).toBe(waypoints[1].x);
   });
+
+  it("ignores an obstacle whose vertical extent never overlaps the edge's path, however wide", () => {
+    // Regression: the committed detour x was computed from the combined bounds of *every*
+    // given obstacle, including ones nowhere near this edge's vertical span. A wide box
+    // sitting well below (or above) the from/to range still pushed the detour far outside
+    // the whole diagram - a needlessly enormous swing for an edge that never comes near it.
+    const from: Point = { x: 100, y: 40 };
+    const to: Point = { x: 100, y: 100 };
+    const farAwayWideObstacle: Rect = { x: -500, y: 500, w: 2000, h: 50 }; // well below from/to
+    const nearbyObstacle: Rect = { x: 80, y: 60, w: 40, h: 20 }; // actually in the way
+    const waypoints = routeWaypoints(from, to, [farAwayWideObstacle, nearbyObstacle]);
+    assertPathClears([from, ...waypoints, to], [nearbyObstacle]);
+    // The detour clears the *nearby* obstacle only - it must not swing out anywhere near the
+    // far-away obstacle's edges (x=-500 or x=1500).
+    for (const wp of waypoints) {
+      expect(Math.abs(wp.x)).toBeLessThan(200);
+    }
+  });
 });
 
 describe("obstaclesFor", () => {
