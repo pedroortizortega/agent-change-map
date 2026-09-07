@@ -491,15 +491,24 @@ describe("edge routing via edgeGeometry", () => {
     // Array order is [target, obstacle, source]: with the source->call->target arc reordering
     // siblings so the target renders above the source (see "sibling ordering" describe block),
     // this order places the obstacle exactly between them post-reorder, matching the direct
-    // pre-reorder stacking intent (root-level nodes share the same x range).
+    // pre-reorder stacking intent. Nested one level under a module so the top-level connected-
+    // component clustering pass (which only reorders root containers and would otherwise pull
+    // the connected a/c pair together, eliminating the very obstacle this test needs) never
+    // gets a say - the nodes here are siblings of each other, not top-level roots.
     const routingGraph: AnalysisGraph = {
       snapshot,
       nodes: [
-        { id: "function:pkg.c", kind: "function", qualifiedName: "pkg.c", span },
-        { id: "function:pkg.b", kind: "function", qualifiedName: "pkg.b", span },
-        { id: "function:pkg.a", kind: "function", qualifiedName: "pkg.a", span },
+        { id: "module:pkg", kind: "module", qualifiedName: "pkg", span },
+        { id: "function:pkg.c", kind: "function", qualifiedName: "pkg.c", containerId: "module:pkg", span },
+        { id: "function:pkg.b", kind: "function", qualifiedName: "pkg.b", containerId: "module:pkg", span },
+        { id: "function:pkg.a", kind: "function", qualifiedName: "pkg.a", containerId: "module:pkg", span },
       ],
-      edges: [{ kind: "call", source: "function:pkg.a", resolution: { kind: "resolved", target: "function:pkg.c" }, span }],
+      edges: [
+        { kind: "contains", source: "module:pkg", resolution: { kind: "resolved", target: "function:pkg.c" }, span },
+        { kind: "contains", source: "module:pkg", resolution: { kind: "resolved", target: "function:pkg.b" }, span },
+        { kind: "contains", source: "module:pkg", resolution: { kind: "resolved", target: "function:pkg.a" }, span },
+        { kind: "call", source: "function:pkg.a", resolution: { kind: "resolved", target: "function:pkg.c" }, span },
+      ],
       diagnostics: [],
     };
     const svg = renderGraphSvg(routingGraph, []);
@@ -633,6 +642,63 @@ describe("sibling ordering", () => {
   });
 });
 
+describe("top-level container clustering", () => {
+  function siblingY(doc: Document, id: string): number {
+    const el = doc.querySelector(`[data-node-id="${id}"]`)!;
+    const transform = el.getAttribute("transform") ?? "";
+    const match = /translate\(([\d.-]+),([\d.-]+)\)/.exec(transform);
+    return Number(match![2]);
+  }
+
+  // Regression: Kahn's sibling sort only reorders two top-level containers relative to each
+  // other when a dependency arc directly requires it. Two roots with no arc between them keep
+  // an essentially arbitrary tie-broken position (original array index), so a root connected to
+  // a distant root by a single call/import edge can still end up with unrelated root containers
+  // sandwiched physically between them - exactly the "edge cuts through an unrelated sibling
+  // module" bug reported from live testing. Here "moduleD" calls "moduleA" but the original
+  // array order is [A, B, C, D] with B and C carrying no edges at all: plain Kahn leaves that
+  // order exactly as-is (there is no arc forcing B or C to move), stranding B and C between A
+  // and D. A barycenter/connected-component reordering pass should pull A and D adjacent to
+  // each other, leaving no other root container's box between them.
+  it("clusters two call-connected top-level containers adjacently even with unrelated roots between them in the original order", () => {
+    const clusterGraph: AnalysisGraph = {
+      snapshot,
+      nodes: [
+        { id: "function:pkg.A", kind: "function", qualifiedName: "pkg.A", span },
+        { id: "function:pkg.B", kind: "function", qualifiedName: "pkg.B", span },
+        { id: "function:pkg.C", kind: "function", qualifiedName: "pkg.C", span },
+        { id: "function:pkg.D", kind: "function", qualifiedName: "pkg.D", span },
+      ],
+      edges: [{ kind: "call", source: "function:pkg.D", resolution: { kind: "resolved", target: "function:pkg.A" }, span }],
+      diagnostics: [],
+    };
+    const svg = renderGraphSvg(clusterGraph, []);
+    const doc = parseSvg(svg);
+    const order = ["function:pkg.A", "function:pkg.B", "function:pkg.C", "function:pkg.D"]
+      .map((id) => ({ id, y: siblingY(doc, id) }))
+      .sort((a, b) => a.y - b.y)
+      .map((entry) => entry.id);
+    const indexA = order.indexOf("function:pkg.A");
+    const indexD = order.indexOf("function:pkg.D");
+    expect(Math.abs(indexA - indexD)).toBe(1);
+  });
+
+  it("leaves two-root graphs exactly as Kahn ordered them (no clustering pass needed or applied)", () => {
+    const rootGraph: AnalysisGraph = {
+      snapshot,
+      nodes: [
+        { id: "function:pkg.b", kind: "function", qualifiedName: "pkg.b", span },
+        { id: "function:pkg.a", kind: "function", qualifiedName: "pkg.a", span },
+      ],
+      edges: [{ kind: "call", source: "function:pkg.b", resolution: { kind: "resolved", target: "function:pkg.a" }, span }],
+      diagnostics: [],
+    };
+    const svg = renderGraphSvg(rootGraph, []);
+    const doc = parseSvg(svg);
+    expect(siblingY(doc, "function:pkg.a")).toBeLessThan(siblingY(doc, "function:pkg.b"));
+  });
+});
+
 describe("viewBox", () => {
   it("carries viewBox=\"0 0 {width} {height}\" matching width/height on the nested-layout root", () => {
     const svg = renderGraphSvg(nestedGraph(), []);
@@ -678,11 +744,17 @@ describe("data-* contract stability", () => {
     const routedGraph: AnalysisGraph = {
       snapshot,
       nodes: [
-        { id: "function:pkg.c", kind: "function", qualifiedName: "pkg.c", span },
-        { id: "function:pkg.b", kind: "function", qualifiedName: "pkg.b", span },
-        { id: "function:pkg.a", kind: "function", qualifiedName: "pkg.a", span },
+        { id: "module:pkg", kind: "module", qualifiedName: "pkg", span },
+        { id: "function:pkg.c", kind: "function", qualifiedName: "pkg.c", containerId: "module:pkg", span },
+        { id: "function:pkg.b", kind: "function", qualifiedName: "pkg.b", containerId: "module:pkg", span },
+        { id: "function:pkg.a", kind: "function", qualifiedName: "pkg.a", containerId: "module:pkg", span },
       ],
-      edges: [{ kind: "call", source: "function:pkg.a", resolution: { kind: "resolved", target: "function:pkg.c" }, span }],
+      edges: [
+        { kind: "contains", source: "module:pkg", resolution: { kind: "resolved", target: "function:pkg.c" }, span },
+        { kind: "contains", source: "module:pkg", resolution: { kind: "resolved", target: "function:pkg.b" }, span },
+        { kind: "contains", source: "module:pkg", resolution: { kind: "resolved", target: "function:pkg.a" }, span },
+        { kind: "call", source: "function:pkg.a", resolution: { kind: "resolved", target: "function:pkg.c" }, span },
+      ],
       diagnostics: [],
     };
     const svg = renderGraphSvg(routedGraph, []);

@@ -55,8 +55,18 @@ describe("edgePathFor", () => {
     expect(edgePathFor(boxes, "source", "missing-target")).toBe(expected);
   });
 
+  // Every fixture below adds a wide box far outside the edge's own y-span ("diagramContext"):
+  // realistically-sized diagrams have many boxes, so the obstacle under test is always far
+  // narrower than the diagram as a whole and the ordinary local detour applies. A fixture
+  // containing only source/target/one obstacle has no such wider context, so its "diagram"
+  // width degenerates to the obstacle's own width - exactly the shape `needsOuterLaneFallback`
+  // (see edgePathFor — outer-lane fallback") is designed to catch, which would otherwise
+  // misfire here and mask the local-detour behavior these tests exist to check.
+  const diagramContext: [string, Rect] = ["diagramContext", { x: 0, y: 5000, w: 400, h: 20 }];
+
   it("routes around one intervening box with a waypoint DETOUR_CLEARANCE clear of it", () => {
     const boxes = new Map<string, Rect>([
+      diagramContext,
       ["source", { x: 0, y: 0, w: 20, h: 20 }],
       ["target", { x: 0, y: 200, w: 20, h: 20 }],
       ["obstacle", { x: 0, y: 100, w: 20, h: 20 }],
@@ -72,6 +82,7 @@ describe("edgePathFor", () => {
 
   it("chooses the detour side farther from the obstacle's bulk (left obstacle -> detour right)", () => {
     const boxes = new Map<string, Rect>([
+      diagramContext,
       ["source", { x: 40, y: 0, w: 20, h: 20 }],
       ["target", { x: 40, y: 200, w: 20, h: 20 }],
       ["obstacle", { x: 0, y: 100, w: 60, h: 20 }],
@@ -84,6 +95,7 @@ describe("edgePathFor", () => {
 
   it("mirrors the side choice for an obstacle mostly right of the line (detour left)", () => {
     const boxes = new Map<string, Rect>([
+      diagramContext,
       ["source", { x: 40, y: 0, w: 20, h: 20 }],
       ["target", { x: 40, y: 200, w: 20, h: 20 }],
       ["obstacle", { x: 40, y: 100, w: 60, h: 20 }],
@@ -96,6 +108,7 @@ describe("edgePathFor", () => {
 
   it("breaks a centred tie by detouring left", () => {
     const boxes = new Map<string, Rect>([
+      diagramContext,
       ["source", { x: 0, y: 0, w: 20, h: 20 }],
       ["target", { x: 0, y: 200, w: 20, h: 20 }],
       ["obstacle", { x: 0, y: 100, w: 20, h: 20 }],
@@ -108,6 +121,7 @@ describe("edgePathFor", () => {
 
   it("routes two stacked obstacles as two waypoints in top-to-bottom encounter order", () => {
     const boxes = new Map<string, Rect>([
+      diagramContext,
       ["source", { x: 50, y: 0, w: 20, h: 20 }],
       ["target", { x: 50, y: 300, w: 20, h: 20 }],
       ["obstacleTop", { x: 40, y: 100, w: 40, h: 20 }],
@@ -124,6 +138,7 @@ describe("edgePathFor", () => {
 
   it("terminates with at most MAX_DETOURS waypoints, well-formed d, and no throw for many obstacles", () => {
     const boxes = new Map<string, Rect>([
+      diagramContext,
       ["source", { x: 50, y: 0, w: 20, h: 20 }],
       ["target", { x: 50, y: 600, w: 20, h: 20 }],
       ["o1", { x: 40, y: 80, w: 40, h: 20 }],
@@ -144,6 +159,7 @@ describe("edgePathFor", () => {
 
   it("ends every routed d with a C landing exactly on the target's top-center anchor", () => {
     const boxes = new Map<string, Rect>([
+      diagramContext,
       ["source", { x: 40, y: 0, w: 20, h: 20 }],
       ["target", { x: 40, y: 200, w: 20, h: 20 }],
       ["obstacle", { x: 0, y: 100, w: 60, h: 20 }],
@@ -244,6 +260,52 @@ describe("routeWaypoints — full-path clearance", () => {
     for (const wp of waypoints) {
       expect(Math.abs(wp.x)).toBeLessThan(200);
     }
+  });
+});
+
+describe("edgePathFor — outer-lane fallback", () => {
+  // Regression: reported live-testing bug. When the obstacle standing between source and
+  // target spans (close to) the diagram's own full width, the local L-elbow detour has no
+  // free side to swing out to within the panel - both `leftX` and `rightX` land at or past the
+  // diagram's own edges. `edgePathFor` must recognize this and fall back to a shared outer
+  // vertical lane (right of every box in the whole graph) instead of producing a detour that is
+  // effectively as wide as the diagram itself.
+  function assertPathClears(points: Point[], obstacles: readonly Rect[]): void {
+    for (let i = 0; i < points.length - 1; i += 1) {
+      for (const obstacle of obstacles) {
+        expect(
+          segmentIntersectsRect(points[i], points[i + 1], obstacle),
+          `segment ${JSON.stringify(points[i])} -> ${JSON.stringify(points[i + 1])} crosses obstacle ${JSON.stringify(obstacle)}`,
+        ).toBe(false);
+      }
+    }
+  }
+
+  it("routes through the outer lane, exiting/entering by side anchors, when the obstacle spans nearly the whole diagram width", () => {
+    const boxes = new Map<string, Rect>([
+      ["source", { x: 10, y: 0, w: 20, h: 20 }],
+      ["target", { x: 10, y: 400, w: 20, h: 20 }],
+      ["obstacle", { x: 0, y: 200, w: 500, h: 20 }],
+    ]);
+    const d = edgePathFor(boxes, "source", "target")!;
+    // Must exit the source from its right-center side, not the usual bottom-center.
+    expect(d).toBe("M30,10 L512,10 L512,410 L10,410");
+    const points = Array.from(d.matchAll(/-?[\d.]+,-?[\d.]+/g)).map((match) => {
+      const [x, y] = match[0].split(",").map(Number);
+      return { x, y };
+    });
+    assertPathClears(points, [boxes.get("obstacle")!]);
+  });
+
+  it("never triggers the outer lane for an ordinary obstacle far narrower than the diagram", () => {
+    const boxes = new Map<string, Rect>([
+      ["source", { x: 0, y: 0, w: 20, h: 20 }],
+      ["target", { x: 0, y: 200, w: 20, h: 20 }],
+      ["obstacle", { x: 0, y: 100, w: 20, h: 20 }],
+    ]);
+    const d = edgePathFor(boxes, "source", "target")!;
+    expect(d).not.toContain("L512"); // sanity: not the outer-lane shape
+    expect(d).toMatch(/^M[-\d.]+,[-\d.]+ L/); // still the ordinary local L-elbow + C path
   });
 });
 

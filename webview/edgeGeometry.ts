@@ -38,6 +38,19 @@ export function targetAnchor(target: Rect): Point {
   return { x: target.x + target.w / 2, y: target.y };
 }
 
+/** Right-center anchor of a source box - used only by the outer-lane fallback, so an edge
+ * leaving via the shared lane exits sideways rather than downward into whatever sits below. */
+export function sourceSideAnchor(source: Rect): Point {
+  return { x: source.x + source.w, y: source.y + source.h / 2 };
+}
+
+/** Left-center anchor of a target box - used only by the outer-lane fallback, so an edge
+ * arriving via the shared lane enters sideways rather than through the target's top, which
+ * could otherwise mean re-entering through whatever box is stacked directly above it. */
+export function targetSideAnchor(target: Rect): Point {
+  return { x: target.x, y: target.y + target.h / 2 };
+}
+
 /**
  * Liang-Barsky slab clipping of segment `a`->`b` against axis-aligned rect `r`. Returns the
  * clipped parameter interval `[t0, t1]` within `[0, 1]`, or `undefined` when there is none.
@@ -187,11 +200,86 @@ export function routeWaypoints(from: Point, to: Point, obstacles: readonly Rect[
   return path.length > 2 ? path.slice(1, -1) : [];
 }
 
+/** True when no segment of the polyline `from -> ...points -> to` crosses any `obstacle`
+ * (boundary touches don't count, matching `segmentIntersectsRect`). */
+function pathClears(points: readonly Point[], obstacles: readonly Rect[]): boolean {
+  for (let i = 0; i < points.length - 1; i += 1) {
+    for (const obstacle of obstacles) {
+      if (segmentIntersectsRect(points[i], points[i + 1], obstacle)) return false;
+    }
+  }
+  return true;
+}
+
+/** The horizontal extent of the smallest axis-aligned box enclosing every box in `boxes` - the
+ * diagram's own overall width, used by `needsOuterLaneFallback` as the yardstick for "absurdly
+ * wide" rather than any fixed pixel constant. */
+function diagramWidth(boxes: ReadonlyMap<string, Rect>): number {
+  let minX = Infinity;
+  let maxX = -Infinity;
+  for (const box of boxes.values()) {
+    minX = Math.min(minX, box.x);
+    maxX = Math.max(maxX, box.x + box.w);
+  }
+  return boxes.size === 0 ? 0 : maxX - minX;
+}
+
+/**
+ * True when the local L-elbow detour `routeWaypoints` would compute for `from`->`to` around
+ * `obstacles` has no free side to swing out to within the panel: the relevant obstacle group's
+ * own combined width (`rightX - leftX`, the same bound `routeWaypoints` computes internally,
+ * expanded by `DETOUR_CLEARANCE` on both sides) is already at least as wide as the whole
+ * diagram's own measured extent (`diagramWidth`). When that holds, `leftX` sits at or beyond the
+ * diagram's own left edge and `rightX` at or beyond its own right edge - both candidate detour
+ * sides exit the panel, not just clear one obstacle - so a local detour is not the right tool for
+ * this edge regardless of `MAX_DETOURS`. Compared directly against the diagram's own measured
+ * width rather than a fixed pixel constant, so the check scales with whatever the graph actually
+ * renders at.
+ */
+export function needsOuterLaneFallback(from: Point, to: Point, obstacles: readonly Rect[], boxes: ReadonlyMap<string, Rect>): boolean {
+  const minY = Math.min(from.y, to.y);
+  const maxY = Math.max(from.y, to.y);
+  const relevant = obstacles.filter((o) => o.y < maxY && o.y + o.h > minY);
+  if (relevant.length === 0) return false;
+  const leftX = Math.min(...relevant.map((o) => o.x)) - DETOUR_CLEARANCE;
+  const rightX = Math.max(...relevant.map((o) => o.x + o.w)) + DETOUR_CLEARANCE;
+  return rightX - leftX >= diagramWidth(boxes);
+}
+
+/** `x` of the shared outer vertical lane: just past the right edge of every box in the whole
+ * graph, so the lane's vertical run can never cross any of them regardless of which edge uses
+ * it. Right side only for v1 - no left-side lane selection logic. */
+export function outerLaneX(boxes: ReadonlyMap<string, Rect>): number {
+  let maxRight = 0;
+  for (const box of boxes.values()) maxRight = Math.max(maxRight, box.x + box.w);
+  return maxRight + DETOUR_CLEARANCE;
+}
+
+/**
+ * Outer-lane fallback path: exits `sourceBox` from its right-center side, travels horizontally
+ * to the shared lane, travels vertically in the lane to the target's row, then travels
+ * horizontally back in to `targetBox`'s left-center side. Side anchors (not the usual
+ * bottom/top-center ones) on both ends keep the horizontal legs at the source's/target's own
+ * row, which - because this diagram nests children purely by vertical stacking, never side by
+ * side - only ever overlaps their own ancestor chains (already excluded from `obstacles`), never
+ * an unrelated box. Plain straight segments, no Bezier blending: unlike the local-detour case,
+ * this path does not end by dropping into the target from directly above it.
+ */
+function outerLaneEdgePath(boxes: ReadonlyMap<string, Rect>, sourceBox: Rect, targetBox: Rect): string {
+  const laneX = outerLaneX(boxes);
+  const from = sourceSideAnchor(sourceBox);
+  const to = targetSideAnchor(targetBox);
+  return `M${from.x},${from.y} L${laneX},${from.y} L${laneX},${to.y} L${to.x},${to.y}`;
+}
+
 /**
  * The ONE entry point both `graphView.ts` and `index.ts` call to compute an edge's `d` string.
  * Returns `undefined` when the source box is absent (caller renders nothing for that edge).
  * A missing target box always renders the dashed stub, never routed, even past intersecting
- * obstacles.
+ * obstacles. When the local detour genuinely cannot clear (see `needsOuterLaneFallback`, or a
+ * residual crossing survives `routeWaypoints`' `MAX_DETOURS` bound), routes through the shared
+ * outer lane instead (see `outerLaneEdgePath`) - additive: every other case keeps exactly the
+ * Bezier-blended local-detour path this function has always produced.
  */
 export function edgePathFor(boxes: ReadonlyMap<string, Rect>, sourceId: string, targetId: string | undefined): string | undefined {
   const sourceBox = boxes.get(sourceId);
@@ -203,7 +291,13 @@ export function edgePathFor(boxes: ReadonlyMap<string, Rect>, sourceId: string, 
   }
   const to = targetAnchor(targetBox);
   const obstacles = obstaclesFor(boxes, sourceId, targetId);
+  if (needsOuterLaneFallback(from, to, obstacles, boxes)) {
+    return outerLaneEdgePath(boxes, sourceBox, targetBox);
+  }
   const waypoints = routeWaypoints(from, to, obstacles);
+  if (!pathClears([from, ...waypoints, to], obstacles)) {
+    return outerLaneEdgePath(boxes, sourceBox, targetBox);
+  }
   if (waypoints.length === 0) {
     const dy = Math.max(Math.round(Math.abs(to.y - from.y) / 2), CURVE_MIN_DROP);
     return `M${from.x},${from.y} C${from.x},${from.y + dy} ${to.x},${to.y - dy} ${to.x},${to.y}`;
