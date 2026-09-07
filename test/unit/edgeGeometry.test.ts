@@ -6,9 +6,11 @@ import {
   STUB_LEN,
   edgePathFor,
   obstaclesFor,
+  routeWaypoints,
   segmentIntersectsRect,
   sourceAnchor,
   targetAnchor,
+  type Point,
   type Rect,
 } from "../../webview/edgeGeometry.js";
 
@@ -152,6 +154,55 @@ describe("edgePathFor", () => {
     expect(match).not.toBeNull();
     expect(Number(match![1])).toBe(to.x);
     expect(Number(match![2])).toBe(to.y);
+  });
+});
+
+describe("routeWaypoints — full-path clearance", () => {
+  // Regression: a single midline waypoint only guarantees *that point* clears the obstacle,
+  // not the straight approach/exit segments leading to and from it - those can still cut
+  // straight back through the same box (or a different one), which is exactly the "line
+  // enters the dashed box" bug found in hands-on testing. These assert every segment of the
+  // full routed path (from -> ...waypoints -> to), not just the waypoints themselves.
+  function assertPathClears(points: Point[], obstacles: readonly Rect[]): void {
+    for (let i = 0; i < points.length - 1; i += 1) {
+      for (const obstacle of obstacles) {
+        expect(
+          segmentIntersectsRect(points[i], points[i + 1], obstacle),
+          `segment ${JSON.stringify(points[i])} -> ${JSON.stringify(points[i + 1])} crosses obstacle ${JSON.stringify(obstacle)}`,
+        ).toBe(false);
+      }
+    }
+  }
+
+  it("a single wide obstacle: no segment of the full path crosses it", () => {
+    const from: Point = { x: 10, y: 20 };
+    const to: Point = { x: 10, y: 200 };
+    const obstacles: Rect[] = [{ x: 0, y: 100, w: 20, h: 20 }];
+    const waypoints = routeWaypoints(from, to, obstacles);
+    assertPathClears([from, ...waypoints, to], obstacles);
+    expect(waypoints.length).toBe(2); // one L-elbow: entry + exit, both at a clear x
+  });
+
+  it("two obstacles on opposite sides forcing two genuinely separate detours: no segment crosses either", () => {
+    const from: Point = { x: 50, y: 0 };
+    const to: Point = { x: 50, y: 300 };
+    const obstacles: Rect[] = [
+      { x: 40, y: 100, w: 20, h: 20 }, // centred near the line -> left detour
+      { x: 55, y: 200, w: 40, h: 20 }, // mostly right of the line -> right detour, different x-range
+    ];
+    const waypoints = routeWaypoints(from, to, obstacles);
+    assertPathClears([from, ...waypoints, to], obstacles);
+  });
+
+  it("realistic container-routing case: a line between two modules clears an unrelated sibling container between them", () => {
+    // Mirrors the reported bug: three sibling module boxes stacked in one column ("route",
+    // "route2", "app"); an edge from a function inside "route" to a function inside "app"
+    // must not cut through the unrelated "route2" container sitting between them.
+    const from: Point = { x: 60, y: 260 }; // bottom of a function box inside "route"
+    const to: Point = { x: 60, y: 560 }; // top of a function box inside "app"
+    const route2Container: Rect = { x: 20, y: 300, w: 200, h: 150 };
+    const waypoints = routeWaypoints(from, to, [route2Container]);
+    assertPathClears([from, ...waypoints, to], [route2Container]);
   });
 });
 
