@@ -124,33 +124,33 @@ Each slice is independently revertible per the design's Migration/Rollout sectio
 
 ## Phase 10: Slice C — Bezier Edges (PR 3, base: PR 2 branch)
 
-- [ ] 10.1 RED `test/unit/graphView.test.ts` — Case 29: resolved edge `d` matches `/^M[\d.]+,[\d.]+ C/` with both control points offset vertically by `≥ CURVE_MIN_DROP`; `marker-end` still present.
-- [ ] 10.2 RED `test/unit/graphView.test.ts` — Case 30: target above the source still yields a `C` path entering the target's top edge (S-curve case).
-- [ ] 10.3 GREEN edit `webview/graphView.ts`: rename `ELBOW_DROP` → `CURVE_MIN_DROP` (value unchanged, `16`); replace the 3-segment `L` elbow in `renderEdge` with `dy = Math.max(Math.round(Math.abs(tay - say) / 2), CURVE_MIN_DROP); path = "M${sax},${say} C${sax},${say + dy} ${tax},${tay - dy} ${tax},${tay}"`. Ambiguous/unresolved dashed stub path unchanged.
-- [ ] 10.4 REFACTOR: confirm end-tangent still matches the elbow's final segment so `marker-end`/`orient="auto-start-reverse"` orientation is unchanged.
+- [x] 10.1 RED `test/unit/graphView.test.ts` — Case 29: resolved edge `d` matches `/^M[\d.]+,[\d.]+ C/` with both control points offset vertically by `≥ CURVE_MIN_DROP`; `marker-end` still present.
+- [x] 10.2 RED `test/unit/graphView.test.ts` — Case 30: target above the source still yields a `C` path entering the target's top edge (S-curve case).
+- [x] 10.3 GREEN edit `webview/graphView.ts`: rename `ELBOW_DROP` → `CURVE_MIN_DROP` (value unchanged, `16`); replace the 3-segment `L` elbow in `renderEdge` with `dy = Math.max(Math.round(Math.abs(tay - say) / 2), CURVE_MIN_DROP); path = "M${sax},${say} C${sax},${say + dy} ${tax},${tay - dy} ${tax},${tay}"`. Ambiguous/unresolved dashed stub path unchanged.
+- [x] 10.4 REFACTOR: confirm end-tangent still matches the elbow's final segment so `marker-end`/`orient="auto-start-reverse"` orientation is unchanged.
 
 ## Phase 11: Slice C — Kind Encoding, Label Font, Provenance Badge, CSS Properties (PR 3)
 
-- [ ] 11.1 RED `test/unit/graphView.test.ts` — Case 31: `KIND_STYLE` table exactly matches the design (`package` w1/dash `2 4`/rx4, `module` w1.5/dash `4 3`/rx4, `class` w3.5/rx2, `function` w2.5/rx10, `method` w2/rx6); all three entity kinds mutually distinct on width and `rx`; containers strictly thinner than every entity.
-- [ ] 11.2 GREEN edit `webview/graphView.ts`: fix `KIND_STYLE.method` per the table above (currently identical to `function`).
-- [ ] 11.3 RED `test/unit/graphView.test.ts` — Case 32: every `<text>` carries `class="node-label"` in both `place()` (nested) and `renderFlatSvg` (flat) layouts.
-- [ ] 11.4 GREEN edit `webview/graphView.ts`: emit `<text class="node-label" x="8" y="20">` in both layout paths.
-- [ ] 11.5 RED `test/unit/webviewDom.test.ts` or CSS assertion test — Case 33: `webview/styles.css` declares a `font-family` for `.node text`.
-- [ ] 11.6 GREEN edit `webview/styles.css`: add `.node text { fill: var(--vscode-editor-foreground, #ccc); font-family: var(--vscode-editor-font-family, var(--vscode-font-family, monospace)); }`.
-- [ ] 11.7 RED `test/unit/graphView.test.ts` — Case 34: untracked node emits `data-provenance="untracked"` plus one `<circle class="provenance-untracked">`; a tracked node emits `"tracked"` and no circle.
-- [ ] 11.8 RED `test/unit/graphView.test.ts` — Case 35: provenance badge composes — an untracked+`removed` node keeps `class="node-box status-removed"` and its kind `stroke-width` unchanged.
-- [ ] 11.9 RED `test/unit/graphView.test.ts` — Case 36: `renderGraphSvg` called with the default (omitted) third argument marks every node `"tracked"`.
-- [ ] 11.10 GREEN edit `webview/graphView.ts`: add third parameter `untrackedPaths: readonly string[] = []` to `renderGraphSvg`; in `place()`/`renderFlatSvg` compute `const untracked = untrackedPaths.includes(node.span.path)`, emit `data-provenance="untracked" | "tracked"` on `<g class="node">`, and for untracked nodes append `<circle class="provenance-untracked" cx="${w - 8}" cy="8" r="3"></circle>` after the rect.
-- [ ] 11.11 RED `test/unit/webviewDom.test.ts` or CSS assertion test — Case 37: `:root` `--acm-*` properties exist and the status/edge rules reference them.
-- [ ] 11.12 GREEN edit `webview/styles.css`: add `:root { --acm-status-added:#2ea043; --acm-status-removed:#f85149; --acm-status-modified:#d29922; --acm-status-unchanged:#6e7681; --acm-edge-import:#4f9cf9; --acm-edge-call:#c586c0; --acm-edge-ambiguous:#f0883e; --acm-provenance-untracked:#a371f7 }`; add `.provenance-untracked { fill: var(--acm-provenance-untracked); stroke: none }`; rewrite existing status/edge rules to reference the new custom properties (byte-identical resolved values).
-- [ ] 11.13 REFACTOR: confirm every attribute in the archived `data-*` contract table keeps its exact element, value, and emission site; `data-provenance` is additive only.
+- [x] 11.1 RED `test/unit/graphView.test.ts` — Case 31: `KIND_STYLE` table exactly matches the design (`package` w1/dash `2 4`/rx4, `module` w1.5/dash `4 3`/rx4, `class` w3.5/rx2, `function` w2.5/rx10, `method` w2/rx6); all three entity kinds mutually distinct on width and `rx`; containers strictly thinner than every entity.
+- [x] 11.2 GREEN edit `webview/graphView.ts`: fix `KIND_STYLE.method` per the table above (currently identical to `function`).
+- [x] 11.3 RED `test/unit/graphView.test.ts` — Case 32: every `<text>` carries `class="node-label"` in both `place()` (nested) and `renderFlatSvg` (flat) layouts.
+- [x] 11.4 GREEN edit `webview/graphView.ts`: emit `<text class="node-label" x="8" y="20">` in both layout paths.
+- [x] 11.5 RED `test/unit/graphView.test.ts` (CSS assertion test, reading `webview/styles.css` from disk — kept in `graphView.test.ts` rather than `webviewDom.test.ts` per this pass's file-scope restriction) — Case 33: `webview/styles.css` declares a `font-family` for `.node text`.
+- [x] 11.6 GREEN edit `webview/styles.css`: add `.node text { fill: var(--vscode-editor-foreground, #ccc); font-family: var(--vscode-editor-font-family, var(--vscode-font-family, monospace)); }`.
+- [x] 11.7 RED `test/unit/graphView.test.ts` — Case 34: untracked node emits `data-provenance="untracked"` plus one `<circle class="provenance-untracked">`; a tracked node emits `"tracked"` and no circle.
+- [x] 11.8 RED `test/unit/graphView.test.ts` — Case 35: provenance badge composes — an untracked+`removed` node keeps `class="node-box status-removed"` and its kind `stroke-width` unchanged.
+- [x] 11.9 RED `test/unit/graphView.test.ts` — Case 36: `renderGraphSvg` called with the default (omitted) third argument marks every node `"tracked"`.
+- [x] 11.10 GREEN edit `webview/graphView.ts`: add third parameter `untrackedPaths: readonly string[] = []` to `renderGraphSvg`; in `place()`/`renderFlatSvg` compute `const untracked = untrackedPaths.includes(node.span.path)`, emit `data-provenance="untracked" | "tracked"` on `<g class="node">`, and for untracked nodes append `<circle class="provenance-untracked" cx="${w - 8}" cy="8" r="3"></circle>` after the rect.
+- [x] 11.11 RED `test/unit/graphView.test.ts` (CSS assertion test, same file-scope rationale as 11.5) — Case 37: `:root` `--acm-*` properties exist and the status/edge rules reference them.
+- [x] 11.12 GREEN edit `webview/styles.css`: add `:root { --acm-status-added:#2ea043; --acm-status-removed:#f85149; --acm-status-modified:#d29922; --acm-status-unchanged:#6e7681; --acm-edge-import:#4f9cf9; --acm-edge-call:#c586c0; --acm-edge-ambiguous:#f0883e; --acm-provenance-untracked:#a371f7 }`; add `.provenance-untracked { fill: var(--acm-provenance-untracked); stroke: none }`; rewrite existing status/edge rules to reference the new custom properties (byte-identical resolved values).
+- [x] 11.13 REFACTOR: confirm every attribute in the archived `data-*` contract table keeps its exact element, value, and emission site; `data-provenance` is additive only.
 
 ## Phase 12: Slice C — Existing Test Extension and Full Verification (PR 3)
 
-- [ ] 12.1 Extend `test/unit/graphView.test.ts` L185 (kind encoding test): assert `method` ≠ `function` on both `stroke-width` and `rx`, containers still strictly thinner.
-- [ ] 12.2 Extend `test/unit/graphView.test.ts` L223 (arrowhead test): assert the resolved path's `d` starts with `M` and contains `C`, while ambiguous/unresolved stay `L` stubs with no `marker-end`.
-- [ ] 12.3 Confirm `test/unit/webviewDom.test.ts`'s diff-collapse test is unchanged and still passes (proof `preservedRuns` did not change no-refresh behavior).
-- [ ] 12.4 Verify `test/e2e/scenarios.ts` diagram/navigation scenarios pass unchanged — the `data-*` contract proof, per the spec requirement "Preserve node and edge data attribute contract".
-- [ ] 12.5 Run `npm run lint && npm run typecheck && npm run test` (unit + integration + e2e) and confirm all green; document any environment-gated skips per existing README convention, before opening PR 3 against the PR 2 branch.
+- [x] 12.1 Extend `test/unit/graphView.test.ts` L185 (kind encoding test): assert `method` ≠ `function` on both `stroke-width` and `rx`, containers still strictly thinner.
+- [x] 12.2 Extend `test/unit/graphView.test.ts` L223 (arrowhead test): assert the resolved path's `d` starts with `M` and contains `C`, while ambiguous/unresolved stay `L` stubs with no `marker-end`.
+- [x] 12.3 Confirm `test/unit/webviewDom.test.ts`'s diff-collapse test is unchanged and still passes (proof `preservedRuns` did not change no-refresh behavior). Confirmed via full `npm run test` — `webviewDom.test.ts` (12 tests) passes untouched (file not modified in this pass).
+- [x] 12.4 Verify `test/e2e/scenarios.ts` diagram/navigation scenarios pass unchanged — the `data-*` contract proof, per the spec requirement "Preserve node and edge data attribute contract". `npm run test:e2e` ran the full VS Code Extension Development Host harness (not skipped) — all scenarios including selection, navigation, draft-save, oversized-consent, and refresh passed.
+- [x] 12.5 Run `npm run lint && npm run typecheck && npm run test` (unit + integration + e2e) and confirm all green; document any environment-gated skips per existing README convention, before opening PR 3 against the PR 2 branch. All green: lint (0 warnings), typecheck (host + webview projects), `npm run test` (187 tests, 21 files), and `npm run test:e2e` (full VS Code harness, all scenarios, exit code 0 — no skip needed in this environment).
 </content>
 </invoke>

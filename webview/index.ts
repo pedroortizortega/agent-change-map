@@ -275,7 +275,7 @@ function handleHostMessage(message: HostToWebviewMessage): void {
     }
     case "graph": {
       graph = message.graph; sourceIndex = message.sourceIndex;
-      byId("graph").innerHTML = renderGraphSvg(graph, message.diff);
+      byId("graph").innerHTML = renderGraphSvg(graph, message.diff, message.untrackedPaths);
       byId("status").textContent = `${graph.nodes.length} nodes / ${graph.edges.length} edges shown`;
       for (const node of Array.from(byId("graph").querySelectorAll("[data-node-id]"))) {
         node.addEventListener("click", () => choosePair(node.getAttribute("data-node-id")!));
