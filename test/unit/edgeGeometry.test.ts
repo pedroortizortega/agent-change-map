@@ -375,24 +375,29 @@ describe("edgePathFor — outer-lane fallback", () => {
 });
 
 describe("sourceSideAnchor / targetSideAnchor — near-top, not dead-center", () => {
-  // Regression: reported live-testing bug (screenshot). These anchors used to land at dead
-  // vertical center (`box.y + box.h / 2`), which for typical leaf-node box heights sits very
-  // close to the node-label's fixed local `y="20"` baseline (see `graphView.ts`'s
-  // `<text class="node-label" x="8" y="20">`), so the outer-lane fallback's arrowhead visually
-  // landed on top of the target's own name text.
-  const box: Rect = { x: 10, y: 100, w: 20, h: 20 };
-  const labelRowY = box.y + 20; // mirrors graphView.ts's fixed local y="20" node-label baseline
+  // Regression: reported live-testing bug (screenshot, twice). These anchors used to land at
+  // dead vertical center (`box.y + box.h / 2`), which for typical leaf-node box heights sits
+  // very close to the node-label's fixed local `y="20"` baseline (see `graphView.ts`'s
+  // `<text class="node-label" x="8" y="20">` and its `NODE_H = 32` leaf box height), so the
+  // outer-lane fallback's arrowhead visually landed on top of the target's own name text.
+  //
+  // A real leaf box is 32px tall (`NODE_H` in graphView.ts), not the 20px this test used to use
+  // - at 20px the label's `y="20"` baseline sits exactly on the box's own bottom edge, so
+  // "clears the label row by 5px" passed trivially for almost any inset and didn't actually
+  // catch the first attempted fix (`SIDE_ANCHOR_INSET = 8`), which still visibly touched the
+  // label in practice. Mirroring the real 32px box height, with an estimated glyph-top ~11px
+  // above the `y="20"` baseline (~`box.y + 9`), makes this test exercise the real geometry.
+  const box: Rect = { x: 10, y: 100, w: 20, h: 32 };
+  const labelGlyphTopY = box.y + 9; // estimated top of the label glyphs, above the y="20" baseline
 
-  it("targetSideAnchor's y sits near the box's own top edge, not within a few px of the label row", () => {
+  it("targetSideAnchor's y sits near the box's own top edge, clearly above the label's own glyph top", () => {
     const anchor = targetSideAnchor(box, "right");
-    expect(Math.abs(anchor.y - box.y)).toBeLessThanOrEqual(SIDE_ANCHOR_INSET);
-    expect(Math.abs(anchor.y - labelRowY)).toBeGreaterThan(5);
+    expect(anchor.y).toBeLessThan(labelGlyphTopY - 3);
   });
 
-  it("sourceSideAnchor's y sits near the box's own top edge, not within a few px of the label row", () => {
+  it("sourceSideAnchor's y sits near the box's own top edge, clearly above the label's own glyph top", () => {
     const anchor = sourceSideAnchor(box, "right");
-    expect(Math.abs(anchor.y - box.y)).toBeLessThanOrEqual(SIDE_ANCHOR_INSET);
-    expect(Math.abs(anchor.y - labelRowY)).toBeGreaterThan(5);
+    expect(anchor.y).toBeLessThan(labelGlyphTopY - 3);
   });
 
   it("clamps the inset to half the box height for a very short box, never landing below its own center", () => {

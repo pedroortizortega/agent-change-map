@@ -26,14 +26,17 @@ export const DETOUR_CLEARANCE = 12;
 /** Hard bound on the number of detour waypoints computed per edge. */
 export const MAX_DETOURS = 3;
 /** Vertical inset (from a box's own top edge) used by the outer-lane fallback's side anchors,
- * so the fallback's arrowhead/exit point lands clear of the node label, which is always drawn
- * at a fixed local `y="20"` (see `<text class="node-label" ...>` in `graphView.ts`) - for
- * typical leaf-node box heights that sits very close to vertical dead-center, which is where
- * `sourceSideAnchor`/`targetSideAnchor` used to land, visually overlapping the label text. This
- * mirrors how the ordinary top-center `targetAnchor` already always arrives near a box's top
- * edge, away from the label. Clamped to half the box's own height so a very short box never
- * gets an anchor point below its own vertical center. */
-export const SIDE_ANCHOR_INSET = 8;
+ * so the fallback's arrowhead/exit point lands clear of the node label. The label is always
+ * drawn at a fixed local `y="20"` baseline (see `<text class="node-label" ...>` in
+ * `graphView.ts`), which for a typical font puts the glyphs' own top edge around 9-11px above
+ * that baseline - i.e. roughly `box.y + 9`. An earlier value of `8` here (chosen only by "half
+ * of the leaf node height `NODE_H = 32`") left under 2px of clearance from that estimated glyph
+ * top, which in practice still visibly touched the label - not the vertical dead-center this was
+ * meant to fix, but not clearly separated either. `4` leaves a real margin from `box.y + 9` while
+ * still landing well above a box's own vertical center for any realistically-sized node. Clamped
+ * to half the box's own height so a very short box never gets an anchor point below its own
+ * vertical center. */
+export const SIDE_ANCHOR_INSET = 4;
 
 const EPS = 1e-6;
 
