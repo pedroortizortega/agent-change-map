@@ -204,6 +204,29 @@ describe("routeWaypoints — full-path clearance", () => {
     const waypoints = routeWaypoints(from, to, [route2Container]);
     assertPathClears([from, ...waypoints, to], [route2Container]);
   });
+
+  it("does not zigzag: obstacles on both sides of the straight line still detour to one committed side", () => {
+    // Regression: an earlier version of this function picked a fresh detour side per
+    // obstacle, independently, as each was hit along the path. Two obstacles pulling toward
+    // opposite sides (one favouring left, one favouring right of the straight line) made the
+    // route first swing one way, then reverse and swing the other - a visible back-and-forth
+    // hook, even though every individual waypoint still technically cleared the one obstacle
+    // it was computed against. Reproduces the exact shape from the reported screenshot: a
+    // call edge from a method deep inside one module, past an unrelated sibling function
+    // (favouring a left detour) and an unrelated sibling module box (favouring a right
+    // detour), into a function inside a different module.
+    const from: Point = { x: 140, y: 420 };
+    const to: Point = { x: 128, y: 46 };
+    const obstacles: Rect[] = [
+      { x: 40, y: 348, w: 200, h: 32 }, // a sibling leaf box near `from` - alone, favours a left detour
+      { x: 16, y: 192, w: 224, h: 72 }, // a wider unrelated module box further along - favours right
+    ];
+    const waypoints = routeWaypoints(from, to, obstacles);
+    assertPathClears([from, ...waypoints, to], obstacles);
+    // A single committed elbow never reverses direction: both waypoints share one x.
+    expect(waypoints.length).toBe(2);
+    expect(waypoints[0].x).toBe(waypoints[1].x);
+  });
 });
 
 describe("obstaclesFor", () => {

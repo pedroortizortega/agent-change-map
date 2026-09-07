@@ -138,42 +138,47 @@ function firstCrossing(a: Point, b: Point, obstacles: readonly Rect[]): Rect | u
  * Bounded L-shaped detour routing from `from` to `to` around `obstacles`. A single midline
  * waypoint only guarantees *that point* clears the obstacle - not the straight segments
  * leading to and from it, which can still cut back through the same box (or another one) on
- * the way there. Each detour therefore inserts an L-elbow of *two* waypoints at a clear `x`
- * (`x - DETOUR_CLEARANCE` or `x + w + DETOUR_CLEARANCE`, whichever is closer to the original
- * `from`/`to` midpoint, a tie favouring the left side): one at the crossing segment's start
- * `y`, one at its end `y`. Because the elbow's vertical run sits at an `x` strictly outside the
- * obstacle's `[x, x+w]` span, it cannot re-enter that obstacle regardless of `y` - unlike a
- * single midline point, which offers no such guarantee for its approach/exit segments.
+ * the way there. Each detour therefore inserts an L-elbow of *two* waypoints: one at the
+ * crossing segment's start `y`, one at its end `y`, both at one detour `x`.
+ *
+ * That `x` is committed **once**, from the combined bounding extent of every given obstacle
+ * (`min(x) - DETOUR_CLEARANCE` or `max(x+w) + DETOUR_CLEARANCE`, whichever is closer to the
+ * original `from`/`to` midpoint, a tie favouring the left side) - not recomputed per obstacle
+ * as an earlier version of this function did. Picking a fresh side against whichever obstacle
+ * happens to be hit first let successive detours flip sides against different obstacles,
+ * producing a visible zigzag that could cut back through an already-cleared box or a still-
+ * excluded ancestor container on the way; a single side, wide enough to clear every obstacle
+ * in one elbow, has no such back-and-forth to go wrong. Because the elbow's vertical run sits
+ * at an `x` strictly outside every obstacle's `[x, x+w]` span, it cannot re-enter any of them
+ * regardless of `y`.
  *
  * At each of up to `MAX_DETOURS` iterations, the *entire* current path (from `from` through
  * every waypoint so far to `to`) is re-scanned for its first remaining crossing, so a detour
- * that resolves one obstacle is verified rather than assumed - including against obstacles a
- * prior detour hasn't touched. Exhausting `MAX_DETOURS` is not an error: the collected
- * waypoints are returned and a residual crossing is accepted.
+ * that resolves one obstacle is verified rather than assumed. Exhausting `MAX_DETOURS` is not
+ * an error: the collected waypoints are returned and a residual crossing is accepted.
  */
 export function routeWaypoints(from: Point, to: Point, obstacles: readonly Rect[]): Point[] {
-  const path: Point[] = [from, to];
+  if (obstacles.length === 0) return [];
   const midX = (from.x + to.x) / 2;
+  const leftX = Math.min(...obstacles.map((o) => o.x)) - DETOUR_CLEARANCE;
+  const rightX = Math.max(...obstacles.map((o) => o.x + o.w)) + DETOUR_CLEARANCE;
+  const detourX = Math.round(Math.abs(leftX - midX) <= Math.abs(rightX - midX) ? leftX : rightX);
+
+  const path: Point[] = [from, to];
   for (let iteration = 0; iteration < MAX_DETOURS; iteration += 1) {
     let hitIndex = -1;
-    let hit: Rect | undefined;
     for (let i = 0; i < path.length - 1; i += 1) {
-      const crossing = firstCrossing(path[i], path[i + 1], obstacles);
-      if (crossing) {
+      if (firstCrossing(path[i], path[i + 1], obstacles)) {
         hitIndex = i;
-        hit = crossing;
         break;
       }
     }
-    if (!hit) break;
+    if (hitIndex === -1) break;
     const a = path[hitIndex];
     const b = path[hitIndex + 1];
-    const leftX = hit.x - DETOUR_CLEARANCE;
-    const rightX = hit.x + hit.w + DETOUR_CLEARANCE;
-    const detourX = Math.round(Math.abs(leftX - midX) <= Math.abs(rightX - midX) ? leftX : rightX);
     path.splice(hitIndex + 1, 0, { x: detourX, y: a.y }, { x: detourX, y: b.y });
   }
-  return path.slice(1, -1);
+  return path.length > 2 ? path.slice(1, -1) : [];
 }
 
 /**
