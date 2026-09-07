@@ -25,6 +25,15 @@ export const STUB_LEN = 28;
 export const DETOUR_CLEARANCE = 12;
 /** Hard bound on the number of detour waypoints computed per edge. */
 export const MAX_DETOURS = 3;
+/** Vertical inset (from a box's own top edge) used by the outer-lane fallback's side anchors,
+ * so the fallback's arrowhead/exit point lands clear of the node label, which is always drawn
+ * at a fixed local `y="20"` (see `<text class="node-label" ...>` in `graphView.ts`) - for
+ * typical leaf-node box heights that sits very close to vertical dead-center, which is where
+ * `sourceSideAnchor`/`targetSideAnchor` used to land, visually overlapping the label text. This
+ * mirrors how the ordinary top-center `targetAnchor` already always arrives near a box's top
+ * edge, away from the label. Clamped to half the box's own height so a very short box never
+ * gets an anchor point below its own vertical center. */
+export const SIDE_ANCHOR_INSET = 8;
 
 const EPS = 1e-6;
 
@@ -38,17 +47,32 @@ export function targetAnchor(target: Rect): Point {
   return { x: target.x + target.w / 2, y: target.y };
 }
 
-/** Right-center anchor of a source box - used only by the outer-lane fallback, so an edge
- * leaving via the shared lane exits sideways rather than downward into whatever sits below. */
-export function sourceSideAnchor(source: Rect): Point {
-  return { x: source.x + source.w, y: source.y + source.h / 2 };
+/** Side anchor's `y`: `SIDE_ANCHOR_INSET` below the box's own top edge, clamped so a very short
+ * box never gets an anchor point past its own vertical center. */
+function sideAnchorY(box: Rect): number {
+  return box.y + Math.min(SIDE_ANCHOR_INSET, box.h / 2);
 }
 
-/** Left-center anchor of a target box - used only by the outer-lane fallback, so an edge
- * arriving via the shared lane enters sideways rather than through the target's top, which
- * could otherwise mean re-entering through whatever box is stacked directly above it. */
-export function targetSideAnchor(target: Rect): Point {
-  return { x: target.x, y: target.y + target.h / 2 };
+/** Side anchor of a source box, used only by the outer-lane fallback, so an edge leaving via
+ * the shared lane exits sideways rather than downward into whatever sits below. `laneSide`
+ * picks which side the shared lane sits on ("right" or "left" of every box in the graph); the
+ * exit point is always on that same near-lane side. `y` sits near the box's own top edge (see
+ * `SIDE_ANCHOR_INSET`), clear of the label row, rather than dead vertical center. */
+export function sourceSideAnchor(source: Rect, laneSide: "left" | "right"): Point {
+  const x = laneSide === "right" ? source.x + source.w : source.x;
+  return { x, y: sideAnchorY(source) };
+}
+
+/** Side anchor of a target box, used only by the outer-lane fallback, so an edge arriving via
+ * the shared lane enters sideways rather than through the target's top, which could otherwise
+ * mean re-entering through whatever box is stacked directly above it. Enters on the side AWAY
+ * from the lane (mirroring the existing right-lane behavior: lane on the right, entry from the
+ * left) so the final approach lands on the box's far edge rather than immediately re-crossing
+ * back toward the lane. `y` sits near the box's own top edge (see `SIDE_ANCHOR_INSET`), clear
+ * of the label row, rather than dead vertical center. */
+export function targetSideAnchor(target: Rect, laneSide: "left" | "right"): Point {
+  const x = laneSide === "right" ? target.x : target.x + target.w;
+  return { x, y: sideAnchorY(target) };
 }
 
 /**
@@ -246,30 +270,47 @@ export function needsOuterLaneFallback(from: Point, to: Point, obstacles: readon
   return rightX - leftX >= diagramWidth(boxes);
 }
 
-/** `x` of the shared outer vertical lane: just past the right edge of every box in the whole
- * graph, so the lane's vertical run can never cross any of them regardless of which edge uses
- * it. Right side only for v1 - no left-side lane selection logic. */
-export function outerLaneX(boxes: ReadonlyMap<string, Rect>): number {
+/** `x` of both candidate shared outer vertical lanes: just past the left edge and just past the
+ * right edge of every box in the whole graph, so either lane's vertical run can never cross any
+ * of them regardless of which edge uses it. */
+export function outerLaneXs(boxes: ReadonlyMap<string, Rect>): { leftX: number; rightX: number } {
+  let minLeft = 0;
   let maxRight = 0;
-  for (const box of boxes.values()) maxRight = Math.max(maxRight, box.x + box.w);
-  return maxRight + DETOUR_CLEARANCE;
+  for (const box of boxes.values()) {
+    minLeft = Math.min(minLeft, box.x);
+    maxRight = Math.max(maxRight, box.x + box.w);
+  }
+  return { leftX: minLeft - DETOUR_CLEARANCE, rightX: maxRight + DETOUR_CLEARANCE };
+}
+
+/** Picks whichever outer lane sits closer to the edge's own `from`/`to` midpoint - the same
+ * "closer side wins" logic `routeWaypoints` uses for its local detour (see its doc comment), so
+ * the fallback exits toward whichever side the edge would naturally have swung out to anyway. A
+ * tie favours the left side, again mirroring `routeWaypoints`. */
+function pickLaneSide(from: Point, to: Point, leftX: number, rightX: number): "left" | "right" {
+  const midX = (from.x + to.x) / 2;
+  return Math.abs(midX - leftX) <= Math.abs(midX - rightX) ? "left" : "right";
 }
 
 /**
- * Outer-lane fallback path: exits `sourceBox` from its right-center side, travels horizontally
- * to the shared lane, travels vertically in the lane to the target's row, then travels
- * horizontally back in to `targetBox`'s left-center side. Side anchors (not the usual
- * bottom/top-center ones) on both ends keep the horizontal legs at the source's/target's own
- * row, which - because this diagram nests children purely by vertical stacking, never side by
- * side - only ever overlaps their own ancestor chains (already excluded from `obstacles`), never
- * an unrelated box. Plain straight segments, no Bezier blending: unlike the local-detour case,
- * this path does not end by dropping into the target from directly above it.
+ * Outer-lane fallback path: exits `sourceBox` from its near-lane side, travels horizontally to
+ * the shared lane, travels vertically in the lane to the target's row, then travels
+ * horizontally back in to `targetBox`'s far side. `from`/`to` (the ordinary bottom/top-center
+ * anchors) decide which of the two lanes (`outerLaneXs`) is closer via `pickLaneSide`; side
+ * anchors (not the usual bottom/top-center ones) on both ends keep the horizontal legs at the
+ * source's/target's own row, which - because this diagram nests children purely by vertical
+ * stacking, never side by side - only ever overlaps their own ancestor chains (already excluded
+ * from `obstacles`), never an unrelated box. Plain straight segments, no Bezier blending: unlike
+ * the local-detour case, this path does not end by dropping into the target from directly above
+ * it.
  */
-function outerLaneEdgePath(boxes: ReadonlyMap<string, Rect>, sourceBox: Rect, targetBox: Rect): string {
-  const laneX = outerLaneX(boxes);
-  const from = sourceSideAnchor(sourceBox);
-  const to = targetSideAnchor(targetBox);
-  return `M${from.x},${from.y} L${laneX},${from.y} L${laneX},${to.y} L${to.x},${to.y}`;
+function outerLaneEdgePath(boxes: ReadonlyMap<string, Rect>, sourceBox: Rect, targetBox: Rect, from: Point, to: Point): string {
+  const { leftX, rightX } = outerLaneXs(boxes);
+  const laneSide = pickLaneSide(from, to, leftX, rightX);
+  const laneX = laneSide === "right" ? rightX : leftX;
+  const sideFrom = sourceSideAnchor(sourceBox, laneSide);
+  const sideTo = targetSideAnchor(targetBox, laneSide);
+  return `M${sideFrom.x},${sideFrom.y} L${laneX},${sideFrom.y} L${laneX},${sideTo.y} L${sideTo.x},${sideTo.y}`;
 }
 
 /**
@@ -292,11 +333,11 @@ export function edgePathFor(boxes: ReadonlyMap<string, Rect>, sourceId: string, 
   const to = targetAnchor(targetBox);
   const obstacles = obstaclesFor(boxes, sourceId, targetId);
   if (needsOuterLaneFallback(from, to, obstacles, boxes)) {
-    return outerLaneEdgePath(boxes, sourceBox, targetBox);
+    return outerLaneEdgePath(boxes, sourceBox, targetBox, from, to);
   }
   const waypoints = routeWaypoints(from, to, obstacles);
   if (!pathClears([from, ...waypoints, to], obstacles)) {
-    return outerLaneEdgePath(boxes, sourceBox, targetBox);
+    return outerLaneEdgePath(boxes, sourceBox, targetBox, from, to);
   }
   if (waypoints.length === 0) {
     const dy = Math.max(Math.round(Math.abs(to.y - from.y) / 2), CURVE_MIN_DROP);

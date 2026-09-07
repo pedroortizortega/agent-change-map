@@ -3,13 +3,16 @@ import {
   CURVE_MIN_DROP,
   DETOUR_CLEARANCE,
   MAX_DETOURS,
+  SIDE_ANCHOR_INSET,
   STUB_LEN,
   edgePathFor,
   obstaclesFor,
   routeWaypoints,
   segmentIntersectsRect,
   sourceAnchor,
+  sourceSideAnchor,
   targetAnchor,
+  targetSideAnchor,
   type Point,
   type Rect,
 } from "../../webview/edgeGeometry.js";
@@ -268,8 +271,11 @@ describe("edgePathFor — outer-lane fallback", () => {
   // target spans (close to) the diagram's own full width, the local L-elbow detour has no
   // free side to swing out to within the panel - both `leftX` and `rightX` land at or past the
   // diagram's own edges. `edgePathFor` must recognize this and fall back to a shared outer
-  // vertical lane (right of every box in the whole graph) instead of producing a detour that is
-  // effectively as wide as the diagram itself.
+  // vertical lane instead of producing a detour that is effectively as wide as the diagram
+  // itself. Since a follow-up fix, the fallback supports lanes on BOTH sides and picks
+  // whichever is closer to the edge's own from/to position (mirroring `routeWaypoints`' local
+  // detour side selection) - it is no longer hardcoded to "source exits right, target enters
+  // left".
   function assertPathClears(points: Point[], obstacles: readonly Rect[]): void {
     for (let i = 0; i < points.length - 1; i += 1) {
       for (const obstacle of obstacles) {
@@ -281,20 +287,54 @@ describe("edgePathFor — outer-lane fallback", () => {
     }
   }
 
-  it("routes through the outer lane, exiting/entering by side anchors, when the obstacle spans nearly the whole diagram width", () => {
+  it("routes through the LEFT outer lane, exiting/entering by side anchors near the box top, when source/target sit near the diagram's left edge", () => {
+    // Source/target sit at x=10 (near the diagram's own left edge, since the wide obstacle
+    // spans x=[0,500]); their from/to midpoint (x=20) is far closer to the left lane
+    // (leftX=-12) than to the right lane (rightX=512) - so the fix must pick the LEFT lane here,
+    // not hardcode the right one the way the previous (buggy) version always did.
     const boxes = new Map<string, Rect>([
       ["source", { x: 10, y: 0, w: 20, h: 20 }],
       ["target", { x: 10, y: 400, w: 20, h: 20 }],
       ["obstacle", { x: 0, y: 200, w: 500, h: 20 }],
     ]);
     const d = edgePathFor(boxes, "source", "target")!;
-    // Must exit the source from its right-center side, not the usual bottom-center.
-    expect(d).toBe("M30,10 L512,10 L512,410 L10,410");
+    // Exits the source from its LEFT side (near-lane side), enters the target from its RIGHT
+    // side (away side) - and both anchors' y sit SIDE_ANCHOR_INSET below the box's own top
+    // edge (y=0 / y=400), not dead vertical center (y=10 / y=410) which would overlap the
+    // node-label row drawn at local y="20".
+    expect(d).toBe(`M10,${0 + SIDE_ANCHOR_INSET} L-12,${0 + SIDE_ANCHOR_INSET} L-12,${400 + SIDE_ANCHOR_INSET} L30,${400 + SIDE_ANCHOR_INSET}`);
     const points = Array.from(d.matchAll(/-?[\d.]+,-?[\d.]+/g)).map((match) => {
       const [x, y] = match[0].split(",").map(Number);
       return { x, y };
     });
     assertPathClears(points, [boxes.get("obstacle")!]);
+    // Real clearance from the obstacle's own bounds, not a couple-pixel hug: the lane run sits
+    // a full DETOUR_CLEARANCE outside the obstacle's [0, 500] span.
+    for (const p of points) {
+      if (p.y > 200 && p.y < 220) expect(p.x).toBeLessThanOrEqual(0 - DETOUR_CLEARANCE);
+    }
+  });
+
+  it("routes through the RIGHT outer lane when source/target sit near the diagram's right edge instead", () => {
+    // Mirror image of the left-lane case above: source/target now sit at x=470 (near the wide
+    // obstacle's right end), so their midpoint is far closer to the right lane than the left
+    // one - the fix must still pick the right lane in that situation, proving both sides are
+    // genuinely reachable rather than one hardcoded direction.
+    const boxes = new Map<string, Rect>([
+      ["source", { x: 470, y: 0, w: 20, h: 20 }],
+      ["target", { x: 470, y: 400, w: 20, h: 20 }],
+      ["obstacle", { x: 0, y: 200, w: 500, h: 20 }],
+    ]);
+    const d = edgePathFor(boxes, "source", "target")!;
+    expect(d).toBe(`M490,${0 + SIDE_ANCHOR_INSET} L512,${0 + SIDE_ANCHOR_INSET} L512,${400 + SIDE_ANCHOR_INSET} L470,${400 + SIDE_ANCHOR_INSET}`);
+    const points = Array.from(d.matchAll(/-?[\d.]+,-?[\d.]+/g)).map((match) => {
+      const [x, y] = match[0].split(",").map(Number);
+      return { x, y };
+    });
+    assertPathClears(points, [boxes.get("obstacle")!]);
+    for (const p of points) {
+      if (p.y > 200 && p.y < 220) expect(p.x).toBeGreaterThanOrEqual(500 + DETOUR_CLEARANCE);
+    }
   });
 
   it("never triggers the outer lane for an ordinary obstacle far narrower than the diagram", () => {
@@ -306,6 +346,69 @@ describe("edgePathFor — outer-lane fallback", () => {
     const d = edgePathFor(boxes, "source", "target")!;
     expect(d).not.toContain("L512"); // sanity: not the outer-lane shape
     expect(d).toMatch(/^M[-\d.]+,[-\d.]+ L/); // still the ordinary local L-elbow + C path
+  });
+
+  it("stays on the ordinary local detour (no outer-lane trigger) for a borderline obstacle whose span is genuinely narrower than the diagram, with real DETOUR_CLEARANCE clearance", () => {
+    // Investigates whether needsOuterLaneFallback's width-based trigger still needs adjustment
+    // now that a genuine left lane exists as a fallback option. This obstacle sits hard against
+    // the diagram's own left edge (x=0) while a distant, unrelated box far to the right (x=600)
+    // sets a large diagramWidth - exactly the "boxes starting near the diagram's own left edge"
+    // shape called out as the risk. The relevant obstacle's own span (leftX..rightX) is still
+    // far narrower than diagramWidth, so the trigger correctly stays off; the local detour still
+    // clears the obstacle by the full DETOUR_CLEARANCE (not a tighter hug), and `pathClears`
+    // (already exercised by `edgePathFor`) is the real safety net for any residual crossing -
+    // confirming no further trigger-threshold adjustment is needed.
+    const boxes = new Map<string, Rect>([
+      ["source", { x: 0, y: 0, w: 20, h: 20 }],
+      ["target", { x: 0, y: 200, w: 20, h: 20 }],
+      ["obstacle", { x: 0, y: 100, w: 20, h: 20 }],
+      ["farContext", { x: 580, y: 5000, w: 20, h: 20 }], // makes diagramWidth large (600) without being a relevant obstacle
+    ]);
+    const d = edgePathFor(boxes, "source", "target")!;
+    expect(d).not.toContain("L580"); // not the outer lane
+    expect(d).toMatch(/^M[-\d.]+,[-\d.]+ L/);
+    const waypointMatch = /L(-?[\d.]+),(-?[\d.]+)/.exec(d);
+    expect(waypointMatch).not.toBeNull();
+    const wpX = Number(waypointMatch![1]);
+    expect(wpX).toBe(0 - DETOUR_CLEARANCE); // exactly the designed local-detour clearance, not tighter
+  });
+});
+
+describe("sourceSideAnchor / targetSideAnchor — near-top, not dead-center", () => {
+  // Regression: reported live-testing bug (screenshot). These anchors used to land at dead
+  // vertical center (`box.y + box.h / 2`), which for typical leaf-node box heights sits very
+  // close to the node-label's fixed local `y="20"` baseline (see `graphView.ts`'s
+  // `<text class="node-label" x="8" y="20">`), so the outer-lane fallback's arrowhead visually
+  // landed on top of the target's own name text.
+  const box: Rect = { x: 10, y: 100, w: 20, h: 20 };
+  const labelRowY = box.y + 20; // mirrors graphView.ts's fixed local y="20" node-label baseline
+
+  it("targetSideAnchor's y sits near the box's own top edge, not within a few px of the label row", () => {
+    const anchor = targetSideAnchor(box, "right");
+    expect(Math.abs(anchor.y - box.y)).toBeLessThanOrEqual(SIDE_ANCHOR_INSET);
+    expect(Math.abs(anchor.y - labelRowY)).toBeGreaterThan(5);
+  });
+
+  it("sourceSideAnchor's y sits near the box's own top edge, not within a few px of the label row", () => {
+    const anchor = sourceSideAnchor(box, "right");
+    expect(Math.abs(anchor.y - box.y)).toBeLessThanOrEqual(SIDE_ANCHOR_INSET);
+    expect(Math.abs(anchor.y - labelRowY)).toBeGreaterThan(5);
+  });
+
+  it("clamps the inset to half the box height for a very short box, never landing below its own center", () => {
+    const shortBox: Rect = { x: 0, y: 0, w: 20, h: 4 };
+    const anchor = targetSideAnchor(shortBox, "right");
+    expect(anchor.y).toBeLessThanOrEqual(shortBox.y + shortBox.h / 2);
+  });
+
+  it("sourceSideAnchor exits from the right side when laneSide is right, left side when laneSide is left", () => {
+    expect(sourceSideAnchor(box, "right").x).toBe(box.x + box.w);
+    expect(sourceSideAnchor(box, "left").x).toBe(box.x);
+  });
+
+  it("targetSideAnchor enters from the side AWAY from the lane (left side for a right lane, right side for a left lane)", () => {
+    expect(targetSideAnchor(box, "right").x).toBe(box.x);
+    expect(targetSideAnchor(box, "left").x).toBe(box.x + box.w);
   });
 });
 
