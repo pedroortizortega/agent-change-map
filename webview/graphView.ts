@@ -116,9 +116,76 @@ function computeChildrenOf(nodes: Entity[], edges: readonly Edge[] = []): Map<st
     else map.set(key, [node]);
   }
   for (const [key, bucket] of map) {
-    map.set(key, orderSiblings(bucket, edges, byId));
+    const ordered = orderSiblings(bucket, edges, byId);
+    map.set(key, key === undefined ? clusterConnectedRoots(ordered, edges, byId) : ordered);
   }
   return map;
+}
+
+/**
+ * A second reordering pass applied ONLY to the top-level (root, `containerId === undefined`)
+ * sibling bucket, run after `orderSiblings`' Kahn sort has already produced a dependency-valid
+ * order for it. Kahn only moves two roots relative to each other when a direct arc requires it;
+ * two roots with no arc between them keep an essentially arbitrary tie-broken position (their
+ * existing rank), so a root connected to a distant root by a single call/import edge can still
+ * end up with unrelated, unconnected root containers physically sandwiched between them - the
+ * "edge cuts through an unrelated sibling module" bug from live testing (see design.md).
+ *
+ * This groups root containers into connected components over the resolved, non-`contains`
+ * call/import subgraph restricted to roots (via `siblingRootOf`, same as `orderSiblings`), using
+ * union-find, then stable-sorts roots by (their component's minimum current rank, their own
+ * current rank). Every component's representative rank stands in for "average vertical rank" -
+ * an unconnected/singleton root's component is just itself, so it never moves. Members of a
+ * component keep their relative order to each other (their own current rank), so this can only
+ * ever pull a connected group together, never re-litigate Kahn's dependency ordering within it.
+ * One pass, no iteration to converge: union-find settles in a single scan and a plain component
+ * grouping cannot oscillate the way a naive "move to neighbor's rank" barycenter update can for
+ * a single pair of mutually connected nodes swapping positions every pass.
+ */
+function clusterConnectedRoots(roots: Entity[], edges: readonly Edge[], byId: Map<string, Entity>): Entity[] {
+  if (roots.length <= 2) return roots;
+  const rootIds = new Set(roots.map((root) => root.id));
+  const rankOf = new Map(roots.map((root, index) => [root.id, index] as const));
+  const parent = new Map(roots.map((root) => [root.id, root.id] as const));
+
+  const find = (id: string): string => {
+    let top = id;
+    while (parent.get(top) !== top) top = parent.get(top)!;
+    let current = id;
+    while (parent.get(current) !== top) {
+      const next = parent.get(current)!;
+      parent.set(current, top);
+      current = next;
+    }
+    return top;
+  };
+  const union = (a: string, b: string): void => {
+    const rootA = find(a);
+    const rootB = find(b);
+    if (rootA !== rootB) parent.set(rootA, rootB);
+  };
+
+  for (const edge of edges) {
+    if (edge.kind === "contains") continue;
+    if (edge.resolution.kind !== "resolved") continue;
+    const sourceRoot = siblingRootOf(edge.source, rootIds, byId);
+    const targetRoot = siblingRootOf(edge.resolution.target, rootIds, byId);
+    if (!sourceRoot || !targetRoot || sourceRoot === targetRoot) continue;
+    union(sourceRoot, targetRoot);
+  }
+
+  const componentRank = new Map<string, number>();
+  for (const root of roots) {
+    const component = find(root.id);
+    const rank = rankOf.get(root.id)!;
+    const existing = componentRank.get(component);
+    if (existing === undefined || rank < existing) componentRank.set(component, rank);
+  }
+
+  return roots
+    .map((root, index) => ({ root, componentRank: componentRank.get(find(root.id))!, ownRank: index }))
+    .sort((a, b) => a.componentRank - b.componentRank || a.ownRank - b.ownRank)
+    .map((entry) => entry.root);
 }
 
 /**

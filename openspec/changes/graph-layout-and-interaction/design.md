@@ -37,6 +37,25 @@ resolved concretely rather than restated.
 | 8 | Where live boxes come from during a drag | Re-run layout in `index.ts`; export a box map from `renderGraphSvg`; `getBBox()` | Snapshot `readBoxes()` from the rendered DOM at `pointerdown`: absolute x/y = sum of ancestor `transform="translate(x,y)"` values parsed off each `<g>`; `w`/`h` read off the child `<rect>`'s `width`/`height` attributes. Then per tick, clone that snapshot and offset the dragged subtree by the accumulated delta. Reading attributes is not geometry math, so Decision 1 holds; it needs no new export or protocol field; and unlike `getBBox()` it works under jsdom. |
 | 9 | Which nodes move with a container drag | Walk `Entity.containerId` chains in `graph.nodes` | Collect `movedIds` from the **DOM subtree** of the dragged `<g>`: `[dragged, ...dragged.querySelectorAll("[data-node-id]")]`. This is correct in both layouts — in `renderFlatSvg` there is no visual nesting, so a `containerId`-based walk would wrongly offset boxes that did not move on screen. |
 
+Deviation note (post-implementation, live user testing): the pure local-obstacle-avoidance
+`routeWaypoints` detour (Decision-adjacent, not a numbered decision above since it predates this
+table) hit a structural limit that only showed up once real, wider graphs were rendered: when the
+obstacle standing between a source and target is itself a top-level container spanning nearly the
+full panel width, there is no free side to swing a local detour out to *within the panel* — both
+candidate detour `x`s land at or past the diagram's own edges. Per explicit user decision (hybrid
+approach, chosen over pure local-detour refinement or a global layout rewrite), two additive
+pieces were added rather than reworking `measure()`/`place()` or the Decision 5 Kahn sort itself:
+(a) `webview/graphView.ts` gained a second, top-level-only reordering pass — `clusterConnectedRoots`
+— that runs after Kahn and stable-groups top-level containers connected by a resolved call/import
+edge into the same connected component (a component's representative rank standing in for
+"average vertical rank"), reducing how often a cross-container edge has to span an unrelated
+sibling; (b) `webview/edgeGeometry.ts` gained an outer-lane fallback (`needsOuterLaneFallback` /
+`outerLaneEdgePath`) that routes via a shared lane just past the right edge of every box in the
+graph, entering/exiting through side anchors, whenever the relevant obstacle group's own width is
+at least as wide as the diagram itself, or a residual crossing survives `MAX_DETOURS`. Both are
+additive: the byte-identical local-detour/Bezier path is unchanged for every case that does not
+hit this limit.
+
 ## Interfaces / Contracts
 
 ### `webview/edgeGeometry.ts` (new — pure, no DOM, no imports)
