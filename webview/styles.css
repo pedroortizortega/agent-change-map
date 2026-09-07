@@ -143,3 +143,41 @@ body {
 button, select, textarea { color: var(--vscode-input-foreground, #ccc); background: var(--vscode-input-background, #333); }
 button { margin: 4px; padding: 6px; }
 button:disabled { opacity: 0.5; }
+
+.relationship-indicator { cursor: pointer; }
+.relationship-indicator rect {
+  fill: var(--vscode-editor-background, #1e1e1e);
+  stroke: var(--acm-edge-ambiguous);
+  stroke-width: 1.5;
+}
+.relationship-indicator text {
+  fill: var(--acm-edge-ambiguous);
+  font: 11px var(--vscode-font-family, sans-serif);
+  pointer-events: none;
+}
+.relationship-indicator:focus { outline: none; }
+.relationship-indicator:focus rect {
+  stroke: var(--vscode-focusBorder, #4f9cf9);
+  stroke-width: 3;
+}
+.relationship-popup {
+  position: fixed;
+  z-index: 10;
+  box-sizing: border-box;
+  width: min(340px, calc(100vw - 16px));
+  max-height: min(360px, calc(100vh - 16px));
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--vscode-widget-border, #6e7681);
+  border-radius: 6px;
+  color: var(--vscode-editorWidget-foreground, #ccc);
+  background: var(--vscode-editorWidget-background, #252526);
+  box-shadow: 0 4px 16px #0006;
+  overflow-wrap: anywhere;
+}
+.relationship-popup > strong { display: block; padding-right: 24px; }
+.relationship-popup-close { position: absolute; top: 6px; right: 6px; }
+.relationship-popup ol { padding-left: 22px; margin-bottom: 0; }
+.relationship-popup li + li { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--vscode-widget-border, #444); }
+.relationship-popup p { margin: 6px 0; }
+.relationship-location { font-family: var(--vscode-editor-font-family, monospace); opacity: 0.85; }

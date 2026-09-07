@@ -259,19 +259,16 @@ describe("directional edges and ambiguity", () => {
     const importD = importEdge.querySelector("path")!.getAttribute("d")!;
     const callD = callEdge.querySelector("path")!.getAttribute("d")!;
     expect(importD.startsWith("M")).toBe(true);
-    expect(importD).toContain("C");
+    expect(importD).toContain("L");
     expect(callD.startsWith("M")).toBe(true);
-    expect(callD).toContain("C");
+    expect(callD).toContain("L");
     const ambiguous = doc.querySelector('[data-resolution="ambiguous"]')!;
     const unresolved = doc.querySelector('[data-resolution="unresolved"]')!;
     expect(ambiguous.querySelector("path")?.getAttribute("marker-end")).toBeFalsy();
     expect(unresolved.querySelector("path")?.getAttribute("marker-end")).toBeFalsy();
-    const ambiguousD = ambiguous.querySelector("path")!.getAttribute("d")!;
-    const unresolvedD = unresolved.querySelector("path")!.getAttribute("d")!;
-    expect(ambiguousD.startsWith("M")).toBe(true);
-    expect(ambiguousD).not.toContain("C");
-    expect(unresolvedD.startsWith("M")).toBe(true);
-    expect(unresolvedD).not.toContain("C");
+    expect(ambiguous.querySelector("path")).toBeNull();
+    expect(unresolved.querySelector("path")).toBeNull();
+    expect(doc.querySelector("[data-relationship-source]")).not.toBeNull();
   });
 
   it("renders every edge path outline-only (fill=none), never filled with the stroke color", () => {
@@ -299,20 +296,25 @@ describe("directional edges and ambiguity", () => {
   });
 });
 
-describe("Bezier edges", () => {
-  function parseCubicPath(d: string): { say: number; cy1: number; cy2: number; tay: number } {
-    const match = /^M(-?[\d.]+),(-?[\d.]+) C(-?[\d.]+),(-?[\d.]+) (-?[\d.]+),(-?[\d.]+) (-?[\d.]+),(-?[\d.]+)$/.exec(d);
-    expect(match).not.toBeNull();
-    const [, , say, , cy1, , cy2, , tay] = match!;
-    return { say: Number(say), cy1: Number(cy1), cy2: Number(cy2), tay: Number(tay) };
+describe("orthogonal edges", () => {
+  function assertOrthogonal(d: string): { say: number; tay: number } {
+    expect(d).not.toMatch(/[CQ]/);
+    const points = Array.from(d.matchAll(/(-?[\d.]+),(-?[\d.]+)/g), m => ({ x: Number(m[1]), y: Number(m[2]) }));
+    for (let i = 1; i < points.length; i++) {
+      expect(points[i].x === points[i - 1].x || points[i].y === points[i - 1].y).toBe(true);
+    }
+    return { say: points[0].y, tay: points.at(-1)!.y };
   }
 
-  it("renders a resolved edge as a cubic Bezier with control points offset vertically by at least CURVE_MIN_DROP", () => {
-    // Uses a minimal two-node fixture (no other boxes exist to obstruct) rather than
-    // nestedGraph(), since sibling ordering (Phase 3) legitimately reorders nestedGraph's root
-    // bucket and introduces a real detour waypoint on its call edge for an unrelated reason
-    // (a nested descendant's call target now sits above its ancestor); this test's intent is
-    // the CURVE_MIN_DROP invariant on the final curve segment, independent of routing.
+  it("keeps arrowheads compact independently of connector stroke width", () => {
+    const doc = parseSvg(renderGraphSvg(nestedGraph(), []));
+    for (const marker of Array.from(doc.querySelectorAll("marker"))) {
+      expect(marker.getAttribute("markerUnits")).toBe("userSpaceOnUse");
+      expect(Number(marker.getAttribute("markerWidth"))).toBeLessThanOrEqual(8);
+    }
+  });
+
+  it("renders a resolved edge as a clean orthogonal connector", () => {
     const minimalGraph: AnalysisGraph = {
       snapshot,
       nodes: [
@@ -327,14 +329,11 @@ describe("Bezier edges", () => {
     const callEdge = doc.querySelector('[data-edge-kind="call"][data-resolution="resolved"]')!;
     const path = callEdge.querySelector("path")!;
     const d = path.getAttribute("d")!;
-    expect(d).toMatch(/^M[\d.]+,[\d.]+ C/);
-    const { say, cy1, cy2, tay } = parseCubicPath(d);
-    expect(Math.abs(cy1 - say)).toBeGreaterThanOrEqual(16);
-    expect(Math.abs(tay - cy2)).toBeGreaterThanOrEqual(16);
+    assertOrthogonal(d);
     expect(path.getAttribute("marker-end")).toBeTruthy();
   });
 
-  it("draws an S-curve entering the target's top edge when the target sits above the source", () => {
+  it("enters the nearest target boundary when the target sits above the source", () => {
     const upGraph: AnalysisGraph = {
       snapshot,
       nodes: [
@@ -349,8 +348,7 @@ describe("Bezier edges", () => {
     const edge = doc.querySelector('[data-edge-kind="call"][data-resolution="resolved"]')!;
     const path = edge.querySelector("path")!;
     const d = path.getAttribute("d")!;
-    expect(d).toMatch(/^M[\d.]+,[\d.]+ C/);
-    const { say, tay } = parseCubicPath(d);
+    const { say, tay } = assertOrthogonal(d);
     expect(tay).toBeLessThan(say);
     expect(path.getAttribute("marker-end")).toBeTruthy();
   });
@@ -518,7 +516,7 @@ describe("edge routing via edgeGeometry", () => {
     expect(d).toContain("L");
   });
 
-  it("keeps a non-crossing edge's d byte-unchanged through the edgeGeometry wiring", () => {
+  it("uses the nearest-facing boundaries for a non-crossing aligned edge", () => {
     // A minimal two-node fixture (no other boxes exist to obstruct, regardless of sibling
     // ordering) isolates the wiring proof from the sibling-ordering behavior covered above.
     const minimalGraph: AnalysisGraph = {
@@ -534,8 +532,7 @@ describe("edge routing via edgeGeometry", () => {
     const doc = parseSvg(svg);
     const callEdge = doc.querySelector('[data-edge-kind="call"][data-resolution="resolved"]')!;
     const d = callEdge.querySelector("path")!.getAttribute("d")!;
-    // Independently recomputed via the pre-routing formula (sourceAnchor bottom-center,
-    // targetAnchor top-center, CURVE_MIN_DROP=16) to prove byte-identity, not merely a d.match.
+    // An unobstructed aligned pair needs only a straight vertical connector.
     function absoluteBox(id: string): { x: number; y: number; w: number; h: number } {
       const el = doc.querySelector(`[data-node-id="${id}"]`)!;
       const transform = el.getAttribute("transform") ?? "";
@@ -551,11 +548,10 @@ describe("edge routing via edgeGeometry", () => {
     const source = absoluteBox("function:pkg.a");
     const target = absoluteBox("function:pkg.b");
     const sax = source.x + source.w / 2;
-    const say = source.y + source.h;
+    const say = source.y < target.y ? source.y + source.h : source.y;
     const tax = target.x + target.w / 2;
-    const tay = target.y;
-    const dy = Math.max(Math.round(Math.abs(tay - say) / 2), 16);
-    const expected = `M${sax},${say} C${sax},${say + dy} ${tax},${tay - dy} ${tax},${tay}`;
+    const tay = source.y < target.y ? target.y : target.y + target.h;
+    const expected = `M${sax},${say} L${tax},${tay}`;
     expect(d).toBe(expected);
   });
 });
@@ -700,13 +696,22 @@ describe("top-level container clustering", () => {
 });
 
 describe("viewBox", () => {
-  it("carries viewBox=\"0 0 {width} {height}\" matching width/height on the nested-layout root", () => {
+  it("includes all routed lanes and arrowheads in the nested-layout viewport", () => {
     const svg = renderGraphSvg(nestedGraph(), []);
     const doc = parseSvg(svg);
     const root = doc.querySelector("svg")!;
     const width = root.getAttribute("width");
     const height = root.getAttribute("height");
-    expect(root.getAttribute("viewBox")).toBe(`0 0 ${width} ${height}`);
+    const [x, y, w, h] = root.getAttribute("viewBox")!.split(" ").map(Number);
+    expect(w).toBe(Number(width)); expect(h).toBe(Number(height));
+    for (const path of Array.from(doc.querySelectorAll("g.edge path"))) {
+      for (const match of path.getAttribute("d")!.matchAll(/(-?[\d.]+),(-?[\d.]+)/g)) {
+        expect(Number(match[1])).toBeGreaterThanOrEqual(x + 16);
+        expect(Number(match[1])).toBeLessThanOrEqual(x + w - 16);
+        expect(Number(match[2])).toBeGreaterThanOrEqual(y + 16);
+        expect(Number(match[2])).toBeLessThanOrEqual(y + h - 16);
+      }
+    }
   });
 
   it("carries viewBox=\"0 0 {width} {height}\" matching width/height on the flat-layout root", () => {
@@ -777,5 +782,21 @@ describe("data-* contract stability", () => {
     expect(edge.getAttribute("data-edge-index")).not.toBeNull();
     expect(edge.getAttribute("data-edge-kind")).toBe("call");
     expect(edge.getAttribute("data-resolution")).toBe("resolved");
+  });
+});
+
+describe("relationship detail indicators", () => {
+  it("groups all unavailable endpoints into one accessible source indicator without dangling paths", () => {
+    const input = graph();
+    input.edges.push({ kind: "import", source: "function:pkg.a.f", resolution: { kind: "resolved", target: "module:outside" }, span });
+    const doc = parseSvg(renderGraphSvg(input, []));
+    const indicators = doc.querySelectorAll("[data-relationship-source]");
+    expect(indicators.length).toBe(1);
+    expect(indicators[0].getAttribute("data-relationship-source")).toBe("function:pkg.a.f");
+    expect(indicators[0].getAttribute("role")).toBe("button");
+    expect(indicators[0].getAttribute("tabindex")).toBe("0");
+    expect(indicators[0].getAttribute("aria-label")).toContain("3 relationship");
+    expect(doc.querySelectorAll("g.edge path").length).toBe(1);
+    expect(doc.querySelector('[data-edge-index="4"]')!.getAttribute("data-resolution")).toBe("resolved");
   });
 });

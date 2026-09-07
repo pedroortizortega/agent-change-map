@@ -1,3 +1,4 @@
+import { bindRelationshipDetails } from "./relationshipDetails.js";
 import { renderGraphSvg } from "./graphView.js";
 import type { HostToWebviewMessage, WebviewToHostMessage } from "../src/webviewProtocol.js";
 import type { AnalysisGraph, SourceId } from "../src/protocol.js";
@@ -12,6 +13,7 @@ const CONTEXT = 3;
 declare function acquireVsCodeApi(): { postMessage(message: WebviewToHostMessage): void };
 const vscode = acquireVsCodeApi();
 let graph: AnalysisGraph | undefined;
+let disposeRelationshipDetails: (() => void) | undefined;
 let sourceIndex: Record<string, { left?: SourceId; right?: SourceId }> = {};
 let selected: SourceId | undefined;
 let selectedPair: { left?: SourceId; right?: SourceId } | undefined;
@@ -249,6 +251,7 @@ function handleHostMessage(message: HostToWebviewMessage): void {
   initialize();
   switch (message.type) {
     case "graphSummary": {
+      disposeRelationshipDetails?.(); disposeRelationshipDetails = undefined;
       currentLoadReason = message.loadReason;
       // The pre-refresh selection's SourceId.contentHash is stale against the new snapshot;
       // navigation is refused until the user re-selects (or the "graph" case below
@@ -274,26 +277,29 @@ function handleHostMessage(message: HostToWebviewMessage): void {
       break;
     }
     case "graph": {
+      disposeRelationshipDetails?.();
       graph = message.graph; sourceIndex = message.sourceIndex;
       byId("graph").innerHTML = renderGraphSvg(graph, message.diff, message.untrackedPaths);
       byId("status").textContent = `${graph.nodes.length} nodes / ${graph.edges.length} edges shown`;
       for (const node of Array.from(byId("graph").querySelectorAll("[data-node-id]"))) {
         node.addEventListener("click", () => choosePair(node.getAttribute("data-node-id")!));
       }
+      const navigateEdge = (index: number): void => {
+        const edge = message.graph.edges[index];
+        const edgeSource = message.edgeSources[index];
+        if (!edge) return;
+        byId("source-actions").textContent = "";
+        if (!edgeSource) {
+          byId("source-actions").textContent = `Relationship ${edge.kind}: exact recorded location is unavailable; endpoint navigation is intentionally refused.`;
+          return;
+        }
+        byId("source-actions").textContent = `Relationship ${edge.kind}: opening its recorded location.`;
+        vscode.postMessage({ type: "navigate", sourceId: edgeSource.sourceId, side: edgeSource.side });
+      };
       for (const edgeElement of Array.from(byId("graph").querySelectorAll("[data-edge-index]"))) {
-        edgeElement.addEventListener("click", () => {
-          const index = Number(edgeElement.getAttribute("data-edge-index"));
-          const edge = graph!.edges[index];
-          const edgeSource = message.edgeSources[index];
-          byId("source-actions").textContent = "";
-          if (!edgeSource) {
-            byId("source-actions").textContent = `Relationship ${edge.kind}: exact recorded location is unavailable; endpoint navigation is intentionally refused.`;
-            return;
-          }
-          byId("source-actions").textContent = `Relationship ${edge.kind}: opening its recorded location.`;
-          vscode.postMessage({ type: "navigate", sourceId: edgeSource.sourceId, side: edgeSource.side });
-        });
+        edgeElement.addEventListener("click", () => navigateEdge(Number(edgeElement.getAttribute("data-edge-index"))));
       }
+      disposeRelationshipDetails = bindRelationshipDetails(byId("graph"), message.graph, message.edgeSources, navigateEdge);
       // A landing refresh re-issues inspectSources for the previously selected node, if it
       // still exists, so the diff panel re-renders without requiring a fresh click. Neither
       // `selected` nor editing is re-enabled: the pre-refresh SourceId is stale against this

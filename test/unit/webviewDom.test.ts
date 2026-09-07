@@ -272,3 +272,22 @@ it("passes the host's untrackedPaths through to the rendered graph, marking an u
   await vi.waitFor(() => expect(element('[data-node-id="module:m"]').getAttribute("data-provenance")).toBe("untracked"));
   expect(dom.window.document.querySelector(".provenance-untracked")).not.toBeNull();
 });
+
+it("discloses unresolved relationships without selecting the node and navigates only the recorded edge span", async () => {
+  const edgeSpan = { ...node.span, startByte: 6, endByte: 13, startColumn: 6, endColumn: 13 };
+  const input: AnalysisGraph = { ...graph, edges: [{ kind: "call", source: node.id, resolution: { kind: "unresolved" }, span: edgeSpan }] };
+  session.loadComparison(undefined, input, []);
+  intents.length = 0;
+  click('[data-relationship-source="module:m"]');
+  expect(intents.some(intent => intent.type === "inspectSources")).toBe(false);
+  const popup = element('[role="dialog"]');
+  const view = [...popup.querySelectorAll("button")].find(button => button.textContent === "View in code")!;
+  expect(view).toBeDefined();
+  view.click();
+  await vi.waitFor(() => expect(intents).toContainEqual(expect.objectContaining({
+    type: "navigate", side: "right", sourceId: expect.objectContaining({ startByte: 6, endByte: 13 }),
+  })));
+  click('[data-relationship-source="module:m"]');
+  session.loadComparison(undefined, graph, []);
+  expect(dom.window.document.querySelector('[role="dialog"]')).toBeNull();
+});

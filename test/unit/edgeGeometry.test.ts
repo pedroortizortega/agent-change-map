@@ -298,11 +298,11 @@ describe("edgePathFor — outer-lane fallback", () => {
       ["obstacle", { x: 0, y: 200, w: 500, h: 20 }],
     ]);
     const d = edgePathFor(boxes, "source", "target")!;
-    // Exits the source from its LEFT side (near-lane side), enters the target from its RIGHT
-    // side (away side) - and both anchors' y sit SIDE_ANCHOR_INSET below the box's own top
+    // Exits the source and enters the target from their LEFT, near-lane
+    // sides - and both anchors' y sit SIDE_ANCHOR_INSET below the box's own top
     // edge (y=0 / y=400), not dead vertical center (y=10 / y=410) which would overlap the
     // node-label row drawn at local y="20".
-    expect(d).toBe(`M10,${0 + SIDE_ANCHOR_INSET} L-12,${0 + SIDE_ANCHOR_INSET} L-12,${400 + SIDE_ANCHOR_INSET} L30,${400 + SIDE_ANCHOR_INSET}`);
+    expect(d).toBe(`M10,${0 + SIDE_ANCHOR_INSET} L-12,${0 + SIDE_ANCHOR_INSET} L-12,${400 + SIDE_ANCHOR_INSET} L10,${400 + SIDE_ANCHOR_INSET}`);
     const points = Array.from(d.matchAll(/-?[\d.]+,-?[\d.]+/g)).map((match) => {
       const [x, y] = match[0].split(",").map(Number);
       return { x, y };
@@ -326,7 +326,7 @@ describe("edgePathFor — outer-lane fallback", () => {
       ["obstacle", { x: 0, y: 200, w: 500, h: 20 }],
     ]);
     const d = edgePathFor(boxes, "source", "target")!;
-    expect(d).toBe(`M490,${0 + SIDE_ANCHOR_INSET} L512,${0 + SIDE_ANCHOR_INSET} L512,${400 + SIDE_ANCHOR_INSET} L470,${400 + SIDE_ANCHOR_INSET}`);
+    expect(d).toBe(`M490,${0 + SIDE_ANCHOR_INSET} L512,${0 + SIDE_ANCHOR_INSET} L512,${400 + SIDE_ANCHOR_INSET} L490,${400 + SIDE_ANCHOR_INSET}`);
     const points = Array.from(d.matchAll(/-?[\d.]+,-?[\d.]+/g)).map((match) => {
       const [x, y] = match[0].split(",").map(Number);
       return { x, y };
@@ -411,9 +411,105 @@ describe("sourceSideAnchor / targetSideAnchor — near-top, not dead-center", ()
     expect(sourceSideAnchor(box, "left").x).toBe(box.x);
   });
 
-  it("targetSideAnchor enters from the side AWAY from the lane (left side for a right lane, right side for a left lane)", () => {
-    expect(targetSideAnchor(box, "right").x).toBe(box.x);
-    expect(targetSideAnchor(box, "left").x).toBe(box.x + box.w);
+  it("targetSideAnchor enters from the side NEAREST the lane (right side for a right lane, left side for a left lane)", () => {
+    expect(targetSideAnchor(box, "right").x).toBe(box.x + box.w);
+    expect(targetSideAnchor(box, "left").x).toBe(box.x);
+  });
+});
+
+describe("edgePathFor — Bezier curve must clear obstacles too, not just the straight line", () => {
+  // Regression: reported live-testing bug (screenshot). When routeWaypoints finds no obstacle
+  // crossing the STRAIGHT line from source to target, edgePathFor draws a smooth Bezier curve
+  // between them instead - but that curve is a genuinely different shape from the straight line
+  // that was actually tested. For an edge whose target sits ABOVE its source (e.g. a call edge
+  // going "backward" up the page), the curve's control points pull it below the source's own y
+  // before it swings back up to approach the target from above - it can bulge well outside the
+  // straight line's own [minY, maxY] span. An obstacle sitting in that bulge - like a sibling box
+  // stacked right below the source - was never tested by the old straight-line-only pathClears
+  // check, so the rendered curve visibly cut through it despite the check reporting "clear".
+  const source: Rect = { x: 90, y: 280, w: 20, h: 20 }; // sourceAnchor -> (100, 300)
+  const target: Rect = { x: 90, y: 30, w: 20, h: 20 }; // targetAnchor -> (100, 50), ABOVE source
+  // A sibling box stacked directly below the source (like app.Main.run below app.Main.__init__
+  // in the reported layout) - outside [50, 300], so the straight line never reaches it, but
+  // squarely in the curve's downward bulge at x=100.
+  const siblingBelowSource: Rect = { x: 80, y: 305, w: 40, h: 30 };
+
+  it("falls back to the outer lane when the Bezier curve (not just the straight line) would cross an obstacle", () => {
+    const boxes = new Map<string, Rect>([
+      ["source", source],
+      ["target", target],
+      ["obstacle", siblingBelowSource],
+    ]);
+    const d = edgePathFor(boxes, "source", "target")!;
+    // The straight line from (100,300) to (100,50) never crosses the obstacle - only the
+    // rendered curve's bulge does - so this is a real regression test for curve-awareness, not
+    // a restatement of the existing straight-line obstacle tests above.
+    expect(segmentIntersectsRect({ x: 100, y: 300 }, { x: 100, y: 50 }, siblingBelowSource)).toBe(false);
+    expect(d).not.toMatch(/^M[-\d.]+,[-\d.]+ C/); // not the unchecked plain-curve shape
+  });
+});
+
+describe("edgePathFor — an edge whose target is nested inside its own source", () => {
+  // Regression: reported live-testing bug, confirmed against REAL analyzer output for a module-
+  // level `Main(x)` constructor call (i.e. an edge from module:app straight to class:app.Main -
+  // the module literally contains the class it's calling, e.g. code in an
+  // `if __name__ == "__main__":` block). The ordinary sourceAnchor is the bottom-center of the
+  // WHOLE module box, which sits far below the nested class; the plain Bezier curve back up to
+  // the class's own top-center target anchor necessarily sweeps through the class's own methods
+  // along the way. Those methods are deliberately excluded from obstaclesFor (as descendants of
+  // both source and target) - by design, for the ordinary "entering a target from outside" case
+  // - so `pathClears` never flags this, even though the rendered curve visibly cuts through them.
+  // Exact boxes from the real analyzer output for this repo's own `test/` fixture (module app ->
+  // class app.Main, with methods __init__ and run nested inside the class).
+  const sourceBox: Rect = { x: 16, y: 288, w: 248, h: 152 }; // module:app
+  const targetBox: Rect = { x: 28, y: 318, w: 224, h: 112 }; // class:app.Main, nested inside source
+  const initBox: Rect = { x: 40, y: 348, w: 200, h: 32 }; // app.Main.__init__, nested inside target
+  const runBox: Rect = { x: 40, y: 388, w: 200, h: 32 }; // app.Main.run, nested inside target
+
+  it("anchors near the target's own row instead of the source's own far bottom edge, when the target is fully nested inside the source", () => {
+    const boxes = new Map<string, Rect>([
+      ["source", sourceBox],
+      ["target", targetBox],
+      ["init", initBox],
+      ["run", runBox],
+    ]);
+    const d = edgePathFor(boxes, "source", "target")!;
+    const points = Array.from(d.matchAll(/-?[\d.]+,-?[\d.]+/g)).map((m) => {
+      const [x, y] = m[0].split(",").map(Number);
+      return { x, y };
+    });
+    // Every point of the rendered path (endpoints and Bezier control points alike) stays well
+    // above initBox's own top edge (348) - a short local hop near the target's row, not a long
+    // sweep from the source's own bottom (440) back up past the target's nested descendants.
+    for (const p of points) {
+      expect(p.y).toBeLessThan(initBox.y);
+    }
+  });
+
+  it("also anchors from the source's top when the target is a SIBLING module above it, not nested inside the source", () => {
+    // Same root cause, different trigger: this is `from route2 import funcion2`, a module-level
+    // import statement (not a call), where the target (route2.funcion2) is a completely
+    // separate module, not nested inside source at all. What matters is only that the source
+    // (module:app) is a container whose own bottom-center anchor sits below its own methods,
+    // and the target is above that anchor - confirmed against the real analyzer output for this
+    // repo's own `test/` fixture, where this exact edge was found (by hand-verified sampling of
+    // its rendered curve) to cut through app.Main.run and app.Main.__init__ on the way up.
+    const targetBox: Rect = { x: 28, y: 222, w: 200, h: 32 }; // route2.funcion2, a sibling module's function
+    const boxes = new Map<string, Rect>([
+      ["source", sourceBox],
+      ["target", targetBox],
+      ["class", { x: 28, y: 318, w: 224, h: 112 }], // class:app.Main - makes source a container
+      ["init", initBox],
+      ["run", runBox],
+    ]);
+    const d = edgePathFor(boxes, "source", "target")!;
+    const points = Array.from(d.matchAll(/-?[\d.]+,-?[\d.]+/g)).map((m) => {
+      const [x, y] = m[0].split(",").map(Number);
+      return { x, y };
+    });
+    for (const p of points) {
+      expect(p.y).toBeLessThan(initBox.y);
+    }
   });
 });
 

@@ -1,7 +1,7 @@
 /**
  * Pure edge-geometry module: anchors, obstacle testing, bounded waypoint detour routing, and
- * the single `d`-string entry point shared by both `graphView.ts` (static render) and
- * `index.ts` (live drag re-route). No DOM, no imports — dual-compiled alongside the host tree
+ * coordinated batch routing used by `graphView.ts`. No DOM, no imports — suitable for
+ * future live re-routing and dual-compiled alongside the host tree
  * (see `tsconfig.build.json`) and the webview-only tree (`tsconfig.webview.json`).
  */
 
@@ -66,15 +66,9 @@ export function sourceSideAnchor(source: Rect, laneSide: "left" | "right"): Poin
   return { x, y: sideAnchorY(source) };
 }
 
-/** Side anchor of a target box, used only by the outer-lane fallback, so an edge arriving via
- * the shared lane enters sideways rather than through the target's top, which could otherwise
- * mean re-entering through whatever box is stacked directly above it. Enters on the side AWAY
- * from the lane (mirroring the existing right-lane behavior: lane on the right, entry from the
- * left) so the final approach lands on the box's far edge rather than immediately re-crossing
- * back toward the lane. `y` sits near the box's own top edge (see `SIDE_ANCHOR_INSET`), clear
- * of the label row, rather than dead vertical center. */
+/** Enter on the near-lane boundary, never sweep across the target interior. */
 export function targetSideAnchor(target: Rect, laneSide: "left" | "right"): Point {
-  const x = laneSide === "right" ? target.x : target.x + target.w;
+  const x = laneSide === "right" ? target.x + target.w : target.x;
   return { x, y: sideAnchorY(target) };
 }
 
@@ -238,6 +232,26 @@ function pathClears(points: readonly Point[], obstacles: readonly Rect[]): boole
   return true;
 }
 
+/** Number of interior points sampled along a candidate Bezier curve for obstacle-clearance
+ * checking - dense enough that the resulting micro-segments track the true curve closely. */
+const CURVE_SAMPLE_COUNT = 12;
+
+/** Points along the cubic Bezier `p0 -> c1 -> c2 -> p3` at `count` evenly-spaced interior
+ * parameter values (excluding the endpoints themselves, which callers already have). */
+function sampleCubicBezier(p0: Point, c1: Point, c2: Point, p3: Point, count: number): Point[] {
+  const points: Point[] = [];
+  for (let i = 1; i <= count; i += 1) {
+    const t = i / (count + 1);
+    const mt = 1 - t;
+    const a = mt * mt * mt;
+    const b = 3 * mt * mt * t;
+    const c = 3 * mt * t * t;
+    const d = t * t * t;
+    points.push({ x: a * p0.x + b * c1.x + c * c2.x + d * p3.x, y: a * p0.y + b * c1.y + c * c2.y + d * p3.y });
+  }
+  return points;
+}
+
 /** The horizontal extent of the smallest axis-aligned box enclosing every box in `boxes` - the
  * diagram's own overall width, used by `needsOuterLaneFallback` as the yardstick for "absurdly
  * wide" rather than any fixed pixel constant. */
@@ -298,7 +312,7 @@ function pickLaneSide(from: Point, to: Point, leftX: number, rightX: number): "l
 /**
  * Outer-lane fallback path: exits `sourceBox` from its near-lane side, travels horizontally to
  * the shared lane, travels vertically in the lane to the target's row, then travels
- * horizontally back in to `targetBox`'s far side. `from`/`to` (the ordinary bottom/top-center
+ * horizontally back in to `targetBox`'s near side. `from`/`to` (the ordinary bottom/top-center
  * anchors) decide which of the two lanes (`outerLaneXs`) is closer via `pickLaneSide`; side
  * anchors (not the usual bottom/top-center ones) on both ends keep the horizontal legs at the
  * source's/target's own row, which - because this diagram nests children purely by vertical
@@ -316,38 +330,253 @@ function outerLaneEdgePath(boxes: ReadonlyMap<string, Rect>, sourceBox: Rect, ta
   return `M${sideFrom.x},${sideFrom.y} L${laneX},${sideFrom.y} L${laneX},${sideTo.y} L${sideTo.x},${sideTo.y}`;
 }
 
+/** True when some OTHER box in `boxes` sits fully inside `box` - i.e. `box` is a container
+ * (module/class), not a leaf (function/method). */
+function hasDescendant(box: Rect, ownId: string, boxes: ReadonlyMap<string, Rect>): boolean {
+  for (const [id, other] of boxes) {
+    if (id === ownId) continue;
+    if (rectFullyInside(other, box)) return true;
+  }
+  return false;
+}
+
 /**
- * The ONE entry point both `graphView.ts` and `index.ts` call to compute an edge's `d` string.
+ * The `from` point an edge exits its source from. Ordinarily this is `sourceAnchor` (bottom-
+ * center of the whole source box) - fine for a leaf source, or any source whose target sits
+ * below it. But when the source is a CONTAINER (has its own nested descendants - see
+ * `hasDescendant`) and the target sits above the container's own bottom edge (e.g. a module-
+ * level call/import edge whose target is higher up the page, possibly even nested inside the
+ * very same source, as with a module-level `Main(x)` call into a class defined in that module),
+ * exiting from the bottom would force the path back up through the container's own other
+ * descendants to reach a target above them - descendants deliberately excluded from
+ * `obstaclesFor` as "the source's own children", so that backward sweep was never obstacle-
+ * checked despite visibly cutting through them. Exiting from the container's own TOP edge
+ * instead keeps this a short, local hop toward whatever sits above, with nothing of the
+ * container's own to backtrack through.
+ */
+function sourceExitAnchor(sourceBox: Rect, sourceId: string, targetAnchorPoint: Point, boxes: ReadonlyMap<string, Rect>): Point {
+  const targetIsAbove = targetAnchorPoint.y < sourceBox.y + sourceBox.h;
+  if (targetIsAbove && hasDescendant(sourceBox, sourceId, boxes)) {
+    return { x: sourceBox.x + sourceBox.w / 2, y: sourceBox.y };
+  }
+  return sourceAnchor(sourceBox);
+}
+
+/**
+ * The final leg of every non-fallback path is a cubic Bezier from `tailStart` (either `from`
+ * itself, when there are no waypoints, or the last waypoint) into `to`. Returns both the control
+ * points (for building the `d` string) and points sampled along the curve (for clearance
+ * checking) - the two must always be computed from the same control points, or a clearance check
+ * could pass or fail against a curve shape that isn't actually the one rendered.
+ */
+function tailCurve(tailStart: Point, to: Point): { c1: Point; c2: Point; samples: Point[] } {
+  const dy = Math.max(Math.round(Math.abs(to.y - tailStart.y) / 2), CURVE_MIN_DROP);
+  const c1: Point = { x: tailStart.x, y: tailStart.y + dy };
+  const c2: Point = { x: to.x, y: to.y - dy };
+  return { c1, c2, samples: sampleCubicBezier(tailStart, c1, c2, to, CURVE_SAMPLE_COUNT) };
+}
+
+/**
+ * Single-edge compatibility helper. The renderer uses `edgePathsFor` for coordinated routes.
  * Returns `undefined` when the source box is absent (caller renders nothing for that edge).
  * A missing target box always renders the dashed stub, never routed, even past intersecting
  * obstacles. When the local detour genuinely cannot clear (see `needsOuterLaneFallback`, or a
  * residual crossing survives `routeWaypoints`' `MAX_DETOURS` bound), routes through the shared
  * outer lane instead (see `outerLaneEdgePath`) - additive: every other case keeps exactly the
  * Bezier-blended local-detour path this function has always produced.
+ *
+ * The clearance check covers the FULL rendered path, not just its straight legs: the final leg
+ * is always a Bezier curve (see `tailCurve`), whose control points can pull it outside the
+ * straight line's own bounding box - most visibly for an edge whose target sits above its
+ * source, where the curve dips below the source's own point before swinging up to the target.
+ * An obstacle sitting in that dip was invisible to a straight-line-only check even though the
+ * rendered curve plainly cut through it, so the sampled curve points are checked right alongside
+ * the elbow legs, using the exact same control points the final `d` string is built from.
  */
 export function edgePathFor(boxes: ReadonlyMap<string, Rect>, sourceId: string, targetId: string | undefined): string | undefined {
   const sourceBox = boxes.get(sourceId);
   if (!sourceBox) return undefined;
-  const from = sourceAnchor(sourceBox);
   const targetBox = targetId ? boxes.get(targetId) : undefined;
   if (!targetBox) {
+    const from = sourceAnchor(sourceBox);
     return `M${from.x},${from.y} L${from.x},${from.y + STUB_LEN}`;
   }
   const to = targetAnchor(targetBox);
+  const from = sourceExitAnchor(sourceBox, sourceId, to, boxes);
   const obstacles = obstaclesFor(boxes, sourceId, targetId);
   if (needsOuterLaneFallback(from, to, obstacles, boxes)) {
     return outerLaneEdgePath(boxes, sourceBox, targetBox, from, to);
   }
   const waypoints = routeWaypoints(from, to, obstacles);
-  if (!pathClears([from, ...waypoints, to], obstacles)) {
+  const tailStart = waypoints.length > 0 ? waypoints[waypoints.length - 1] : from;
+  const { c1, c2, samples } = tailCurve(tailStart, to);
+  if (!pathClears([from, ...waypoints, ...samples, to], obstacles)) {
     return outerLaneEdgePath(boxes, sourceBox, targetBox, from, to);
   }
   if (waypoints.length === 0) {
-    const dy = Math.max(Math.round(Math.abs(to.y - from.y) / 2), CURVE_MIN_DROP);
-    return `M${from.x},${from.y} C${from.x},${from.y + dy} ${to.x},${to.y - dy} ${to.x},${to.y}`;
+    return `M${from.x},${from.y} C${c1.x},${c1.y} ${c2.x},${c2.y} ${to.x},${to.y}`;
   }
-  const last = waypoints[waypoints.length - 1];
-  const dy = Math.max(Math.round(Math.abs(to.y - last.y) / 2), CURVE_MIN_DROP);
   const lSegments = waypoints.map((wp) => `L${wp.x},${wp.y}`).join(" ");
-  return `M${from.x},${from.y} ${lSegments} C${last.x},${last.y + dy} ${to.x},${to.y - dy} ${to.x},${to.y}`;
+  return `M${from.x},${from.y} ${lSegments} C${c1.x},${c1.y} ${c2.x},${c2.y} ${to.x},${to.y}`;
+}
+
+/** A rendered relationship. Keep the caller's order to preserve data-edge-index identity. */
+export interface RoutingEdge {
+  source: string;
+  target?: string;
+}
+
+interface Port { anchor: Point; escape: Point }
+const LANE_GAP = 12;
+
+function simplifyRoute(points: Point[]): Point[] {
+  const result: Point[] = [];
+  for (const point of points) {
+    const last = result.at(-1);
+    if (last && last.x === point.x && last.y === point.y) continue;
+    const before = result.at(-2);
+    if (before && last && ((before.x === last.x && last.x === point.x) || (before.y === last.y && last.y === point.y))) {
+      // Do not disguise a reversal through a box as a straight segment.
+      const dot = (last.x - before.x) * (point.x - last.x) + (last.y - before.y) * (point.y - last.y);
+      if (dot < 0) return [];
+      result.pop();
+    }
+    result.push(point);
+  }
+  return result;
+}
+
+function routingPorts(box: Rect, ordinal: number, count: number, inward: boolean): Port[] {
+  const offset = ordinal - (count - 1) / 2;
+  const x = box.x + box.w / 2 + offset * Math.min(12, (box.w - 16) / Math.max(1, count));
+  const y = box.y + Math.min(16, box.h / 2) + offset * Math.min(8, Math.max(0, Math.min(16, box.h - 16)) / Math.max(1, count - 1));
+  if (inward) {
+    // Enter a containing endpoint below its title, rather than through the title row.
+    const belowTitle = box.y + 26;
+    return [
+      { anchor: { x: box.x, y: belowTitle }, escape: { x: box.x + LANE_GAP, y: belowTitle } },
+      { anchor: { x: box.x + box.w, y: belowTitle }, escape: { x: box.x + box.w - LANE_GAP, y: belowTitle } },
+    ];
+  }
+  return [
+    { anchor: { x, y: box.y }, escape: { x, y: box.y - LANE_GAP } },
+    { anchor: { x, y: box.y + box.h }, escape: { x, y: box.y + box.h + LANE_GAP } },
+    { anchor: { x: box.x, y }, escape: { x: box.x - LANE_GAP, y } },
+    { anchor: { x: box.x + box.w, y }, escape: { x: box.x + box.w + LANE_GAP, y } },
+  ];
+}
+
+function routeCost(points: Point[], occupied: readonly Point[][], limit: number): number {
+  let cost = (points.length - 2) * 16;
+  for (let i = 1; i < points.length; i++) {
+    const a = points[i - 1]; const b = points[i];
+    cost += Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+    const horizontal = a.y === b.y;
+    for (const route of occupied) for (let j = 1; j < route.length; j++) {
+      if (cost >= limit) return cost;
+      const c = route[j - 1]; const d = route[j];
+      const otherHorizontal = c.y === d.y;
+      if (horizontal === otherHorizontal) {
+        const sameLine = horizontal ? a.y === c.y : a.x === c.x;
+        const overlap = horizontal
+          ? Math.min(Math.max(a.x, b.x), Math.max(c.x, d.x)) - Math.max(Math.min(a.x, b.x), Math.min(c.x, d.x))
+          : Math.min(Math.max(a.y, b.y), Math.max(c.y, d.y)) - Math.max(Math.min(a.y, b.y), Math.min(c.y, d.y));
+        if (sameLine && overlap > EPS) cost += 1000 + overlap * 10;
+      } else {
+        const h1 = horizontal ? a : c; const h2 = horizontal ? b : d;
+        const v1 = horizontal ? c : a; const v2 = horizontal ? d : b;
+        if (v1.x >= Math.min(h1.x, h2.x) && v1.x <= Math.max(h1.x, h2.x) && h1.y >= Math.min(v1.y, v2.y) && h1.y <= Math.max(v1.y, v2.y)) cost += 1000;
+      }
+    }
+  }
+  return cost;
+}
+
+/**
+ * Coordinates all visible relationships: reserve ports, then choose a short orthogonal route
+ * with bend, crossing and shared-segment penalties. This is a deterministic heuristic, not a
+ * planarity guarantee. Ancestor containers may be crossed; unrelated boxes and descendants
+ * remain obstacles. Unresolved stubs retain their existing explicit rendering contract.
+ */
+export function edgePathsFor(boxes: ReadonlyMap<string, Rect>, edges: readonly RoutingEdge[]): (string | undefined)[] {
+  // Reserve the full label row, independent of font metrics/name length. Ancestor and
+  // endpoint exclusions below apply to box interiors only, never to these title obstacles.
+  const labels = [...boxes.values()].map(box => ({ x: box.x + 4, y: box.y + 6, w: Math.max(0, box.w - 8), h: Math.min(18, Math.max(0, box.h - 6)) }));
+  const counts = new Map<string, number>();
+  for (const edge of edges) if (boxes.has(edge.source) && edge.target && boxes.has(edge.target)) {
+    counts.set(edge.source, (counts.get(edge.source) ?? 0) + 1);
+    counts.set(edge.target, (counts.get(edge.target) ?? 0) + 1);
+  }
+  const used = new Map<string, number>();
+  const occupied: Point[][] = [];
+  const ordinal = (id: string): number => { const next = used.get(id) ?? 0; used.set(id, next + 1); return next; };
+  const paths: (string | undefined)[] = Array.from({ length: edges.length });
+  const ordered = edges.map((edge, index) => {
+    const resolved = boxes.has(edge.source) && edge.target !== undefined && boxes.has(edge.target);
+    return { edge, index, sourceSlot: resolved ? ordinal(edge.source) : 0, targetSlot: resolved ? ordinal(edge.target!) : 0 };
+  });
+  const span = (edge: RoutingEdge): number => Math.abs((boxes.get(edge.source)?.y ?? 0) - (boxes.get(edge.target ?? "")?.y ?? 0));
+  // Reserve short local hops first; longer relationships can take the outer free lanes.
+  ordered.sort((a, b) => span(a.edge) - span(b.edge) || a.index - b.index);
+  for (const { edge, index, sourceSlot, targetSlot } of ordered) {
+    const source = boxes.get(edge.source);
+    const target = edge.target ? boxes.get(edge.target) : undefined;
+    if (!source || !target) { paths[index] = edgePathFor(boxes, edge.source, edge.target); continue; }
+    const sourceContainsTarget = source !== target && rectFullyInside(target, source);
+    const targetContainsSource = source !== target && rectFullyInside(source, target);
+    const sources = routingPorts(source, sourceSlot, counts.get(edge.source)!, sourceContainsTarget);
+    const targets = routingPorts(target, targetSlot, counts.get(edge.target!)!, targetContainsSource);
+    const obstacles = [...boxes.values()].filter(box => {
+      if (box === source) return !sourceContainsTarget;
+      if (box === target) return !targetContainsSource;
+      return !rectFullyInside(source, box) && !rectFullyInside(target, box);
+    }).map(box => ({ x: box.x + EPS, y: box.y + EPS, w: box.w - 2 * EPS, h: box.h - 2 * EPS }));
+    const containers = [...boxes.values()].filter(box =>
+      (box !== source && rectFullyInside(source, box)) || (box !== target && rectFullyInside(target, box)));
+    // Ancestors permit short endpoint crossings, not long transit through their gutters.
+    const clearsContainerLanes = (route: Point[]): boolean => route.slice(1).every((b, i) => {
+      const a = route[i];
+      if (a.y === b.y) return containers.every(box => {
+        const overlap = Math.min(Math.max(a.x, b.x), box.x + box.w) - Math.max(Math.min(a.x, b.x), box.x);
+        return overlap <= 32 || Math.min(Math.abs(a.y - box.y), Math.abs(a.y - box.y - box.h)) >= LANE_GAP;
+      });
+      return containers.every(box => {
+        const overlap = Math.min(Math.max(a.y, b.y), box.y + box.h) - Math.max(Math.min(a.y, b.y), box.y);
+        return overlap <= 32 || a.x <= box.x - LANE_GAP || a.x >= box.x + box.w + LANE_GAP;
+      });
+    });
+    const xs = new Set<number>(); const ys = new Set<number>();
+    for (const label of labels) {
+      xs.add(label.x - 4); xs.add(label.x + label.w + 4);
+      ys.add(label.y - 4); ys.add(label.y + label.h + 4);
+    }
+    for (const box of boxes.values()) {
+      xs.add(box.x - LANE_GAP); xs.add(box.x + box.w + LANE_GAP);
+      ys.add(box.y - LANE_GAP); ys.add(box.y + box.h + LANE_GAP);
+    }
+    const { leftX, rightX } = outerLaneXs(boxes);
+    for (let lane = 0; lane <= occupied.length; lane++) {
+      xs.add(leftX - lane * LANE_GAP); xs.add(rightX + lane * LANE_GAP);
+    }
+    let best: Point[] | undefined; let bestCost = Infinity;
+    const consider = (candidate: Point[]): void => {
+      const route = simplifyRoute(candidate);
+      if (route.length < 2 || !pathClears(route, obstacles) || !pathClears(route, labels) || !clearsContainerLanes(route)) return;
+      const cost = routeCost(route, occupied, bestCost);
+      if (cost < bestCost) { best = route; bestCost = cost; }
+    };
+    for (const from of sources) for (const to of targets) {
+      const a = from.escape; const b = to.escape;
+      const middle = (points: Point[]): void => consider([from.anchor, a, ...points, b, to.anchor]);
+      middle([{ x: a.x, y: b.y }]); middle([{ x: b.x, y: a.y }]);
+      for (const x of xs) middle([{ x, y: a.y }, { x, y: b.y }]);
+      for (const y of ys) middle([{ x: a.x, y }, { x: b.x, y }]);
+    }
+    // Complex/overlapping layouts can require more bends than this candidate family.
+    // Preserve the relationship rather than hide it; ordinary stacked layouts find a route.
+    if (!best) { paths[index] = edgePathFor(boxes, edge.source, edge.target); continue; }
+    occupied.push(best);
+    paths[index] = best.map((point, i) => `${i === 0 ? "M" : "L"}${point.x},${point.y}`).join(" ");
+  }
+  return paths;
 }
