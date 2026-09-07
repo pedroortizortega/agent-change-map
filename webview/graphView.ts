@@ -306,7 +306,7 @@ function renderEdge(edge: Edge, index: number, boxes: Map<string, Rect>): string
   return [
     `<g class="edge" data-edge-index="${index}" data-edge-kind="${edge.kind}" data-resolution="${edge.resolution.kind}">`,
     `<title>${escapeXml(label)}</title>`,
-    `<path class="${colorClass}" d="${path}"${dashAttr}${markerAttr}></path>`,
+    `<path class="${colorClass}" d="${path}" fill="none"${dashAttr}${markerAttr}></path>`,
     `</g>`,
   ].join("");
 }

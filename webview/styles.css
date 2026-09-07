@@ -49,15 +49,23 @@ body {
   stroke: var(--acm-status-unchanged);
 }
 
-.edge-import,
-.arrow-import {
+/* The edge line itself is outline-only (see the inline fill="none" on <path> in
+   graphView.ts); only the arrowhead marker triangle is meant to be filled. */
+.edge-import {
   stroke: var(--acm-edge-import);
+  fill: none;
+}
+
+.arrow-import {
   fill: var(--acm-edge-import);
 }
 
-.edge-call,
-.arrow-call {
+.edge-call {
   stroke: var(--acm-edge-call);
+  fill: none;
+}
+
+.arrow-call {
   fill: var(--acm-edge-call);
 }
 

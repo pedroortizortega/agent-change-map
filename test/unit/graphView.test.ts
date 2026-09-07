@@ -274,6 +274,20 @@ describe("directional edges and ambiguity", () => {
     expect(unresolvedD).not.toContain("C");
   });
 
+  it("renders every edge path outline-only (fill=none), never filled with the stroke color", () => {
+    // Regression: .edge-import/.edge-call previously shared a combined CSS selector with
+    // .arrow-import/.arrow-call (the marker arrowhead), which legitimately needs a fill.
+    // A simple 2-point Bezier edge path implicitly closed-and-filled to a barely-visible
+    // sliver, but a routed multi-waypoint path (M...L...L...C...) fills to a large,
+    // visibly wrong polygon once auto-closed. The edge <path> itself must always be
+    // outline-only; only the arrowhead marker triangle should be filled.
+    const svg = renderGraphSvg(nestedGraph(), []);
+    const doc = parseSvg(svg);
+    for (const path of Array.from(doc.querySelectorAll("g.edge path"))) {
+      expect(path.getAttribute("fill")).toBe("none");
+    }
+  });
+
   it("renders no element for contains edges while surviving edges keep their original graph.edges indices", () => {
     const svg = renderGraphSvg(nestedGraph(), []);
     const doc = parseSvg(svg);
@@ -443,8 +457,10 @@ describe("CSS custom properties", () => {
     expect(css).toMatch(/\.node-box\.status-removed\s*\{[^}]*var\(--acm-status-removed\)/);
     expect(css).toMatch(/\.node-box\.status-modified\s*\{[^}]*var\(--acm-status-modified\)/);
     expect(css).toMatch(/\.node-box\.status-unchanged\s*\{[^}]*var\(--acm-status-unchanged\)/);
-    expect(css).toMatch(/\.edge-import,\s*\n?\s*\.arrow-import\s*\{[^}]*var\(--acm-edge-import\)/);
-    expect(css).toMatch(/\.edge-call,\s*\n?\s*\.arrow-call\s*\{[^}]*var\(--acm-edge-call\)/);
+    expect(css).toMatch(/\.edge-import\s*\{[^}]*var\(--acm-edge-import\)/);
+    expect(css).toMatch(/\.arrow-import\s*\{[^}]*var\(--acm-edge-import\)/);
+    expect(css).toMatch(/\.edge-call\s*\{[^}]*var\(--acm-edge-call\)/);
+    expect(css).toMatch(/\.arrow-call\s*\{[^}]*var\(--acm-edge-call\)/);
     expect(css).toMatch(/\.resolution-ambiguous,\s*\n?\s*\.resolution-unresolved\s*\{[^}]*var\(--acm-edge-ambiguous\)/);
     expect(css).toMatch(/\.provenance-untracked\s*\{[^}]*var\(--acm-provenance-untracked\)/);
   });
