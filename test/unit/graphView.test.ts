@@ -1,9 +1,15 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { JSDOM } from "jsdom";
 import { describe, expect, it } from "vitest";
 import { buildCspMetaTag } from "../../webview/graphView.js";
 import { renderGraphSvg, sectionScope, filterGraph, NESTED_LAYOUT_LIMITS } from "../../webview/graphView.js";
 import type { AnalysisGraph, Entity } from "../../src/protocol.js";
 import type { CorrelatedDiffEntry } from "../../src/navigation/sourceProvider.js";
+
+function readStylesCss(): string {
+  return readFileSync(resolve(__dirname, "../../webview/styles.css"), "utf8");
+}
 
 const snapshot = { repoId: "repo", kind: "worktree" as const, contentDigest: "sha256:x" };
 const span = { path: "pkg/a.py", startByte: 0, endByte: 3, startLine: 1, startColumn: 0, endLine: 1, endColumn: 3 };
@@ -205,6 +211,29 @@ describe("kind encoding", () => {
 
     expect(clsRect.getAttribute("rx")).not.toBe(fnRect.getAttribute("rx"));
     expect(Number(clsRect.getAttribute("stroke-width"))).not.toBe(Number(fnRect.getAttribute("stroke-width")));
+
+    expect(methodRect.getAttribute("rx")).not.toBe(fnRect.getAttribute("rx"));
+    expect(Number(methodRect.getAttribute("stroke-width"))).not.toBe(Number(fnRect.getAttribute("stroke-width")));
+  });
+
+  it("encodes the exact KIND_STYLE table per kind (stroke-width, dasharray, rx)", () => {
+    const svg = renderGraphSvg(nestedGraph(), []);
+    const doc = parseSvg(svg);
+    const rectFor = (id: string) => doc.querySelector(`[data-node-id="${id}"] > rect.node-box`)!;
+
+    const expected: Record<string, { strokeWidth: string; dasharray: string | null; rx: string }> = {
+      "package:pkg": { strokeWidth: "1", dasharray: "2 4", rx: "4" },
+      "module:pkg.a": { strokeWidth: "1.5", dasharray: "4 3", rx: "4" },
+      "class:pkg.a.C": { strokeWidth: "3.5", dasharray: null, rx: "2" },
+      "function:pkg.a.f": { strokeWidth: "2.5", dasharray: null, rx: "10" },
+      "method:pkg.a.C.m": { strokeWidth: "2", dasharray: null, rx: "6" },
+    };
+    for (const [id, style] of Object.entries(expected)) {
+      const rect = rectFor(id);
+      expect(rect.getAttribute("stroke-width")).toBe(style.strokeWidth);
+      expect(rect.getAttribute("stroke-dasharray")).toBe(style.dasharray);
+      expect(rect.getAttribute("rx")).toBe(style.rx);
+    }
   });
 
   it("renders every node box outline-only (fill=none) with the status class still present", () => {
@@ -227,10 +256,22 @@ describe("directional edges and ambiguity", () => {
     const callEdge = doc.querySelector('[data-edge-kind="call"][data-resolution="resolved"]')!;
     expect(importEdge.querySelector("path")?.getAttribute("marker-end")).toBeTruthy();
     expect(callEdge.querySelector("path")?.getAttribute("marker-end")).toBeTruthy();
+    const importD = importEdge.querySelector("path")!.getAttribute("d")!;
+    const callD = callEdge.querySelector("path")!.getAttribute("d")!;
+    expect(importD.startsWith("M")).toBe(true);
+    expect(importD).toContain("C");
+    expect(callD.startsWith("M")).toBe(true);
+    expect(callD).toContain("C");
     const ambiguous = doc.querySelector('[data-resolution="ambiguous"]')!;
     const unresolved = doc.querySelector('[data-resolution="unresolved"]')!;
     expect(ambiguous.querySelector("path")?.getAttribute("marker-end")).toBeFalsy();
     expect(unresolved.querySelector("path")?.getAttribute("marker-end")).toBeFalsy();
+    const ambiguousD = ambiguous.querySelector("path")!.getAttribute("d")!;
+    const unresolvedD = unresolved.querySelector("path")!.getAttribute("d")!;
+    expect(ambiguousD.startsWith("M")).toBe(true);
+    expect(ambiguousD).not.toContain("C");
+    expect(unresolvedD.startsWith("M")).toBe(true);
+    expect(unresolvedD).not.toContain("C");
   });
 
   it("renders no element for contains edges while surviving edges keep their original graph.edges indices", () => {
@@ -241,6 +282,157 @@ describe("directional edges and ambiguity", () => {
     const indices = edgeGroups.map((g) => g.getAttribute("data-edge-index")).sort();
     expect(indices).toEqual(["2", "3", "4", "5"]);
     for (const g of edgeGroups) expect(g.getAttribute("data-edge-kind")).not.toBe("contains");
+  });
+});
+
+describe("Bezier edges", () => {
+  function parseCubicPath(d: string): { say: number; cy1: number; cy2: number; tay: number } {
+    const match = /^M(-?[\d.]+),(-?[\d.]+) C(-?[\d.]+),(-?[\d.]+) (-?[\d.]+),(-?[\d.]+) (-?[\d.]+),(-?[\d.]+)$/.exec(d);
+    expect(match).not.toBeNull();
+    const [, , say, , cy1, , cy2, , tay] = match!;
+    return { say: Number(say), cy1: Number(cy1), cy2: Number(cy2), tay: Number(tay) };
+  }
+
+  it("renders a resolved edge as a cubic Bezier with control points offset vertically by at least CURVE_MIN_DROP", () => {
+    const svg = renderGraphSvg(nestedGraph(), []);
+    const doc = parseSvg(svg);
+    const callEdge = doc.querySelector('[data-edge-kind="call"][data-resolution="resolved"]')!;
+    const path = callEdge.querySelector("path")!;
+    const d = path.getAttribute("d")!;
+    expect(d).toMatch(/^M[\d.]+,[\d.]+ C/);
+    const { say, cy1, cy2, tay } = parseCubicPath(d);
+    expect(Math.abs(cy1 - say)).toBeGreaterThanOrEqual(16);
+    expect(Math.abs(tay - cy2)).toBeGreaterThanOrEqual(16);
+    expect(path.getAttribute("marker-end")).toBeTruthy();
+  });
+
+  it("draws an S-curve entering the target's top edge when the target sits above the source", () => {
+    const upGraph: AnalysisGraph = {
+      snapshot,
+      nodes: [
+        { id: "function:pkg.top", kind: "function", qualifiedName: "pkg.top", span },
+        { id: "function:pkg.bottom", kind: "function", qualifiedName: "pkg.bottom", span },
+      ],
+      edges: [{ kind: "call", source: "function:pkg.bottom", resolution: { kind: "resolved", target: "function:pkg.top" }, span }],
+      diagnostics: [],
+    };
+    const svg = renderGraphSvg(upGraph, []);
+    const doc = parseSvg(svg);
+    const edge = doc.querySelector('[data-edge-kind="call"][data-resolution="resolved"]')!;
+    const path = edge.querySelector("path")!;
+    const d = path.getAttribute("d")!;
+    expect(d).toMatch(/^M[\d.]+,[\d.]+ C/);
+    const { say, tay } = parseCubicPath(d);
+    expect(tay).toBeLessThan(say);
+    expect(path.getAttribute("marker-end")).toBeTruthy();
+  });
+});
+
+describe("node label styling", () => {
+  it("emits class=\"node-label\" on every <text> in nested layout", () => {
+    const svg = renderGraphSvg(nestedGraph(), []);
+    const doc = parseSvg(svg);
+    const texts = Array.from(doc.querySelectorAll("g.node > text"));
+    expect(texts.length).toBe(nestedGraph().nodes.length);
+    for (const text of texts) expect(text.getAttribute("class")).toBe("node-label");
+  });
+
+  it("emits class=\"node-label\" on every <text> in flat layout", () => {
+    const nodes: Entity[] = Array.from({ length: NESTED_LAYOUT_LIMITS.nodes + 1 }, (_, index) => ({
+      id: `function:pkg.f${index}`,
+      kind: "function" as const,
+      qualifiedName: `pkg.f${index}`,
+      span,
+    }));
+    const bigGraph: AnalysisGraph = { snapshot, nodes, edges: [], diagnostics: [] };
+    const svg = renderGraphSvg(bigGraph, []);
+    const doc = parseSvg(svg);
+    const texts = Array.from(doc.querySelectorAll("g.node > text"));
+    expect(texts.length).toBe(nodes.length);
+    for (const text of texts) expect(text.getAttribute("class")).toBe("node-label");
+  });
+
+  it("declares a font-family for .node text in styles.css", () => {
+    const css = readStylesCss();
+    const rule = /\.node\s+text\s*\{[^}]*font-family\s*:/;
+    expect(css).toMatch(rule);
+  });
+});
+
+describe("provenance", () => {
+  function provenanceGraph(): AnalysisGraph {
+    return {
+      snapshot,
+      nodes: [
+        { id: "module:pkg.a", kind: "module", qualifiedName: "pkg.a", span: { ...span, path: "pkg/a.py" } },
+        { id: "module:pkg.b", kind: "module", qualifiedName: "pkg.b", span: { ...span, path: "pkg/b.py" } },
+      ],
+      edges: [],
+      diagnostics: [],
+    };
+  }
+
+  it("marks an untracked node with data-provenance and a badge circle; a tracked node gets neither", () => {
+    const svg = renderGraphSvg(provenanceGraph(), [], ["pkg/a.py"]);
+    const doc = parseSvg(svg);
+    const untrackedNode = doc.querySelector('[data-node-id="module:pkg.a"]')!;
+    const trackedNode = doc.querySelector('[data-node-id="module:pkg.b"]')!;
+    expect(untrackedNode.getAttribute("data-provenance")).toBe("untracked");
+    expect(untrackedNode.querySelector("circle.provenance-untracked")).not.toBeNull();
+    expect(trackedNode.getAttribute("data-provenance")).toBe("tracked");
+    expect(trackedNode.querySelector("circle.provenance-untracked")).toBeNull();
+  });
+
+  it("composes the provenance badge with a non-unchanged status without altering kind stroke-width", () => {
+    const diff: CorrelatedDiffEntry[] = [{ kind: "entity", qualifiedName: "pkg.a", left: provenanceGraph().nodes[0], right: undefined }];
+    const svg = renderGraphSvg(provenanceGraph(), diff, ["pkg/a.py"]);
+    const doc = parseSvg(svg);
+    const node = doc.querySelector('[data-node-id="module:pkg.a"]')!;
+    const rect = node.querySelector("rect.node-box")!;
+    expect(rect.getAttribute("class")).toBe("node-box status-removed");
+    expect(rect.getAttribute("stroke-width")).toBe("1.5");
+    expect(node.getAttribute("data-provenance")).toBe("untracked");
+    expect(node.querySelector("circle.provenance-untracked")).not.toBeNull();
+  });
+
+  it("marks every node tracked when untrackedPaths is omitted", () => {
+    const svg = renderGraphSvg(provenanceGraph(), []);
+    const doc = parseSvg(svg);
+    for (const id of ["module:pkg.a", "module:pkg.b"]) {
+      const node = doc.querySelector(`[data-node-id="${id}"]`)!;
+      expect(node.getAttribute("data-provenance")).toBe("tracked");
+      expect(node.querySelector("circle.provenance-untracked")).toBeNull();
+    }
+  });
+});
+
+describe("CSS custom properties", () => {
+  it("declares --acm-* custom properties on :root and status/edge/provenance rules reference them", () => {
+    const css = readStylesCss();
+    const acmVars = [
+      "--acm-status-added",
+      "--acm-status-removed",
+      "--acm-status-modified",
+      "--acm-status-unchanged",
+      "--acm-edge-import",
+      "--acm-edge-call",
+      "--acm-edge-ambiguous",
+      "--acm-provenance-untracked",
+    ];
+    const rootMatch = /:root\s*\{([^}]*)\}/.exec(css);
+    expect(rootMatch).not.toBeNull();
+    const rootBlock = rootMatch![1];
+    for (const name of acmVars) {
+      expect(rootBlock).toContain(name);
+    }
+    expect(css).toMatch(/\.node-box\.status-added\s*\{[^}]*var\(--acm-status-added\)/);
+    expect(css).toMatch(/\.node-box\.status-removed\s*\{[^}]*var\(--acm-status-removed\)/);
+    expect(css).toMatch(/\.node-box\.status-modified\s*\{[^}]*var\(--acm-status-modified\)/);
+    expect(css).toMatch(/\.node-box\.status-unchanged\s*\{[^}]*var\(--acm-status-unchanged\)/);
+    expect(css).toMatch(/\.edge-import,\s*\n?\s*\.arrow-import\s*\{[^}]*var\(--acm-edge-import\)/);
+    expect(css).toMatch(/\.edge-call,\s*\n?\s*\.arrow-call\s*\{[^}]*var\(--acm-edge-call\)/);
+    expect(css).toMatch(/\.resolution-ambiguous,\s*\n?\s*\.resolution-unresolved\s*\{[^}]*var\(--acm-edge-ambiguous\)/);
+    expect(css).toMatch(/\.provenance-untracked\s*\{[^}]*var\(--acm-provenance-untracked\)/);
   });
 });
 

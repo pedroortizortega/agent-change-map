@@ -61,8 +61,8 @@ const NODE_MIN_W = 200;
 const ROOT_GAP = 24;
 const MARGIN = 16;
 
-/** Elbow drop when the target sits above/level with the source (edges never point upward flat). */
-const ELBOW_DROP = 16;
+/** Minimum vertical offset for a Bezier edge's control points (edges never point upward flat). */
+const CURVE_MIN_DROP = 16;
 /** Length of the dashed stub drawn for ambiguous/unresolved/target-not-in-view edges. */
 const STUB_LEN = 28;
 
@@ -85,7 +85,7 @@ const KIND_STYLE: Record<Entity["kind"], KindStyle> = {
   module: { strokeWidth: 1.5, dasharray: "4 3", rx: 4 },
   class: { strokeWidth: 3.5, rx: 2 },
   function: { strokeWidth: 2.5, rx: 10 },
-  method: { strokeWidth: 2.5, rx: 10 },
+  method: { strokeWidth: 2, rx: 6 },
 };
 
 /** Emits `<rect class="node-box status-*">` with inline geometry-carrying kind encoding
@@ -154,6 +154,12 @@ function measure(node: Entity, childrenOf: Map<string | undefined, Entity[]>, me
  * children at their local offsets while separately tracking each node's ABSOLUTE box in
  * `boxes` for edge anchoring.
  */
+/** Renders the additive corner badge for an untracked node, or `""` for a tracked one — a
+ * free visual channel that never collides with the kind/status/edge encodings. */
+function renderProvenanceBadge(untracked: boolean, w: number): string {
+  return untracked ? `<circle class="provenance-untracked" cx="${w - 8}" cy="8" r="3"></circle>` : "";
+}
+
 function place(
   node: Entity,
   absX: number,
@@ -165,18 +171,21 @@ function place(
   boxes: Map<string, Rect>,
   out: string[],
   diff: CorrelatedDiffEntry[],
+  untrackedPaths: readonly string[],
 ): void {
   const size = measure(node, childrenOf, memo);
   boxes.set(node.id, { x: absX, y: absY, w: size.w, h: size.h });
   const status = changeStatusFor(node.qualifiedName, diff);
+  const untracked = untrackedPaths.includes(node.span.path);
   out.push(
-    `<g class="node" data-node-id="${escapeXml(node.id)}" data-node-kind="${node.kind}" data-change-status="${status}" transform="translate(${localX},${localY})">`,
+    `<g class="node" data-node-id="${escapeXml(node.id)}" data-node-kind="${node.kind}" data-change-status="${status}" data-provenance="${untracked ? "untracked" : "tracked"}" transform="translate(${localX},${localY})">`,
   );
   out.push(renderNodeRect(node.kind, status, size.w, size.h));
-  out.push(`<text x="8" y="20">${escapeXml(node.qualifiedName)}</text>`);
+  out.push(`<text class="node-label" x="8" y="20">${escapeXml(node.qualifiedName)}</text>`);
+  out.push(renderProvenanceBadge(untracked, size.w));
   let offsetY = HEADER_H + PAD_Y;
   for (const child of childrenOf.get(node.id) ?? []) {
-    place(child, absX + PAD_X, absY + offsetY, PAD_X, offsetY, childrenOf, memo, boxes, out, diff);
+    place(child, absX + PAD_X, absY + offsetY, PAD_X, offsetY, childrenOf, memo, boxes, out, diff, untrackedPaths);
     offsetY += measure(child, childrenOf, memo).h + GAP_Y;
   }
   out.push(`</g>`);
@@ -221,8 +230,8 @@ function renderEdge(edge: Edge, index: number, boxes: Map<string, Rect>): string
   if (targetBox) {
     const tax = targetBox.x + targetBox.w / 2;
     const tay = targetBox.y;
-    const my = tay > say ? (say + tay) / 2 : say + ELBOW_DROP;
-    path = `M${sax},${say} L${sax},${my} L${tax},${my} L${tax},${tay}`;
+    const dy = Math.max(Math.round(Math.abs(tay - say) / 2), CURVE_MIN_DROP);
+    path = `M${sax},${say} C${sax},${say + dy} ${tax},${tay - dy} ${tax},${tay}`;
     markerAttr = ` marker-end="url(#${RESOLVED_ARROW[edge.kind]})"`;
     colorClass = `edge-${edge.kind}`;
   } else {
@@ -248,9 +257,9 @@ function renderEdge(edge: Edge, index: number, boxes: Map<string, Rect>): string
  * status - `ambiguous`/`unresolved` edges are always rendered as an explicit dashed stub with
  * no arrowhead rather than being hidden or silently treated as resolved.
  */
-export function renderGraphSvg(graph: AnalysisGraph, diff: CorrelatedDiffEntry[]): string {
+export function renderGraphSvg(graph: AnalysisGraph, diff: CorrelatedDiffEntry[], untrackedPaths: readonly string[] = []): string {
   if (graph.nodes.length > NESTED_LAYOUT_LIMITS.nodes || graph.edges.length > NESTED_LAYOUT_LIMITS.edges) {
-    return renderFlatSvg(graph, diff);
+    return renderFlatSvg(graph, diff, untrackedPaths);
   }
 
   const childrenOf = computeChildrenOf(graph.nodes);
@@ -260,7 +269,7 @@ export function renderGraphSvg(graph: AnalysisGraph, diff: CorrelatedDiffEntry[]
   let rootY = MARGIN;
   let maxRight = MARGIN;
   for (const root of childrenOf.get(undefined) ?? []) {
-    place(root, MARGIN, rootY, MARGIN, rootY, childrenOf, memo, boxes, nodeLines, diff);
+    place(root, MARGIN, rootY, MARGIN, rootY, childrenOf, memo, boxes, nodeLines, diff, untrackedPaths);
     const size = measure(root, childrenOf, memo);
     maxRight = Math.max(maxRight, MARGIN + size.w);
     rootY += size.h + ROOT_GAP;
@@ -283,7 +292,7 @@ export function renderGraphSvg(graph: AnalysisGraph, diff: CorrelatedDiffEntry[]
  * nested path, so outline-only styling, kind dash/stroke-width, drawn elbow edges, and
  * markers are all preserved even when geometric nesting is skipped.
  */
-function renderFlatSvg(graph: AnalysisGraph, diff: CorrelatedDiffEntry[]): string {
+function renderFlatSvg(graph: AnalysisGraph, diff: CorrelatedDiffEntry[], untrackedPaths: readonly string[] = []): string {
   const nodeSpacingY = 48;
   const flatW = 220;
   const boxes = new Map<string, Rect>();
@@ -291,10 +300,12 @@ function renderFlatSvg(graph: AnalysisGraph, diff: CorrelatedDiffEntry[]): strin
     const y = 24 + index * nodeSpacingY;
     boxes.set(node.id, { x: 16, y, w: flatW, h: NODE_H });
     const status = changeStatusFor(node.qualifiedName, diff);
+    const untracked = untrackedPaths.includes(node.span.path);
     return [
-      `<g class="node" data-node-id="${escapeXml(node.id)}" data-node-kind="${node.kind}" data-change-status="${status}" transform="translate(16,${y})">`,
+      `<g class="node" data-node-id="${escapeXml(node.id)}" data-node-kind="${node.kind}" data-change-status="${status}" data-provenance="${untracked ? "untracked" : "tracked"}" transform="translate(16,${y})">`,
       renderNodeRect(node.kind, status, flatW, NODE_H),
-      `<text x="8" y="20">${escapeXml(node.qualifiedName)}</text>`,
+      `<text class="node-label" x="8" y="20">${escapeXml(node.qualifiedName)}</text>`,
+      renderProvenanceBadge(untracked, flatW),
       `</g>`,
     ].join("");
   });

@@ -262,3 +262,13 @@ it("renders terminal runner failures rather than leaving an indefinitely running
   click('#request-run');
   expect(element('#confirm-action')).not.toBeNull();
 });
+
+it("passes the host's untrackedPaths through to the rendered graph, marking an untracked node's provenance", async () => {
+  // Regression test for a real gap: renderGraphSvg's untrackedPaths parameter defaults to
+  // [] and compiles fine without this wiring, so a missing call-site update in
+  // webview/index.ts's "graph" case would silently ship a provenance badge that never
+  // appears for any real untracked file, even though the host already computed it.
+  session.loadComparison({ ...graph, snapshot: leftSnapshot }, graph, [], { untrackedPaths: ["m.py"] });
+  await vi.waitFor(() => expect(element('[data-node-id="module:m"]').getAttribute("data-provenance")).toBe("untracked"));
+  expect(dom.window.document.querySelector(".provenance-untracked")).not.toBeNull();
+});
