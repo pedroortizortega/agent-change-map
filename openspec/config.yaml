@@ -1,43 +1,46 @@
 schema: spec-driven
 
 context: |
-  Product: Agent Change Map, a planned VS Code extension.
+  Product: Agent Change Map, a VS Code extension (v0.0.1, in active MVP build-out).
   Scope: Python code structure/call/import diagrams and Git comparison workflows.
-  Editing: temporary drafts by default, with optional direct-worktree mode.
+  Editing: temporary drafts by default, with confirmed atomic writes and optional direct-worktree mode.
   Execution: changed snippets run only in disposable, explicitly restricted Docker containers.
-  Current state: empty project; no implementation stack, architecture, manifest, or CI exists yet.
+  Current state: TypeScript extension host (src/) + webview (webview/) + Python static analyzer
+    (python/analyzer.py) bridged from the extension; git state capture, source navigation,
+    draft overlays, and sandboxed Docker execution implemented on tracker branch
+    feat/agent-change-map-mvp-04-restricted-execution.
   Host tools detected: Git, Node.js/npm, Python, uv, pytest, Ruff, Docker, and VS Code CLI.
   Artifact language: English.
 
-strict_tdd: false
+strict_tdd: true
 
 testing:
-  detected_at: "2026-09-05T11:01:53-06:00"
-  reason: "No project test runner or test configuration exists; host-installed tools are not project capabilities."
+  detected_at: "2026-09-06T00:00:00-06:00"
+  reason: "Project convention (README: RED-GREEN-REFACTOR per work unit) and user global preference (Strict TDD Mode: enabled) both confirm strict TDD; vitest is the active project test runner."
   runner:
-    available: false
-    framework: null
-    command: ""
+    available: true
+    framework: "vitest"
+    command: "npm run test"
   layers:
     unit:
-      available: false
-      tool: null
+      available: true
+      tool: "vitest (test/unit, npm run test:unit)"
     integration:
-      available: false
-      tool: null
+      available: true
+      tool: "vitest (test/integration, npm run test:integration)"
     e2e:
-      available: false
-      tool: null
+      available: true
+      tool: "VS Code Extension Development Host harness (scripts/vscode-harness.mjs, npm run test:e2e)"
   coverage:
     available: false
     command: ""
   quality:
     linter:
-      available: false
-      command: ""
+      available: true
+      command: "npm run lint (eslint src test webview --max-warnings=0)"
     type_checker:
-      available: false
-      command: ""
+      available: true
+      command: "npm run typecheck (tsc -p tsconfig.json --noEmit && tsc -p tsconfig.webview.json --noEmit)"
     formatter:
       available: false
       command: ""
@@ -61,11 +64,12 @@ rules:
     guidelines:
       - Follow approved proposal, specs, and design artifacts.
       - Introduce project tooling explicitly before relying on it.
-    tdd: false
-    test_command: ""
+      - Write a failing test first (RED), then the minimal implementation (GREEN), then refactor.
+    tdd: true
+    test_command: "npm run test"
   verify:
-    test_command: ""
-    build_command: ""
+    test_command: "npm run test && npm run lint && npm run typecheck"
+    build_command: "npm run build"
     coverage_threshold: 0
   archive:
     - Warn before merging destructive deltas.

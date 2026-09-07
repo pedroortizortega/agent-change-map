@@ -56,6 +56,7 @@ class FileVisitor(ast.NodeVisitor):
         self.edges: list[dict[str, Any]] = []
         self.calls: list[tuple[str, str, ast.Call]] = []
         self.from_imports: list[tuple[dict[str, Any], str]] = []
+        self.import_aliases: list[tuple[str, str, str]] = []
         self.stack: list[tuple[str, str, str]] = [(root_id, module, "module")]
 
     @property
@@ -99,7 +100,10 @@ class FileVisitor(ast.NodeVisitor):
             edge = {"kind": "import", "source": self.current_id, "resolution": {"kind": "unresolved"}, "span": self.source.span(node), "importedName": imported}
             self.edges.append(edge)
             if base:
-                self.from_imports.append((edge, f"{base}.{alias.name}"))
+                target_qualified_name = f"{base}.{alias.name}"
+                self.from_imports.append((edge, target_qualified_name))
+                if alias.name != "*":
+                    self.import_aliases.append((self.current_qualified_name, alias.asname or alias.name, target_qualified_name))
 
     def _from_import_base(self, node: ast.ImportFrom) -> str | None:
         """Resolve the absolute dotted module an `import ... from` targets, relative imports included."""
@@ -167,22 +171,27 @@ def analyze(request: dict[str, Any]) -> dict[str, Any]:
     for node in nodes:
         by_qualified_name.setdefault(node["qualifiedName"], []).append(node["id"])
 
+    alias_targets: dict[str, list[str]] = {}
     for visitor in visitors:
         for edge, qualified_name in visitor.from_imports:
             edge["resolution"] = _resolution(by_qualified_name.get(qualified_name, []))
+        for scope, local_name, target_qualified_name in visitor.import_aliases:
+            alias_targets.setdefault(f"{scope}.{local_name}", []).extend(by_qualified_name.get(target_qualified_name, []))
+
+    for visitor in visitors:
         for source_id, scope, call in visitor.calls:
             resolution: dict[str, Any] = {"kind": "unresolved"}
             if isinstance(call.func, ast.Name):
-                resolution = _resolve_lexical(call.func.id, scope, visitor.module, by_qualified_name)
+                resolution = _resolve_lexical(call.func.id, scope, visitor.module, by_qualified_name, alias_targets)
             edges.append({"kind": "call", "source": source_id, "resolution": resolution, "span": visitor.source.span(call)})
 
     return {"snapshot": request["snapshot"], "nodes": nodes, "edges": edges, "diagnostics": diagnostics}
 
 
-def _resolve_lexical(name: str, scope: str, module: str, symbols: dict[str, list[str]]) -> dict[str, Any]:
+def _resolve_lexical(name: str, scope: str, module: str, symbols: dict[str, list[str]], aliases: dict[str, list[str]]) -> dict[str, Any]:
     current = scope
     while True:
-        candidates = symbols.get(f"{current}.{name}", [])
+        candidates = symbols.get(f"{current}.{name}", []) + aliases.get(f"{current}.{name}", [])
         if candidates:
             return _resolution(candidates)
         if current == module:

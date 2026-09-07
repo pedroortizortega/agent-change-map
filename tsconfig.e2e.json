@@ -4,6 +4,5 @@
     "rootDir": ".",
     "outDir": "out"
   },
-  "include": ["src/**/*.ts", "webview/graphView.ts"],
-  "exclude": ["test/**", "webview/index.ts"]
+  "include": ["test/e2e/runner.ts", "test/e2e/scenarios.ts"]
 }

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 
 export type SnippetVariant = "original" | "current" | "draft";
 
@@ -28,6 +29,7 @@ export interface RunLimits {
 export interface RunOptions {
   limits?: Partial<RunLimits>;
   signal?: AbortSignal;
+  onOutput?: (channel: "stdout" | "stderr", data: string) => void;
 }
 
 export type RunResult =
@@ -132,6 +134,7 @@ function buildDockerRunArgs(runId: string, limits: RunLimits): string[] {
     `${CONTAINER_LABEL_KEY}=${runId}`,
     DOCKER_IMAGE,
     "python3",
+    "-u",
     "-",
   ];
 }
@@ -271,6 +274,7 @@ function appendBounded(chunks: Buffer[], chunk: Buffer, budget: { usedBytes: num
  */
 export async function runSnippet(source: SnippetSource, options: RunOptions = {}): Promise<RunResult> {
   assertEligibleForExecution(source);
+  if (options.signal?.aborted) return { variant: source.variant, kind: "cancelled", stdout: "", stderr: "" };
   const limits: RunLimits = { ...DEFAULT_RUN_LIMITS, ...options.limits };
   const runId = randomUUID();
   const args = buildDockerRunArgs(runId, limits);
@@ -279,8 +283,29 @@ export async function runSnippet(source: SnippetSource, options: RunOptions = {}
   const stdoutChunks: Buffer[] = [];
   const stderrChunks: Buffer[] = [];
   const budget = { usedBytes: 0 };
-  child.stdout.on("data", (chunk: Buffer) => appendBounded(stdoutChunks, chunk, budget));
-  child.stderr.on("data", (chunk: Buffer) => appendBounded(stderrChunks, chunk, budget));
+  // Docker's stream chunk boundaries are arbitrary byte boundaries, so decoding each
+  // chunk independently corrupts a UTF-8 code point split across two events. Keep one
+  // decoder per channel: stdout and stderr are independent byte streams and must never
+  // share pending bytes.
+  const stdoutDecoder = new StringDecoder("utf8");
+  const stderrDecoder = new StringDecoder("utf8");
+  const receive = (channel: "stdout" | "stderr", chunks: Buffer[], decoder: StringDecoder, chunk: Buffer): void => {
+    const previous = budget.usedBytes;
+    appendBounded(chunks, chunk, budget);
+    const accepted = budget.usedBytes - previous;
+    if (accepted > 0) {
+      const text = decoder.write(chunk.subarray(0, accepted));
+      if (text) options.onOutput?.(channel, text);
+    }
+  };
+  const flushOutput = (): void => {
+    const stdout = stdoutDecoder.end();
+    if (stdout) options.onOutput?.("stdout", stdout);
+    const stderr = stderrDecoder.end();
+    if (stderr) options.onOutput?.("stderr", stderr);
+  };
+  child.stdout.on("data", (chunk: Buffer) => receive("stdout", stdoutChunks, stdoutDecoder, chunk));
+  child.stderr.on("data", (chunk: Buffer) => receive("stderr", stderrChunks, stderrDecoder, chunk));
 
   child.stdin.write(source.content, "utf8");
   child.stdin.end();
@@ -289,7 +314,7 @@ export async function runSnippet(source: SnippetSource, options: RunOptions = {}
   let outcomeKind: "timeout" | "cancelled" | undefined;
   let cleanupPromise: Promise<void> | undefined;
   const terminate = (kind: "timeout" | "cancelled"): void => {
-    if (closed) return;
+    if (closed || outcomeKind) return;
     outcomeKind = kind;
     cleanupPromise = killAndVerifyContainer(runId).finally(() => child.kill("SIGKILL"));
     // Suppress the default unhandled-rejection warning here; the same rejection is
@@ -304,9 +329,13 @@ export async function runSnippet(source: SnippetSource, options: RunOptions = {}
   let exitCode: number | null;
   try {
     exitCode = await new Promise<number | null>((resolveClose, reject) => {
-      child.once("error", (error) => reject(new DockerRunError("Failed to start docker run", { cause: error })));
+      child.once("error", (error) => {
+        flushOutput();
+        reject(new DockerRunError("Failed to start docker run", { cause: error }));
+      });
       child.once("close", (code) => {
         closed = true;
+        flushOutput();
         resolveClose(code);
       });
     });
