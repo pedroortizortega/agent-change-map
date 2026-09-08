@@ -98,14 +98,14 @@ override map; dropping PR 1 restores the inline fixed-anchor Bezier and array-or
 
 ## Phase 8: Slice C — Wheel-Zoom (PR 3, base: PR 2 branch)
 
-- [ ] 8.1 RED `test/unit/webviewDom.test.ts` — Case 28: first paint through the index render path carries a `viewBox` equal to `width`/`height`.
-- [ ] 8.2 RED `test/unit/webviewDom.test.ts` — Case 29: wheel up over `#graph` shrinks `w`/`h` by `1/ZOOM_STEP` and keeps the cursor's user-space point fixed (exact numbers).
-- [ ] 8.3 RED `test/unit/webviewDom.test.ts` — Case 30: wheel down zooms out; repeated ticks clamp at `ZOOM_MIN`; repeated up-ticks clamp at `ZOOM_MAX`.
-- [ ] 8.4 RED `test/unit/webviewDom.test.ts` — Case 31: a wheel targeting `#graph` is `defaultPrevented`.
-- [ ] 8.5 RED `test/unit/webviewDom.test.ts` — Case 32: a wheel dispatched on `#diff-panel` is not `defaultPrevented` and leaves `viewBox` unchanged.
-- [ ] 8.6 RED `test/unit/webviewDom.test.ts` — Case 33: a new `graph` render after zooming resets `viewBox` to the base.
-- [ ] 8.7 GREEN edit `webview/index.ts`: add `viewBox` state and `ZOOM_STEP=1.1`, `ZOOM_MIN=0.2`, `ZOOM_MAX=5`; bind one `wheel` listener on `byId("graph")` with `{ passive: false }` implementing the design's exact scoping guard, clamp formula, and `getBoundingClientRect()` cursor-to-user-space conversion (with the jsdom zero-size fallback to `baseW`/`baseH`).
-- [ ] 8.8 GREEN edit `webview/index.ts`: add `resetViewBox()` (reads the just-rendered `<svg>`'s `width`/`height`, rewrites `viewBox`), called at the end of `case "graph":`; `case "graphSummary":` with `loadReason === "initial"` also sets `viewBox = undefined`.
-- [ ] 8.9 GREEN confirm cases 28–33 pass.
-- [ ] 8.10 Run `npm run lint && npm run typecheck && npm run test:unit -- webviewDom && npm run test:e2e` and confirm all green (panel-scroll-outside-graph regression check) before opening PR 3 against the PR 2 branch.
+- [x] 8.1 RED `test/unit/webviewDom.test.ts` — Case 28: first paint through the index render path carries a `viewBox` equal to `width`/`height`.
+- [x] 8.2 RED `test/unit/webviewDom.test.ts` — Case 29: wheel up over `#graph` shrinks `w`/`h` by `1/ZOOM_STEP` and keeps the cursor's user-space point fixed (exact numbers).
+- [x] 8.3 RED `test/unit/webviewDom.test.ts` — Case 30: wheel down zooms out; repeated ticks clamp at `ZOOM_MIN`; repeated up-ticks clamp at `ZOOM_MAX`.
+- [x] 8.4 RED `test/unit/webviewDom.test.ts` — Case 31: a wheel targeting `#graph` is `defaultPrevented`.
+- [x] 8.5 RED `test/unit/webviewDom.test.ts` — Case 32: a wheel dispatched on `#diff-panel` is not `defaultPrevented` and leaves `viewBox` unchanged.
+- [x] 8.6 RED `test/unit/webviewDom.test.ts` — Case 33: a new `graph` render after zooming resets `viewBox` to the base.
+- [x] 8.7 GREEN edit `webview/index.ts`: add `viewBox` state and `ZOOM_STEP=1.1`, `ZOOM_MIN=0.2`, `ZOOM_MAX=5`; bind one `wheel` listener on `byId("graph")` with `{ passive: false }` implementing the design's exact scoping guard, clamp formula, and `getBoundingClientRect()` cursor-to-user-space conversion (with the jsdom zero-size fallback to `baseW`/`baseH`).
+- [x] 8.8 GREEN edit `webview/index.ts`: add `resetViewBox()` (reads the just-rendered `<svg>`'s `width`/`height`, rewrites `viewBox`), called at the end of `case "graph":`; `case "graphSummary":` with `loadReason === "initial"` also sets `viewBox = undefined`.
+- [x] 8.9 GREEN confirm cases 28–33 pass.
+- [x] 8.10 Run `npm run lint && npm run typecheck && npm run test:unit -- webviewDom && npm run test:e2e` and confirm all green (panel-scroll-outside-graph regression check) before opening PR 3 against the PR 2 branch. **Result**: lint/typecheck/unit all green (30 webviewDom tests, plus full `test/unit test/integration` at 271/271). `test:e2e` failed on a Docker-gated scenario timeout after "refresh scenario ok"; confirmed via `git stash` re-run that the base branch (no Phase 8 changes) also fails e2e, on the "direct save" scenario's message-order assertion — both are the pre-existing, sandbox-specific Docker/containerd limitations documented in the task brief (not a regression: this PR touches only `webview/index.ts`'s wheel/viewBox code and its unit tests, no host-side write/session/Docker logic). Panel-scroll-outside-graph regression check (Case 32) is green.
 </content>

@@ -101,6 +101,65 @@ let dragState: DragState | undefined;
  * next `pointerdown`, never by the click handler itself (see design.md's drag state machine). */
 let suppressNextClick = false;
 
+/** Live pan/zoom viewport for `#graph`'s current `<svg>`; `undefined` before the first "graph"
+ * render (or right after an "initial" `graphSummary`, which clears `#graph`). `baseW`/`baseH`
+ * are the unzoomed render dimensions the zoom formula and its clamp bounds are always relative
+ * to (see design.md's "Zoom (exact)" section). */
+let viewBox: { x: number; y: number; w: number; h: number; baseW: number; baseH: number } | undefined;
+const ZOOM_STEP = 1.1;
+const ZOOM_MIN = 0.2;
+const ZOOM_MAX = 5;
+/** Rounds to 2 decimal places for stable, compact `viewBox` attribute text. */
+function r2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
+/**
+ * Reads the just-rendered `<svg>`'s own `width`/`height` attributes and rewrites `viewBox` to
+ * exactly match them (1:1, no zoom). Called at the end of every "graph" render so a fresh graph
+ * always starts unzoomed, regardless of any zoom the user applied to the previous render.
+ */
+function resetViewBox(): void {
+  const svg = byId("graph").querySelector("svg");
+  if (!svg) { viewBox = undefined; return; }
+  const baseW = Number(svg.getAttribute("width") ?? 0);
+  const baseH = Number(svg.getAttribute("height") ?? 0);
+  viewBox = { x: 0, y: 0, w: baseW, h: baseH, baseW, baseH };
+  svg.setAttribute("viewBox", `0 0 ${baseW} ${baseH}`);
+}
+
+/**
+ * One wheel listener bound once on `#graph` itself, scoped so it only acts — and only calls
+ * `preventDefault()` — when the event's target is `#graph` or a descendant of it (never
+ * `#diff-panel` or other page content). Zooms toward the cursor: converts the cursor's client
+ * coordinates to the `<svg>`'s user space via `getBoundingClientRect()`, with a fallback to the
+ * base `viewBox` dimensions when the rect is zero-size (jsdom does not implement
+ * `getScreenCTM`/`createSVGPoint`; see design.md Decision 6).
+ */
+function onGraphWheel(event: WheelEvent): void {
+  const graphEl = byId("graph");
+  if (!graphEl.contains(event.target as Node) || !viewBox) return;
+  event.preventDefault();
+  const svg = graphEl.querySelector("svg");
+  if (!svg) return;
+  const factor = event.deltaY < 0 ? 1 / ZOOM_STEP : ZOOM_STEP;
+  const w = clamp(viewBox.w * factor, viewBox.baseW / ZOOM_MAX, viewBox.baseW / ZOOM_MIN);
+  const h = w * (viewBox.baseH / viewBox.baseW);
+  const rect = svg.getBoundingClientRect();
+  const cw = rect.width > 0 ? rect.width : viewBox.baseW;
+  const ch = rect.height > 0 ? rect.height : viewBox.baseH;
+  const ux = (event.clientX - rect.left) / cw;
+  const uy = (event.clientY - rect.top) / ch;
+  viewBox.x += ux * (viewBox.w - w);
+  viewBox.y += uy * (viewBox.h - h);
+  viewBox.w = w;
+  viewBox.h = h;
+  svg.setAttribute("viewBox", `${r2(viewBox.x)} ${r2(viewBox.y)} ${r2(viewBox.w)} ${r2(viewBox.h)}`);
+}
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
+
 /** Parses a single `<g transform="translate(x,y)">` value; `{0,0}` when absent/malformed. */
 function parseTranslate(el: Element): Point {
   const match = /translate\(([-\d.]+),\s*([-\d.]+)\)/.exec(el.getAttribute("transform") ?? "");
@@ -381,6 +440,7 @@ function initialize(): void {
     vscode.postMessage({ type: "requestRefresh", requestId });
   });
   byId("toolbar").append(refresh);
+  byId("graph").addEventListener("wheel", event => onGraphWheel(event as WheelEvent), { passive: false });
   const confirmation = document.createElement("section"); confirmation.id = "confirmation"; confirmation.setAttribute("aria-live", "polite");
   const status = document.createElement("p"); status.id = "action-status"; status.setAttribute("role", "status");
   const output = document.createElement("pre"); output.id = "run-output"; output.setAttribute("aria-live", "polite");
@@ -421,6 +481,7 @@ function handleHostMessage(message: HostToWebviewMessage): void {
         graph = undefined;
         selectedNodeId = undefined;
         byId("graph").textContent = "";
+        viewBox = undefined;
       } else {
         // Captured before the coming `sourcePair` clears `expandedRuns`, so a landing
         // refresh's diff panel re-render can restore the same collapse state.
@@ -481,6 +542,7 @@ function handleHostMessage(message: HostToWebviewMessage): void {
         vscode.postMessage({ type: "inspectSources", nodeId: selectedNodeId });
       }
       applyPositionOverrides();
+      resetViewBox();
       break;
     }
     case "sourcePair": {

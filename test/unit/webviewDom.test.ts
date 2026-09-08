@@ -35,6 +35,16 @@ const drag = (selector: string, from: { x: number; y: number }, to: { x: number;
   pointer("pointerup", dom.window.document, to);
   el.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
 };
+/** Dispatches a cancelable `wheel` event at `target` and returns it so the caller can assert
+ * `defaultPrevented`. jsdom 30 implements `WheelEvent` directly (design.md's Decision 6/7). */
+const wheel = (target: EventTarget, p: { x: number; y: number; deltaY: number }): Event => {
+  const event = new dom.window.WheelEvent("wheel", { clientX: p.x, clientY: p.y, deltaY: p.deltaY, bubbles: true, cancelable: true });
+  target.dispatchEvent(event);
+  return event;
+};
+/** Matches the production `r2` rounding (2 decimal places) so exact-number zoom assertions are
+ * bit-for-bit comparable rather than merely close. */
+const round2 = (n: number) => Math.round(n * 100) / 100;
 /** Absolute `x`/`y` = sum of ancestor `<g transform="translate(x,y)">` values up to (excluding)
  * `root`; `w`/`h` read off the node's own child `<rect>`. Independent of `webview/index.ts`'s
  * production `readBoxes()` — this is a test-side assertion helper, not a second implementation
@@ -570,4 +580,87 @@ it("re-routes every edge identically to a fresh coordinated render after a conta
     const actual = dom.window.document.querySelector<SVGPathElement>(`[data-edge-index="${index}"] path`)?.getAttribute("d");
     expect(actual, `Edge ${index}'s post-drag path must match a fresh coordinated re-render`).toBe(expected.get(index));
   }
+});
+
+// Case 28: first paint through the index render path carries a `viewBox` equal to `width`/`height`.
+it("carries a viewBox equal to width/height on first paint", () => {
+  session.loadComparison(undefined, twoNodeGraph(), []);
+  const svg = element<SVGSVGElement>("#graph svg");
+  const w = svg.getAttribute("width");
+  const h = svg.getAttribute("height");
+  expect(svg.getAttribute("viewBox")).toBe(`0 0 ${w} ${h}`);
+});
+
+// Case 29: wheel up over #graph shrinks w/h by 1/ZOOM_STEP and keeps the cursor's user-space
+// point fixed (exact numbers, per design.md's Zoom (exact) formula and Decision 6's
+// getBoundingClientRect() jsdom zero-rect fallback: fraction = clientX / baseW).
+it("zooms in toward the cursor on wheel-up over #graph, with exact numbers", () => {
+  session.loadComparison(undefined, twoNodeGraph(), []);
+  const svg = element<SVGSVGElement>("#graph svg");
+  const baseW = Number(svg.getAttribute("width"));
+  const baseH = Number(svg.getAttribute("height"));
+  const ZOOM_STEP = 1.1;
+  const clientX = 50;
+  const clientY = 30;
+  wheel(svg, { x: clientX, y: clientY, deltaY: -100 });
+  const [x, y, w, h] = element("#graph svg").getAttribute("viewBox")!.split(" ").map(Number);
+  const expectedW = round2(baseW / ZOOM_STEP);
+  const expectedH = round2(baseH / ZOOM_STEP);
+  const ux = clientX / baseW;
+  const uy = clientY / baseH;
+  const expectedX = round2(ux * (baseW - baseW / ZOOM_STEP));
+  const expectedY = round2(uy * (baseH - baseH / ZOOM_STEP));
+  expect(w).toBe(expectedW);
+  expect(h).toBe(expectedH);
+  expect(x).toBe(expectedX);
+  expect(y).toBe(expectedY);
+});
+
+// Case 30: wheel down zooms out; repeated ticks clamp at ZOOM_MIN; repeated up-ticks clamp at
+// ZOOM_MAX.
+it("clamps zoom at ZOOM_MIN on repeated zoom-out and ZOOM_MAX on repeated zoom-in", () => {
+  session.loadComparison(undefined, twoNodeGraph(), []);
+  const svg = element<SVGSVGElement>("#graph svg");
+  const baseW = Number(svg.getAttribute("width"));
+  const ZOOM_MIN = 0.2;
+  const ZOOM_MAX = 5;
+  for (let i = 0; i < 60; i++) wheel(svg, { x: 0, y: 0, deltaY: 100 });
+  const outW = Number(element("#graph svg").getAttribute("viewBox")!.split(" ")[2]);
+  expect(outW).toBe(round2(baseW / ZOOM_MIN));
+  for (let i = 0; i < 120; i++) wheel(svg, { x: 0, y: 0, deltaY: -100 });
+  const inW = Number(element("#graph svg").getAttribute("viewBox")!.split(" ")[2]);
+  expect(inW).toBe(round2(baseW / ZOOM_MAX));
+});
+
+// Case 31: a wheel targeting #graph is defaultPrevented.
+it("prevents default for a wheel event targeting #graph", () => {
+  session.loadComparison(undefined, twoNodeGraph(), []);
+  const svg = element<SVGSVGElement>("#graph svg");
+  const event = wheel(svg, { x: 10, y: 10, deltaY: -10 });
+  expect(event.defaultPrevented).toBe(true);
+});
+
+// Case 32: a wheel dispatched on #diff-panel is not defaultPrevented and leaves viewBox unchanged.
+it("does not intercept wheel events outside #graph", () => {
+  session.loadComparison(undefined, twoNodeGraph(), []);
+  const before = element("#graph svg").getAttribute("viewBox");
+  const panel = element("#diff-panel");
+  const event = wheel(panel, { x: 10, y: 10, deltaY: -10 });
+  expect(event.defaultPrevented).toBe(false);
+  expect(element("#graph svg").getAttribute("viewBox")).toBe(before);
+});
+
+// Case 33: a new "graph" render after zooming resets viewBox to the base.
+it("resets viewBox to the base on a new graph render after zooming", () => {
+  session.loadComparison(undefined, twoNodeGraph(), []);
+  const svg = element<SVGSVGElement>("#graph svg");
+  wheel(svg, { x: 10, y: 10, deltaY: -100 });
+  const zoomed = element("#graph svg").getAttribute("viewBox");
+
+  session.loadComparison(undefined, twoNodeGraph(), [], { loadReason: "refresh" });
+  const svg2 = element<SVGSVGElement>("#graph svg");
+  const w = svg2.getAttribute("width");
+  const h = svg2.getAttribute("height");
+  expect(svg2.getAttribute("viewBox")).toBe(`0 0 ${w} ${h}`);
+  expect(svg2.getAttribute("viewBox")).not.toBe(zoomed);
 });
