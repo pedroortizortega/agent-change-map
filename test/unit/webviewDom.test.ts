@@ -121,7 +121,10 @@ it("renders classified diff rows with ghost cells for the missing side", async (
 
 it("navigates a relationship at its exact edge span (click-contract proof)", async () => {
   const edgeSpan = { ...node.span, startByte: 6, endByte: 13, startColumn: 6, endColumn: 13 };
-  session.loadComparison({ ...graph, snapshot: leftSnapshot }, { ...graph, edges: [{ kind: "call", source: node.id, resolution: { kind: "resolved", target: node.id }, span: edgeSpan }] }, []);
+  const otherNode = { ...node, id: "module:other", qualifiedName: "other" };
+  // Distinct, unrelated source/target (not a self-reference) so this fixture is unaffected
+  // by ancestor self-reference suppression.
+  session.loadComparison({ ...graph, snapshot: leftSnapshot }, { ...graph, nodes: [node, otherNode], edges: [{ kind: "call", source: node.id, resolution: { kind: "resolved", target: otherNode.id }, span: edgeSpan }] }, []);
   click('[data-node-id="module:m"]');
   click('[data-edge-index="0"]');
   await vi.waitFor(() => expect(intents).toContainEqual(expect.objectContaining({

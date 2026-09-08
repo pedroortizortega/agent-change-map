@@ -21,6 +21,9 @@ export function buildCspMetaTag(nonce: string, cspSource: string): string {
 
 export type ChangeStatus = "added" | "removed" | "modified" | "unchanged";
 
+/** Whether an edge is present on the current/worktree side, or only on the original side. */
+export type EdgeVintage = "current" | "removed";
+
 function changeStatusFor(qualifiedName: string, diff: CorrelatedDiffEntry[]): ChangeStatus {
   const entry = diff.find((candidate) => candidate.kind === "entity" && candidate.qualifiedName === qualifiedName);
   if (!entry || entry.kind !== "entity") return "unchanged";
@@ -511,6 +514,38 @@ export function sectionScope(graph: AnalysisGraph, scopeId: string): AnalysisGra
     return edge.resolution.kind === "resolved" && nodeIds.has(edge.resolution.target);
   });
   return { ...graph, nodes, edges };
+}
+
+/**
+ * True when `edge`'s source entity is a transitive `containerId` ancestor of its resolved
+ * target (the `Main(x)` -> `class Main` shape). Peer edges between siblings are false.
+ * Unresolved/ambiguous/`contains` edges and unknown ids are false. Visited-set guarded,
+ * mirroring `sectionScope`'s walk, so a `containerId` cycle terminates and returns false.
+ * Equal source/target counts as a self-reference and is suppressed.
+ */
+export function isAncestorSelfReference(edge: Edge, nodes: readonly Entity[]): boolean {
+  if (edge.kind === "contains") return false;
+  if (edge.resolution.kind !== "resolved") return false;
+  const target = edge.resolution.target;
+  if (edge.source === target) return true;
+  const byId = new Map(nodes.map((node) => [node.id, node] as const));
+  const seen = new Set<string>();
+  let current: Entity | undefined = byId.get(target);
+  while (current) {
+    if (seen.has(current.id)) return false;
+    seen.add(current.id);
+    const containerId = current.containerId;
+    if (containerId === undefined) return false;
+    if (containerId === edge.source) return true;
+    current = byId.get(containerId);
+  }
+  return false;
+}
+
+/** Unconditional pre-filter: drops every `isAncestorSelfReference` edge. Nodes untouched. */
+export function suppressAncestorSelfReferences(graph: AnalysisGraph): AnalysisGraph {
+  const edges = graph.edges.filter((edge) => !isAncestorSelfReference(edge, graph.nodes));
+  return { ...graph, edges };
 }
 
 export interface GraphFilter {

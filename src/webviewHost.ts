@@ -7,7 +7,7 @@ import type { DirectWriteRequest, WriteEffectPreview, WriteReceipt } from "./edi
 import { WriteConfirmationDeclinedError, WriteGuardError } from "./editing/writeGuard.js";
 import type { RunOptions, RunResult, SnippetSource, SnippetVariant } from "./execution/dockerRunner.js";
 import { isOversized, webviewToHostMessageSchema } from "./webviewProtocol.js";
-import { filterGraph, type GraphFilter } from "../webview/graphView.js";
+import { filterGraph, suppressAncestorSelfReferences, type GraphFilter } from "../webview/graphView.js";
 import type { HostToWebviewMessage } from "./webviewProtocol.js";
 import { diffLines } from "./diff/lineDiff.js";
 
@@ -152,7 +152,7 @@ export class ChangeMapSession {
     this.right = right;
     this.diff = diff;
     this.untrackedPaths = options.untrackedPaths ?? [];
-    const display = mergeGraphsForDisplay(left, right);
+    const display = suppressAncestorSelfReferences(mergeGraphsForDisplay(left, right));
     this.sourceIndex = buildSourceIndex(this.deps.store, left, right);
     const oversized = isOversized(display);
     this.deps.post({
@@ -168,8 +168,8 @@ export class ChangeMapSession {
   }
 
   private sendGraph(filter?: GraphFilter): void {
-    const full = mergeGraphsForDisplay(this.left, this.right);
-    const display = filter ? filterGraph(full, this.diff, filter) : full;
+    const suppressed = suppressAncestorSelfReferences(mergeGraphsForDisplay(this.left, this.right));
+    const display = filter ? filterGraph(suppressed, this.diff, filter) : suppressed;
     if (filter && isOversized(display)) {
       this.deps.post({ type: "error", message: "Filtered map is still oversized. Choose a smaller section or explicitly render the full map." });
       return;
