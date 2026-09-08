@@ -309,25 +309,86 @@ function pickLaneSide(from: Point, to: Point, leftX: number, rightX: number): "l
   return Math.abs(midX - leftX) <= Math.abs(midX - rightX) ? "left" : "right";
 }
 
+/** Renders a polyline of `points` as an SVG path `d` string (`M` for the first point, `L` for
+ * every following one). */
+function polylinePath(points: readonly Point[]): string {
+  return points.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");
+}
+
+/**
+ * The `y` `escapeSafeY` climbs/drops a side anchor to: whichever of "above the topmost box in
+ * the whole diagram" or "below the bottommost box in the whole diagram" is closer to `y` (a tie
+ * favouring the top, matching this module's other left/tie conventions). A horizontal run at
+ * this `y` cannot cross ANY box's vertical extent, by construction - no box in `boxes` reaches
+ * this far up (or down), so this is a hard geometric guarantee, not a per-box check that could
+ * fail with nowhere left to fall back to.
+ */
+function escapeSafeY(y: number, boxes: ReadonlyMap<string, Rect>): number {
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (const box of boxes.values()) {
+    minY = Math.min(minY, box.y);
+    maxY = Math.max(maxY, box.y + box.h);
+  }
+  const topY = minY - DETOUR_CLEARANCE;
+  const bottomY = maxY + DETOUR_CLEARANCE;
+  return Math.abs(y - topY) <= Math.abs(y - bottomY) ? topY : bottomY;
+}
+
 /**
  * Outer-lane fallback path: exits `sourceBox` from its near-lane side, travels horizontally to
  * the shared lane, travels vertically in the lane to the target's row, then travels
  * horizontally back in to `targetBox`'s near side. `from`/`to` (the ordinary bottom/top-center
- * anchors) decide which of the two lanes (`outerLaneXs`) is closer via `pickLaneSide`; side
- * anchors (not the usual bottom/top-center ones) on both ends keep the horizontal legs at the
- * source's/target's own row, which - because this diagram nests children purely by vertical
- * stacking, never side by side - only ever overlaps their own ancestor chains (already excluded
- * from `obstacles`), never an unrelated box. Plain straight segments, no Bezier blending: unlike
- * the local-detour case, this path does not end by dropping into the target from directly above
- * it.
+ * anchors) decide which of the two lanes (`outerLaneXs`) is closer via `pickLaneSide`. Plain
+ * straight segments, no Bezier blending: unlike the local-detour case, this path does not end by
+ * dropping into the target from directly above it.
+ *
+ * The lane's own vertical run is safe by construction (`laneX` sits outside every box's
+ * horizontal span - see `outerLaneXs`), but the two horizontal escape/entry legs - from the
+ * source's/target's own side anchor across to the lane - are not: side anchors keep those legs
+ * at the source's/target's own row, which is only guaranteed clear of their own ancestor chains
+ * (already excluded from `obstacles`), not of some unrelated box that happens to sit at that
+ * exact row after a drag. This is checked directly: the cheap direct path (four points, matching
+ * this fallback's original shape) is tried first and used as-is whenever it genuinely clears
+ * every obstacle, which covers the overwhelming common case and keeps this fallback's output
+ * unchanged for it. Only when that direct path does NOT clear does this fall back further to a
+ * geometrically-guaranteed detour: each side anchor first climbs/drops vertically (still along
+ * the source's/target's own edge `x`, only over its own local vertical extent, since the
+ * intervening obstacle plainly cannot occupy the same row as the endpoint it can also reach a
+ * mutually clear `y` from without moving sideways first) to `escapeSafeY`, then travels
+ * horizontally to the lane at that safe row - a row no box in the diagram reaches, by
+ * construction, so this horizontal leg cannot cross anything regardless of what obstacle
+ * triggered the fallback. There is no further fallback past this: if this geometrically-safe
+ * variant somehow still fails to clear (accepted as a residual, best-effort case, consistent
+ * with `routeWaypoints`' own `MAX_DETOURS` exhaustion), it is still the best available route and
+ * is returned rather than producing no edge at all.
  */
-function outerLaneEdgePath(boxes: ReadonlyMap<string, Rect>, sourceBox: Rect, targetBox: Rect, from: Point, to: Point): string {
+function outerLaneEdgePath(
+  boxes: ReadonlyMap<string, Rect>,
+  sourceBox: Rect,
+  targetBox: Rect,
+  from: Point,
+  to: Point,
+  obstacles: readonly Rect[],
+): string {
   const { leftX, rightX } = outerLaneXs(boxes);
   const laneSide = pickLaneSide(from, to, leftX, rightX);
   const laneX = laneSide === "right" ? rightX : leftX;
   const sideFrom = sourceSideAnchor(sourceBox, laneSide);
   const sideTo = targetSideAnchor(targetBox, laneSide);
-  return `M${sideFrom.x},${sideFrom.y} L${laneX},${sideFrom.y} L${laneX},${sideTo.y} L${sideTo.x},${sideTo.y}`;
+  const direct = [sideFrom, { x: laneX, y: sideFrom.y }, { x: laneX, y: sideTo.y }, { x: sideTo.x, y: sideTo.y }];
+  if (pathClears(direct, obstacles)) return polylinePath(direct);
+  const fromSafeY = escapeSafeY(sideFrom.y, boxes);
+  const toSafeY = escapeSafeY(sideTo.y, boxes);
+  const safe = [
+    sideFrom,
+    { x: sideFrom.x, y: fromSafeY },
+    { x: laneX, y: fromSafeY },
+    { x: laneX, y: toSafeY },
+    { x: sideTo.x, y: toSafeY },
+    sideTo,
+  ];
+  return polylinePath(safe);
 }
 
 /** True when some OTHER box in `boxes` sits fully inside `box` - i.e. `box` is a container
@@ -405,13 +466,13 @@ export function edgePathFor(boxes: ReadonlyMap<string, Rect>, sourceId: string, 
   const from = sourceExitAnchor(sourceBox, sourceId, to, boxes);
   const obstacles = obstaclesFor(boxes, sourceId, targetId);
   if (needsOuterLaneFallback(from, to, obstacles, boxes)) {
-    return outerLaneEdgePath(boxes, sourceBox, targetBox, from, to);
+    return outerLaneEdgePath(boxes, sourceBox, targetBox, from, to, obstacles);
   }
   const waypoints = routeWaypoints(from, to, obstacles);
   const tailStart = waypoints.length > 0 ? waypoints[waypoints.length - 1] : from;
   const { c1, c2, samples } = tailCurve(tailStart, to);
   if (!pathClears([from, ...waypoints, ...samples, to], obstacles)) {
-    return outerLaneEdgePath(boxes, sourceBox, targetBox, from, to);
+    return outerLaneEdgePath(boxes, sourceBox, targetBox, from, to, obstacles);
   }
   if (waypoints.length === 0) {
     return `M${from.x},${from.y} C${c1.x},${c1.y} ${c2.x},${c2.y} ${to.x},${to.y}`;
@@ -428,6 +489,11 @@ export interface RoutingEdge {
 
 interface Port { anchor: Point; escape: Point }
 const LANE_GAP = 12;
+/** Minimum gap kept between a routed segment and the actual boundary of an unrelated
+ * (non-endpoint) obstacle box - a route may run right up to this margin, never inside it, so
+ * a line never visually touches a box it has nothing to do with. Well under `LANE_GAP`, so it
+ * never fights the port/escape spacing already reserved around every box. */
+export const ROUTE_CLEARANCE = 2;
 
 function simplifyRoute(points: Point[]): Point[] {
   const result: Point[] = [];
@@ -526,11 +592,20 @@ export function edgePathsFor(boxes: ReadonlyMap<string, Rect>, edges: readonly R
     const targetContainsSource = source !== target && rectFullyInside(source, target);
     const sources = routingPorts(source, sourceSlot, counts.get(edge.source)!, sourceContainsTarget);
     const targets = routingPorts(target, targetSlot, counts.get(edge.target!)!, targetContainsSource);
-    const obstacles = [...boxes.values()].filter(box => {
-      if (box === source) return !sourceContainsTarget;
-      if (box === target) return !targetContainsSource;
-      return !rectFullyInside(source, box) && !rectFullyInside(target, box);
-    }).map(box => ({ x: box.x + EPS, y: box.y + EPS, w: box.w - 2 * EPS, h: box.h - 2 * EPS }));
+    // The edge's own source/target box is kept at the near-zero EPS margin: a port's anchor
+    // sits exactly on that box's own boundary, so shrinking it further would falsely flag the
+    // route's own first/last segment as "entering" its own endpoint. Every genuinely unrelated
+    // box instead gets a real ROUTE_CLEARANCE margin grown OUTWARD, not shrunk inward, so a
+    // route must stay clear of the box's actual boundary by a visible amount - not just avoid
+    // literally crossing into its interior, which still let a route visually touch or graze an
+    // unrelated box's edge.
+    const obstacles = [...boxes.values()].flatMap(box => {
+      let margin: number;
+      if (box === source) { if (sourceContainsTarget) return []; margin = EPS; }
+      else if (box === target) { if (targetContainsSource) return []; margin = EPS; }
+      else { if (rectFullyInside(source, box) || rectFullyInside(target, box)) return []; margin = -ROUTE_CLEARANCE; }
+      return [{ x: box.x + margin, y: box.y + margin, w: box.w - 2 * margin, h: box.h - 2 * margin }];
+    });
     const containers = [...boxes.values()].filter(box =>
       (box !== source && rectFullyInside(source, box)) || (box !== target && rectFullyInside(target, box)));
     // Ancestors permit short endpoint crossings, not long transit through their gutters.

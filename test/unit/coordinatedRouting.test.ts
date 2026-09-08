@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { edgePathsFor, targetSideAnchor, segmentIntersectsRect, type Rect, type Point } from "../../webview/edgeGeometry.js";
+import { edgePathsFor, targetSideAnchor, segmentIntersectsRect, ROUTE_CLEARANCE, type Rect, type Point } from "../../webview/edgeGeometry.js";
 
 const points = (path: string): Point[] => Array.from(path.matchAll(/(-?[\d.]+),(-?[\d.]+)/g), m => ({ x: Number(m[1]), y: Number(m[2]) }));
 const boxes = new Map<string, Rect>([
@@ -90,6 +90,95 @@ describe("coordinated orthogonal routing", () => {
     const route = points(edgePathsFor(horizontal, [{ source: "left", target: "right" }])[0]!);
     for (const box of horizontal.values()) for (let i = 1; i < route.length; i++) {
       expect(segmentIntersectsRect(route[i - 1], route[i], { x: box.x + 0.01, y: box.y + 0.01, w: box.w - 0.02, h: box.h - 0.02 })).toBe(false);
+    }
+  });
+
+  it("keeps a real clearance margin outside every unrelated box, on this repo's own real analyzer output", () => {
+    // Regression: reported live-testing bug (screenshot) - routed lines grazed/touched the
+    // dashed border of sibling module boxes they had nothing to do with. The prior obstacle
+    // check shrank each obstacle inward by a fraction of a pixel (see the 0.01 margin the
+    // other cases in this file use), so a route could pass literally along an unrelated box's
+    // boundary - "not intersecting" by that near-zero threshold, but visually touching it.
+    //
+    // A small isolated fixture (just the two boxes involved) did NOT reproduce this: which
+    // candidate route wins depends on `occupied`, the lanes already claimed by every
+    // PRECEDING edge in the same `edgePathsFor` call - so only the full graph reproduces the
+    // exact lane congestion that caused the violation. These are the exact boxes and routing
+    // edges from this repo's own real analyzer output for its `test/` fixture
+    // (app.py/route.py/route2.py/route3.py/route4.py/config.py), captured via the real
+    // `captureCommitState`/`captureWorktreeState`/`mergeGraphsForDisplay` pipeline - not a
+    // hand-picked minimal case.
+    const boxes: [string, Rect][] = [
+      ["module:route", { x: 16, y: 16, w: 224, h: 152 }],
+      ["function:route.ruta1@0", { x: 28, y: 46, w: 200, h: 32 }],
+      ["function:route.ruta2@105", { x: 28, y: 86, w: 200, h: 32 }],
+      ["function:route.ruta3@210", { x: 28, y: 126, w: 200, h: 32 }],
+      ["module:route2", { x: 16, y: 192, w: 224, h: 72 }],
+      ["function:route2.funcion2@0", { x: 28, y: 222, w: 200, h: 32 }],
+      ["module:route3", { x: 16, y: 288, w: 248, h: 152 }],
+      ["class:route3.Route3@37", { x: 28, y: 318, w: 224, h: 112 }],
+      ["method:route3.Route3.__init__@55", { x: 40, y: 348, w: 200, h: 32 }],
+      ["method:route3.Route3.get_info@183", { x: 40, y: 388, w: 200, h: 32 }],
+      ["module:route4", { x: 16, y: 464, w: 248, h: 152 }],
+      ["class:route4.Route4@25", { x: 28, y: 494, w: 224, h: 112 }],
+      ["method:route4.Route4.__init__@43", { x: 40, y: 524, w: 200, h: 32 }],
+      ["method:route4.Route4.get_info@172", { x: 40, y: 564, w: 200, h: 32 }],
+      ["module:app", { x: 16, y: 640, w: 248, h: 152 }],
+      ["class:app.Main@115", { x: 28, y: 670, w: 224, h: 112 }],
+      ["method:app.Main.__init__@131", { x: 40, y: 700, w: 200, h: 32 }],
+      ["method:app.Main.run@254", { x: 40, y: 740, w: 200, h: 32 }],
+      ["module:config", { x: 16, y: 816, w: 200, h: 32 }],
+    ];
+    const realEdges: { source: string; target?: string }[] = [
+      { source: "module:app", target: "function:route.ruta1@0" }, { source: "module:app" },
+      { source: "module:app", target: "function:route.ruta1@0" }, { source: "module:app", target: "function:route2.funcion2@0" },
+      { source: "module:app", target: "class:route3.Route3@37" }, { source: "module:app", target: "class:route4.Route4@25" },
+      { source: "module:app" }, { source: "module:route3" }, { source: "module:route4" },
+      { source: "method:app.Main.__init__@131" },
+      { source: "method:app.Main.run@254", target: "class:route4.Route4@25" },
+      { source: "method:app.Main.run@254" }, { source: "method:app.Main.run@254" }, { source: "method:app.Main.run@254" },
+      { source: "method:app.Main.run@254" }, { source: "method:app.Main.run@254" },
+      { source: "method:app.Main.run@254", target: "function:route.ruta1@0" },
+      { source: "method:app.Main.run@254" },
+      { source: "method:app.Main.run@254", target: "function:route2.funcion2@0" },
+      { source: "method:app.Main.run@254" },
+      { source: "method:app.Main.run@254", target: "class:route3.Route3@37" },
+      { source: "method:app.Main.run@254" }, { source: "method:app.Main.run@254" },
+      { source: "module:app" }, { source: "module:app" },
+      { source: "module:app", target: "class:app.Main@115" }, { source: "module:app" },
+    ];
+    const boxMap = new Map(boxes);
+    const containerOf = new Map<string, string | undefined>([
+      ["function:route.ruta1@0", "module:route"], ["function:route.ruta2@105", "module:route"], ["function:route.ruta3@210", "module:route"],
+      ["function:route2.funcion2@0", "module:route2"],
+      ["class:route3.Route3@37", "module:route3"], ["method:route3.Route3.__init__@55", "class:route3.Route3@37"], ["method:route3.Route3.get_info@183", "class:route3.Route3@37"],
+      ["class:route4.Route4@25", "module:route4"], ["method:route4.Route4.__init__@43", "class:route4.Route4@25"], ["method:route4.Route4.get_info@172", "class:route4.Route4@25"],
+      ["class:app.Main@115", "module:app"], ["method:app.Main.__init__@131", "class:app.Main@115"], ["method:app.Main.run@254", "class:app.Main@115"],
+    ]);
+    const isAncestorOrDescendant = (a: string, b: string): boolean => {
+      for (let cur: string | undefined = a; cur; cur = containerOf.get(cur)) if (cur === b) return true;
+      for (let cur: string | undefined = b; cur; cur = containerOf.get(cur)) if (cur === a) return true;
+      return false;
+    };
+    const routes = edgePathsFor(boxMap, realEdges);
+    for (let i = 0; i < realEdges.length; i++) {
+      const path = routes[i];
+      const { source, target } = realEdges[i];
+      // A missing target renders the unrouted dashed stub, by established design - it never
+      // clears obstacles, resolved or otherwise (see edgePathFor's own doc comment).
+      if (!path || !target) continue;
+      const route = points(path);
+      for (const [boxId, box] of boxMap) {
+        if (boxId === source || boxId === target) continue;
+        if (isAncestorOrDescendant(source, boxId) || (target && isAncestorOrDescendant(target, boxId))) continue;
+        const inflated = { x: box.x - ROUTE_CLEARANCE, y: box.y - ROUTE_CLEARANCE, w: box.w + 2 * ROUTE_CLEARANCE, h: box.h + 2 * ROUTE_CLEARANCE };
+        for (let j = 1; j < route.length; j++) {
+          expect(
+            segmentIntersectsRect(route[j - 1], route[j], inflated),
+            `edge ${source}->${target ?? "(stub)"} segment ${j} enters the ${ROUTE_CLEARANCE}px clearance margin around unrelated box '${boxId}'`,
+          ).toBe(false);
+        }
+      }
     }
   });
 
