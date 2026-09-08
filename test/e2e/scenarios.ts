@@ -67,7 +67,13 @@ export async function runScenarios(): Promise<void> {
     assert.equal(resolve(workspaceFolder!.uri.fsPath), resolve(fixture.root), "Workspace folder should be the fixture repository");
     console.log("[e2e] workspace folder confirmed as fixture repository");
 
-    await vscode.commands.executeCommand("agentChangeMap.compare", { left: fixture.baseOid, right: fixture.currentOid });
+    // Activate the extension directly rather than by discarding the result of a throwaway
+    // `agentChangeMap.compare` invocation: that command creates its own `ChangeMapSession`/panel
+    // and pushes into the SAME shared `receivedMessages` array `getLastReceivedMessages()` reads
+    // below, racing against the real invocation a few lines down and flaking whichever assertion
+    // reads that array next (whichever panel's async git-capture/analysis pipeline happens to post
+    // its message last wins the race - confirmed as the root cause of an intermittent e2e failure).
+    await findLoadedExtension().activate();
     const api = await activateExtensionApi();
     const hooks = api.__test!;
 
@@ -136,7 +142,18 @@ export async function runScenarios(): Promise<void> {
       await request;
       assert.equal(await readFile(outsideTarget, "utf8"), original, "Forged root must not authorize an external write");
       assert.deepEqual(await readdir(outsideDirectory), ["outside.py"], "Refused write must not create backups or temporary files");
-      const result = hooks.getLastReceivedMessages().at(-1) as { type: string; requestId: string; ok: boolean; reason: string };
+      // `receivedMessages` is one array shared for the extension's whole lifetime (see
+      // `src/extension.ts`), so `.at(-1)` is not reliable once other async work (an auto-refresh
+      // timer, a later scenario's own messages) can append to it out of order - filter by this
+      // request's own id instead of trusting array position.
+      const result = hooks
+        .getLastReceivedMessages()
+        .filter((raw) => {
+          const message = raw as { type?: string; requestId?: string };
+          return message.type === "directWriteResult" && message.requestId === requestId;
+        })
+        .at(-1) as { type: string; requestId: string; ok: boolean; reason: string };
+      assert.ok(result, "Expected a directWriteResult for the forged-root request");
       assert.equal(result.type, "directWriteResult");
       assert.equal(result.requestId, requestId);
       assert.equal(result.ok, false);
@@ -165,7 +182,16 @@ export async function runScenarios(): Promise<void> {
     );
     await session!.handleIntent({ type: "confirmDirectWrite", requestId: writeRequestId, confirmed: true });
     await writePromise;
-    const writeResult = hooks.getLastReceivedMessages().at(-1) as { type: string; ok: boolean };
+    // Same rationale as the forged-root scenario above: filter by this request's own id rather
+    // than trusting `.at(-1)` on the shared, whole-lifetime `receivedMessages` array.
+    const writeResult = hooks
+      .getLastReceivedMessages()
+      .filter((raw) => {
+        const message = raw as { type?: string; requestId?: string };
+        return message.type === "directWriteResult" && message.requestId === writeRequestId;
+      })
+      .at(-1) as { type: string; ok: boolean };
+    assert.ok(writeResult, "Expected a directWriteResult for the direct-save request");
     assert.equal(writeResult.type, "directWriteResult");
     assert.equal(writeResult.ok, true);
     const writtenContent = await vscode.workspace.fs.readFile(vscode.Uri.file(targetPath));
