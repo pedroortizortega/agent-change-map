@@ -3,6 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ChangeMapSession } from "../../src/webviewHost.js";
 import { SnapshotStore } from "../../src/snapshots/snapshotStore.js";
 import { DraftStore } from "../../src/editing/draftStore.js";
+import { edgePathFor, type Rect } from "../../webview/edgeGeometry.js";
 import type { AnalysisGraph } from "../../src/protocol.js";
 import type { WebviewToHostMessage } from "../../src/webviewProtocol.js";
 
@@ -22,6 +23,76 @@ const element = <T extends Element>(selector: string): T => {
   return found as T;
 };
 const click = (selector: string) => element<HTMLElement>(selector).dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+/** Case 22 dispatches these steps individually (mid-drag assertions between pointermove and
+ * pointerup); `drag` below composes the full sequence from this same primitive. */
+const pointer = (type: string, target: EventTarget, p: { x: number; y: number }) =>
+  target.dispatchEvent(new dom.window.PointerEvent(type, { clientX: p.x, clientY: p.y, bubbles: true }));
+const drag = (selector: string, from: { x: number; y: number }, to: { x: number; y: number }) => {
+  const el = element<Element>(selector);
+  pointer("pointerdown", el, from);
+  pointer("pointermove", dom.window.document, to);
+  pointer("pointerup", dom.window.document, to);
+  el.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+};
+/** Absolute `x`/`y` = sum of ancestor `<g transform="translate(x,y)">` values up to (excluding)
+ * `root`; `w`/`h` read off the node's own child `<rect>`. Independent of `webview/index.ts`'s
+ * production `readBoxes()` — this is a test-side assertion helper, not a second implementation
+ * of routing math (the routing math itself always comes from `edgePathFor`). */
+function translateOf(el: Element): { x: number; y: number } {
+  const match = /translate\(([-\d.]+),\s*([-\d.]+)\)/.exec(el.getAttribute("transform") ?? "");
+  return match ? { x: Number(match[1]), y: Number(match[2]) } : { x: 0, y: 0 };
+}
+function boxesFromDom(root: Element): Map<string, Rect> {
+  const boxes = new Map<string, Rect>();
+  for (const nodeEl of Array.from(root.querySelectorAll("[data-node-id]"))) {
+    let x = 0;
+    let y = 0;
+    let current: Element | null = nodeEl;
+    while (current && current !== root) {
+      const t = translateOf(current);
+      x += t.x;
+      y += t.y;
+      current = current.parentElement;
+    }
+    const rect = nodeEl.querySelector("rect");
+    const w = Number(rect?.getAttribute("width") ?? 0);
+    const h = Number(rect?.getAttribute("height") ?? 0);
+    boxes.set(nodeEl.getAttribute("data-node-id")!, { x, y, w, h });
+  }
+  return boxes;
+}
+const dragSpan = { path: "d.py", startByte: 0, endByte: 3, startLine: 1, startColumn: 0, endLine: 1, endColumn: 3 };
+/** Two root-level function nodes with a resolved `call` edge `a -> b`, used by the plain drag,
+ * click-suppression, and refresh-persistence cases. */
+function twoNodeGraph(): AnalysisGraph {
+  return {
+    snapshot,
+    nodes: [
+      { id: "function:a", kind: "function", qualifiedName: "a", span: dragSpan },
+      { id: "function:b", kind: "function", qualifiedName: "b", span: dragSpan },
+    ],
+    edges: [{ kind: "call", source: "function:a", resolution: { kind: "resolved", target: "function:b" }, span: dragSpan }],
+    diagnostics: [],
+  };
+}
+/** A container (`module:pkg`) nesting `function:pkg.f`, which calls the separate root-level
+ * `function:g`. Used by the container-drag case: dragging the container must move its nested
+ * descendant and re-anchor the descendant's edge. */
+function containerGraph(): AnalysisGraph {
+  return {
+    snapshot,
+    nodes: [
+      { id: "module:pkg", kind: "module", qualifiedName: "pkg", span: dragSpan },
+      { id: "function:pkg.f", kind: "function", qualifiedName: "pkg.f", containerId: "module:pkg", span: dragSpan },
+      { id: "function:g", kind: "function", qualifiedName: "g", span: dragSpan },
+    ],
+    edges: [
+      { kind: "contains", source: "module:pkg", resolution: { kind: "resolved", target: "function:pkg.f" }, span: dragSpan },
+      { kind: "call", source: "function:pkg.f", resolution: { kind: "resolved", target: "function:g" }, span: dragSpan },
+    ],
+    diagnostics: [],
+  };
+}
 beforeEach(async () => {
   vi.resetModules();
   intents.length = 0;
@@ -290,4 +361,94 @@ it("discloses unresolved relationships without selecting the node and navigates 
   click('[data-relationship-source="module:m"]');
   session.loadComparison(undefined, graph, []);
   expect(dom.window.document.querySelector('[role="dialog"]')).toBeNull();
+});
+
+// Case 21: above-threshold drag updates the dragged node's transform.
+it("updates the dragged node's transform once the pointer moves past the drag threshold", async () => {
+  session.loadComparison(undefined, twoNodeGraph(), []);
+  const before = translateOf(element('[data-node-id="function:a"]'));
+  drag('[data-node-id="function:a"]', { x: 100, y: 100 }, { x: 130, y: 140 });
+  const after = translateOf(element('[data-node-id="function:a"]'));
+  expect(after).toEqual({ x: before.x + 30, y: before.y + 40 });
+});
+
+// Case 22: an attached edge's `d` changes after a pointermove, before pointerup (live re-route
+// proof, not on-drop).
+it("re-routes an attached edge's path live, during pointermove, before pointerup fires", async () => {
+  session.loadComparison(undefined, twoNodeGraph(), []);
+  const edgePath = element<SVGPathElement>('[data-edge-index="0"] path');
+  const before = edgePath.getAttribute("d");
+  const el = element('[data-node-id="function:a"]');
+  pointer("pointerdown", el, { x: 100, y: 100 });
+  pointer("pointermove", dom.window.document, { x: 130, y: 140 });
+  const duringDrag = edgePath.getAttribute("d");
+  expect(duringDrag).not.toBe(before);
+  pointer("pointerup", dom.window.document, { x: 130, y: 140 });
+});
+
+// Case 23: below-threshold (2px) sequence still fires click-to-navigate (`inspectSources`
+// posted).
+it("still fires click-to-navigate when the pointer sequence stays below the drag threshold", async () => {
+  session.loadComparison(undefined, twoNodeGraph(), []);
+  intents.length = 0;
+  drag('[data-node-id="function:a"]', { x: 100, y: 100 }, { x: 102, y: 101 });
+  expect(intents.some(intent => intent.type === "inspectSources")).toBe(true);
+});
+
+// Case 24: above-threshold drag posts no `inspectSources` (click suppressed); a subsequent full
+// pointerdown->click still navigates.
+it("suppresses click-to-navigate for the drag's own click but not for the next full click", async () => {
+  session.loadComparison(undefined, twoNodeGraph(), []);
+  intents.length = 0;
+  drag('[data-node-id="function:a"]', { x: 100, y: 100 }, { x: 130, y: 140 });
+  expect(intents.some(intent => intent.type === "inspectSources")).toBe(false);
+
+  drag('[data-node-id="function:a"]', { x: 200, y: 200 }, { x: 200, y: 200 });
+  expect(intents.some(intent => intent.type === "inspectSources")).toBe(true);
+});
+
+// Case 25: container drag — a descendant's edge `d` equals `edgePathFor` over boxes offset by
+// the accumulated delta.
+it("re-anchors a descendant's edge when its container is dragged, matching edgePathFor over offset boxes", async () => {
+  session.loadComparison(undefined, containerGraph(), []);
+  const graphEl = element('#graph');
+  const baseBoxes = boxesFromDom(graphEl);
+  drag('[data-node-id="module:pkg"]', { x: 300, y: 300 }, { x: 340, y: 360 });
+  const dx = 40;
+  const dy = 60;
+  const liveBoxes = new Map(baseBoxes);
+  for (const id of ["module:pkg", "function:pkg.f"]) {
+    const box = baseBoxes.get(id)!;
+    liveBoxes.set(id, { ...box, x: box.x + dx, y: box.y + dy });
+  }
+  const expected = edgePathFor(liveBoxes, "function:pkg.f", "function:g");
+  const actual = element<SVGPathElement>('[data-edge-index="1"] path').getAttribute("d");
+  expect(actual).toBe(expected);
+});
+
+// Case 26: a dragged position survives a simulated refresh render (`transform` = base + dx/dy).
+it("keeps a dragged position across a refresh render", async () => {
+  session.loadComparison(undefined, twoNodeGraph(), []);
+  drag('[data-node-id="function:a"]', { x: 100, y: 100 }, { x: 130, y: 140 });
+  const draggedTransform = translateOf(element('[data-node-id="function:a"]'));
+
+  session.loadComparison(undefined, twoNodeGraph(), [], { loadReason: "refresh" });
+  await vi.waitFor(() => expect(element('[data-node-id="function:a"]')).not.toBeNull());
+  const afterRefresh = translateOf(element('[data-node-id="function:a"]'));
+  expect(afterRefresh).toEqual(draggedTransform);
+});
+
+// Case 27: an override for a node absent after refresh is dropped without error while a
+// surviving node's override still applies.
+it("drops a stale override without error while a surviving node's override still applies", async () => {
+  session.loadComparison(undefined, twoNodeGraph(), []);
+  drag('[data-node-id="function:a"]', { x: 100, y: 100 }, { x: 130, y: 140 });
+  drag('[data-node-id="function:b"]', { x: 400, y: 400 }, { x: 420, y: 445 });
+  const survivorExpected = translateOf(element('[data-node-id="function:b"]'));
+
+  const onlyB: AnalysisGraph = { ...twoNodeGraph(), nodes: [twoNodeGraph().nodes[1]!], edges: [] };
+  expect(() => session.loadComparison(undefined, onlyB, [], { loadReason: "refresh" })).not.toThrow();
+  await vi.waitFor(() => expect(element('[data-node-id="function:b"]')).not.toBeNull());
+  expect(dom.window.document.querySelector('[data-node-id="function:a"]')).toBeNull();
+  expect(translateOf(element('[data-node-id="function:b"]'))).toEqual(survivorExpected);
 });

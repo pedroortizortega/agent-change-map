@@ -139,6 +139,7 @@ body {
 #draft-content { display: block; width: calc(100% - 16px); font-family: monospace; }
 #confirmation pre, #run-output { white-space: pre-wrap; overflow-wrap: anywhere; }
 .node, .edge { cursor: pointer; }
+.node.dragging { cursor: grabbing; }
 .node text { fill: var(--vscode-editor-foreground, #ccc); font-family: var(--vscode-editor-font-family, var(--vscode-font-family, monospace)); }
 button, select, textarea { color: var(--vscode-input-foreground, #ccc); background: var(--vscode-input-background, #333); }
 button { margin: 4px; padding: 6px; }

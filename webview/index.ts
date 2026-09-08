@@ -1,5 +1,7 @@
 import { bindRelationshipDetails } from "./relationshipDetails.js";
 import { renderGraphSvg } from "./graphView.js";
+import { edgePathFor, type Point, type Rect } from "./edgeGeometry.js";
+import { PositionOverrides, type Offset } from "./positionOverrides.js";
 import type { HostToWebviewMessage, WebviewToHostMessage } from "../src/webviewProtocol.js";
 import type { AnalysisGraph, SourceId } from "../src/protocol.js";
 import type { SnippetVariant } from "../src/execution/dockerRunner.js";
@@ -74,6 +76,175 @@ let lastOps: DiffOp[] = [];
 /** The node id most recently selected via {@link choosePair}, used to re-navigate after a refresh landing. */
 let selectedNodeId: string | undefined;
 let currentLoadReason: "initial" | "refresh" = "initial";
+
+/** Pixel movement below which a pointer sequence is treated as a click, not a drag. */
+const DRAG_THRESHOLD = 5;
+/** Bounded, LRU-capped store of committed per-node drag offsets (see `positionOverrides.ts`). */
+const positionOverrides = new PositionOverrides();
+/** The layout-rendered `translate(x,y)` of each node, captured fresh on every "graph" render,
+ * before any override is re-applied — the base `applyPositionOverrides()` adds `dx`/`dy` to. */
+const baseTransforms = new Map<string, Point>();
+interface DragState {
+  nodeId: string;
+  el: SVGGElement;
+  startX: number;
+  startY: number;
+  moved: boolean;
+  base: Point;
+  origin: Offset;
+  movedIds: Set<string>;
+  boxes: Map<string, Rect>;
+  edges: number[];
+}
+let dragState: DragState | undefined;
+/** Set on a completed (above-threshold) drag's `pointerup`; consumed once by the very next
+ * click on any node, then left `false` until the next completed drag. Cleared only by the
+ * next `pointerdown`, never by the click handler itself (see design.md's drag state machine). */
+let suppressNextClick = false;
+
+/** Parses a single `<g transform="translate(x,y)">` value; `{0,0}` when absent/malformed. */
+function parseTranslate(el: Element): Point {
+  const match = /translate\(([-\d.]+),\s*([-\d.]+)\)/.exec(el.getAttribute("transform") ?? "");
+  return match ? { x: Number(match[1]), y: Number(match[2]) } : { x: 0, y: 0 };
+}
+
+/**
+ * Absolute `x`/`y` per node id: the sum of every ancestor `<g>`'s local `translate(x,y)` up to
+ * (excluding) `#graph` itself, plus `w`/`h` read off the node's own child `<rect>`. Reading
+ * rendered attributes rather than re-running layout or `getBBox()` — see design.md Decision 8.
+ */
+function readBoxes(): Map<string, Rect> {
+  const boxes = new Map<string, Rect>();
+  const root = byId("graph");
+  for (const nodeEl of Array.from(root.querySelectorAll<SVGGElement>("[data-node-id]"))) {
+    let x = 0;
+    let y = 0;
+    let current: Element | null = nodeEl;
+    while (current && current !== root) {
+      const t = parseTranslate(current);
+      x += t.x;
+      y += t.y;
+      current = current.parentElement;
+    }
+    const rect = nodeEl.querySelector("rect");
+    const w = Number(rect?.getAttribute("width") ?? 0);
+    const h = Number(rect?.getAttribute("height") ?? 0);
+    boxes.set(nodeEl.getAttribute("data-node-id")!, { x, y, w, h });
+  }
+  return boxes;
+}
+
+/** Recomputes and writes one edge's `d` from `boxes` via the single shared `edgePathFor` entry
+ * point (design.md Decision 1); a `contains` edge or an edge whose path is undefined (missing
+ * source box) is left untouched. */
+function updateEdgePath(index: number, boxes: ReadonlyMap<string, Rect>): void {
+  const edge = graph?.edges[index];
+  if (!edge || edge.kind === "contains") return;
+  const targetId = edge.resolution.kind === "resolved" ? edge.resolution.target : undefined;
+  const path = edgePathFor(boxes, edge.source, targetId);
+  if (path === undefined) return;
+  const pathEl = byId("graph").querySelector<SVGPathElement>(`[data-edge-index="${index}"] path`);
+  if (pathEl) pathEl.setAttribute("d", path);
+}
+
+/** Full re-route pass over every edge against `boxes` (design.md Decision 2: only on drop / on
+ * render, never on every `pointermove` tick). */
+function updateAllEdges(boxes: ReadonlyMap<string, Rect>): void {
+  (graph?.edges ?? []).forEach((_edge, index) => updateEdgePath(index, boxes));
+}
+
+function onDragMove(event: PointerEvent): void {
+  if (!dragState) return;
+  const dx = event.clientX - dragState.startX;
+  const dy = event.clientY - dragState.startY;
+  if (!dragState.moved && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+  dragState.moved = true;
+  dragState.el.classList.add("dragging");
+  const totalDx = dragState.origin.dx + dx;
+  const totalDy = dragState.origin.dy + dy;
+  dragState.el.setAttribute("transform", `translate(${dragState.base.x + totalDx},${dragState.base.y + totalDy})`);
+  const liveBoxes = new Map(dragState.boxes);
+  for (const id of dragState.movedIds) {
+    const box = dragState.boxes.get(id);
+    if (box) liveBoxes.set(id, { ...box, x: box.x + totalDx, y: box.y + totalDy });
+  }
+  for (const index of dragState.edges) updateEdgePath(index, liveBoxes);
+}
+
+function onDragEnd(event: PointerEvent): void {
+  if (!dragState) return;
+  const state = dragState;
+  document.removeEventListener("pointermove", onDragMove);
+  document.removeEventListener("pointerup", onDragEnd);
+  if (typeof state.el.releasePointerCapture === "function") {
+    try { state.el.releasePointerCapture(event.pointerId); } catch { /* not held, or unsupported */ }
+  }
+  if (state.moved) {
+    const dx = event.clientX - state.startX;
+    const dy = event.clientY - state.startY;
+    positionOverrides.set(state.nodeId, { dx: state.origin.dx + dx, dy: state.origin.dy + dy });
+    // Full pass over the settled DOM (which already reflects every live-dragged position),
+    // not just the dragged subtree's own edges (design.md Decision 2).
+    updateAllEdges(readBoxes());
+    state.el.classList.remove("dragging");
+    suppressNextClick = true;
+  }
+  dragState = undefined;
+}
+
+function startDrag(event: PointerEvent, el: SVGGElement): void {
+  // Innermost node wins over its containers; click bubbling itself is untouched.
+  event.stopPropagation();
+  const nodeId = el.getAttribute("data-node-id")!;
+  suppressNextClick = false;
+  const movedIds = new Set<string>([nodeId, ...Array.from(el.querySelectorAll("[data-node-id]")).map((d) => d.getAttribute("data-node-id")!)]);
+  const boxes = readBoxes();
+  const edges: number[] = [];
+  (graph?.edges ?? []).forEach((edge, index) => {
+    if (edge.kind === "contains") return;
+    const targetId = edge.resolution.kind === "resolved" ? edge.resolution.target : undefined;
+    if (movedIds.has(edge.source) || (targetId && movedIds.has(targetId))) edges.push(index);
+  });
+  dragState = {
+    nodeId,
+    el,
+    startX: event.clientX,
+    startY: event.clientY,
+    moved: false,
+    base: parseTranslate(el),
+    origin: positionOverrides.get(nodeId) ?? { dx: 0, dy: 0 },
+    movedIds,
+    boxes,
+    edges,
+  };
+  if (typeof el.setPointerCapture === "function") {
+    try { el.setPointerCapture(event.pointerId); } catch { /* unsupported (e.g. jsdom) */ }
+  }
+  document.addEventListener("pointermove", onDragMove);
+  document.addEventListener("pointerup", onDragEnd);
+}
+
+/**
+ * Called at the end of every "graph" render: records each node's freshly rendered base
+ * transform, prunes overrides for ids no longer present, re-applies dx/dy on top of the base
+ * transform for every id that still has one, then re-routes every edge against the resulting
+ * positions.
+ */
+function applyPositionOverrides(): void {
+  const root = byId("graph");
+  const nodeEls = Array.from(root.querySelectorAll<SVGGElement>("[data-node-id]"));
+  baseTransforms.clear();
+  for (const el of nodeEls) baseTransforms.set(el.getAttribute("data-node-id")!, parseTranslate(el));
+  positionOverrides.pruneTo(baseTransforms.keys());
+  for (const el of nodeEls) {
+    const id = el.getAttribute("data-node-id")!;
+    const offset = positionOverrides.get(id);
+    if (!offset) continue;
+    const base = baseTransforms.get(id)!;
+    el.setAttribute("transform", `translate(${base.x + offset.dx},${base.y + offset.dy})`);
+  }
+  updateAllEdges(readBoxes());
+}
 
 function lineSpan(text: string): HTMLSpanElement {
   const span = document.createElement("span");
@@ -281,8 +452,12 @@ function handleHostMessage(message: HostToWebviewMessage): void {
       graph = message.graph; sourceIndex = message.sourceIndex;
       byId("graph").innerHTML = renderGraphSvg(graph, message.diff, message.untrackedPaths);
       byId("status").textContent = `${graph.nodes.length} nodes / ${graph.edges.length} edges shown`;
-      for (const node of Array.from(byId("graph").querySelectorAll("[data-node-id]"))) {
-        node.addEventListener("click", () => choosePair(node.getAttribute("data-node-id")!));
+      for (const node of Array.from(byId("graph").querySelectorAll<SVGGElement>("[data-node-id]"))) {
+        node.addEventListener("click", () => {
+          if (suppressNextClick) return;
+          choosePair(node.getAttribute("data-node-id")!);
+        });
+        node.addEventListener("pointerdown", (event) => startDrag(event as PointerEvent, node));
       }
       const navigateEdge = (index: number): void => {
         const edge = message.graph.edges[index];
@@ -308,6 +483,7 @@ function handleHostMessage(message: HostToWebviewMessage): void {
         selectedPair = sourceIndex[selectedNodeId];
         vscode.postMessage({ type: "inspectSources", nodeId: selectedNodeId });
       }
+      applyPositionOverrides();
       break;
     }
     case "sourcePair": {

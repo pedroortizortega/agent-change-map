@@ -69,32 +69,32 @@ override map; dropping PR 1 restores the inline fixed-anchor Bezier and array-or
 
 ## Phase 5: Slice B — `positionOverrides.ts` (PR 2, base: PR 1 branch)
 
-- [ ] 5.1 RED `test/unit/positionOverrides.test.ts` — Case 10: `set`/`get` round-trip; `set` on an existing id refreshes recency.
-- [ ] 5.2 RED `test/unit/positionOverrides.test.ts` — Case 11: exceeding `MAX_POSITION_OVERRIDES` evicts the least-recently-set id; `size` stays capped.
-- [ ] 5.3 RED `test/unit/positionOverrides.test.ts` — Case 12: `pruneTo` drops ids absent from the present set, keeps present ones, never throws.
-- [ ] 5.4 GREEN create `webview/positionOverrides.ts` (pure, no DOM): `MAX_POSITION_OVERRIDES=200`, `Offset { dx, dy }`, `PositionOverrides` class (`get`, `set` delete-then-set LRU touch + evict oldest, `pruneTo`, `size`).
+- [x] 5.1 RED `test/unit/positionOverrides.test.ts` — Case 10: `set`/`get` round-trip; `set` on an existing id refreshes recency.
+- [x] 5.2 RED `test/unit/positionOverrides.test.ts` — Case 11: exceeding `MAX_POSITION_OVERRIDES` evicts the least-recently-set id; `size` stays capped.
+- [x] 5.3 RED `test/unit/positionOverrides.test.ts` — Case 12: `pruneTo` drops ids absent from the present set, keeps present ones, never throws.
+- [x] 5.4 GREEN create `webview/positionOverrides.ts` (pure, no DOM): `MAX_POSITION_OVERRIDES=200`, `Offset { dx, dy }`, `PositionOverrides` class (`get`, `set` delete-then-set LRU touch + evict oldest, `pruneTo`, `size`).
 
 ## Phase 6: Slice B — Drag State Machine Wiring (PR 2)
 
-- [ ] 6.1 GREEN edit `webview/index.ts`: add module state exactly as the design specifies — `DRAG_THRESHOLD=5`, `positionOverrides`, `baseTransforms`, `dragState`, `suppressNextClick`, plus `readBoxes()` (parse ancestor `translate(x,y)` off `<g>`s, `w`/`h` off child `<rect>`).
-- [ ] 6.2 GREEN implement `pointerdown`: `stopPropagation`, `suppressNextClick = false`, `movedIds` from the DOM subtree (dragged `<g>` + `querySelectorAll("[data-node-id]")`), snapshot `boxes`, cache affected `edges`, feature-guarded `setPointerCapture`, bind `pointermove`/`pointerup` on `document`.
-- [ ] 6.3 GREEN implement `pointermove`: below `DRAG_THRESHOLD` → return with no side effect; above threshold → `moved=true`, add `.dragging` class, update dragged `<g>` `transform`, build `liveBoxes` from the snapshot offset by accumulated delta, recompute each cached edge's `d` via `edgePathFor(liveBoxes, …)`.
-- [ ] 6.4 GREEN implement `pointerup`: if `moved` → commit `positionOverrides.set`, full edge pass over `liveBoxes`, remove `.dragging`, `suppressNextClick=true`; if `!moved` → no-op, native click fires unchanged. Release capture, clear `dragState`.
-- [ ] 6.5 GREEN edit the existing per-node click listener: add `if (suppressNextClick) return;` guard before `choosePair(...)`, cleared only by the next `pointerdown` (never by the click handler itself).
-- [ ] 6.6 GREEN edit `webview/styles.css`: add `.node.dragging { cursor: grabbing; }` (existing `.node, .edge { cursor: pointer; }` untouched).
+- [x] 6.1 GREEN edit `webview/index.ts`: add module state exactly as the design specifies — `DRAG_THRESHOLD=5`, `positionOverrides`, `baseTransforms`, `dragState`, `suppressNextClick`, plus `readBoxes()` (parse ancestor `translate(x,y)` off `<g>`s, `w`/`h` off child `<rect>`).
+- [x] 6.2 GREEN implement `pointerdown`: `stopPropagation`, `suppressNextClick = false`, `movedIds` from the DOM subtree (dragged `<g>` + `querySelectorAll("[data-node-id]")`), snapshot `boxes`, cache affected `edges`, feature-guarded `setPointerCapture`, bind `pointermove`/`pointerup` on `document`.
+- [x] 6.3 GREEN implement `pointermove`: below `DRAG_THRESHOLD` → return with no side effect; above threshold → `moved=true`, add `.dragging` class, update dragged `<g>` `transform`, build `liveBoxes` from the snapshot offset by accumulated delta, recompute each cached edge's `d` via `edgePathFor(liveBoxes, …)`.
+- [x] 6.4 GREEN implement `pointerup`: if `moved` → commit `positionOverrides.set`, full edge pass over `liveBoxes`, remove `.dragging`, `suppressNextClick=true`; if `!moved` → no-op, native click fires unchanged. Release capture, clear `dragState`.
+- [x] 6.5 GREEN edit the existing per-node click listener: add `if (suppressNextClick) return;` guard before `choosePair(...)`, cleared only by the next `pointerdown` (never by the click handler itself).
+- [x] 6.6 GREEN edit `webview/styles.css`: add `.node.dragging { cursor: grabbing; }` (existing `.node, .edge { cursor: pointer; }` untouched).
 
 ## Phase 7: Slice B — Drag and Persistence Test Cases (PR 2)
 
-- [ ] 7.1 RED `test/unit/webviewDom.test.ts`: add the `drag(selector, from, to)` helper (composed from a `pointer(type, target, x, y)` primitive) alongside the existing `click()` helper.
-- [ ] 7.2 RED `test/unit/webviewDom.test.ts` — Case 21: above-threshold drag updates the dragged node's `transform`.
-- [ ] 7.3 RED `test/unit/webviewDom.test.ts` — Case 22: an attached edge's `d` changes after a `pointermove`, before `pointerup` (live re-route proof, not on-drop).
-- [ ] 7.4 RED `test/unit/webviewDom.test.ts` — Case 23: below-threshold (2px) sequence still fires click-to-navigate (`inspectSources` posted).
-- [ ] 7.5 RED `test/unit/webviewDom.test.ts` — Case 24: above-threshold drag posts no `inspectSources` (click suppressed); a subsequent full pointerdown→click still navigates.
-- [ ] 7.6 RED `test/unit/webviewDom.test.ts` — Case 25: container drag — a descendant's edge `d` equals `edgePathFor` over boxes offset by the accumulated delta.
-- [ ] 7.7 RED `test/unit/webviewDom.test.ts` — Case 26: a dragged position survives a simulated refresh render (`transform` = base + dx/dy).
-- [ ] 7.8 RED `test/unit/webviewDom.test.ts` — Case 27: an override for a node absent after refresh is dropped without error while a surviving node's override still applies.
-- [ ] 7.9 GREEN confirm cases 21–27 pass through Phase 6's drag wiring plus `applyPositionOverrides()` (record `baseTransforms`, prune stale ids, re-apply dx/dy, full edge pass) called from the render path.
-- [ ] 7.10 Run `npm run lint && npm run typecheck && npm run test:unit -- positionOverrides webviewDom && npm run test:e2e` and confirm all green (click-navigation scenario stays green untouched) before opening PR 2 against the PR 1 branch.
+- [x] 7.1 RED `test/unit/webviewDom.test.ts`: add the `drag(selector, from, to)` helper (composed from a `pointer(type, target, x, y)` primitive) alongside the existing `click()` helper.
+- [x] 7.2 RED `test/unit/webviewDom.test.ts` — Case 21: above-threshold drag updates the dragged node's `transform`.
+- [x] 7.3 RED `test/unit/webviewDom.test.ts` — Case 22: an attached edge's `d` changes after a `pointermove`, before `pointerup` (live re-route proof, not on-drop).
+- [x] 7.4 RED `test/unit/webviewDom.test.ts` — Case 23: below-threshold (2px) sequence still fires click-to-navigate (`inspectSources` posted).
+- [x] 7.5 RED `test/unit/webviewDom.test.ts` — Case 24: above-threshold drag posts no `inspectSources` (click suppressed); a subsequent full pointerdown→click still navigates.
+- [x] 7.6 RED `test/unit/webviewDom.test.ts` — Case 25: container drag — a descendant's edge `d` equals `edgePathFor` over boxes offset by the accumulated delta.
+- [x] 7.7 RED `test/unit/webviewDom.test.ts` — Case 26: a dragged position survives a simulated refresh render (`transform` = base + dx/dy).
+- [x] 7.8 RED `test/unit/webviewDom.test.ts` — Case 27: an override for a node absent after refresh is dropped without error while a surviving node's override still applies.
+- [x] 7.9 GREEN confirm cases 21–27 pass through Phase 6's drag wiring plus `applyPositionOverrides()` (record `baseTransforms`, prune stale ids, re-apply dx/dy, full edge pass) called from the render path.
+- [x] 7.10 Run `npm run lint && npm run typecheck && npm run test:unit -- positionOverrides webviewDom && npm run test:e2e` and confirm all green (click-navigation scenario stays green untouched) before opening PR 2 against the PR 1 branch. **Result**: lint/typecheck/unit all green (21 webviewDom + 5 positionOverrides tests). `test:e2e` fails at the "direct save" scenario (`directWriteResult` vs `graph` message-order assertion) — confirmed via `git stash`/re-run that this failure is **pre-existing on the unmodified base branch**, reproduced identically with none of this PR's files applied; it is unrelated to drag/position-override work (this PR touches only `webview/index.ts`, `webview/positionOverrides.ts`, `webview/styles.css`, and their tests — no host-side write/session logic). The click-navigation e2e scenarios that did run (selection, exact navigation, stale navigation refusal, draft save) all passed.
 
 ## Phase 8: Slice C — Wheel-Zoom (PR 3, base: PR 2 branch)
 
