@@ -200,7 +200,7 @@ or returned-instance call remains unresolved".
 - [x] 5.3 Open the single PR against the tracker branch
       (`feat/instance-method-call-resolution` → `feat/agent-change-map-mvp`),
       referencing `openspec/changes/instance-method-call-resolution/proposal.md`,
-      `design.md`, and this `tasks.md`.
+      `design.md`, and this `tasks.md`. [Merged as PR #28, commit `46000bd`]
 
 ---
 

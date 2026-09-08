@@ -1,13 +1,12 @@
-# Python Structure Analysis Specification Delta
+# Python Structure Analysis Specification
 
-## MODIFIED Requirements
+## Requirements
 
 ### Requirement: Represent call uncertainty
 
 The system MUST report syntactically observed calls. It MUST distinguish uniquely resolved targets, multiple candidate targets, and unresolved dynamic calls, and MUST NOT present inferred candidates as certain.
 
 Calls made through an instance variable (`ast.Attribute` over an `ast.Name` value) MUST be resolved using the same `resolved` / `ambiguous` / `unresolved` contract as direct name calls, when the variable was bound to a class by a constructor-call assignment (`x = ClassName(...)`) in the same lexical scope as the call. A variable bound to more than one class across branches MUST resolve as `ambiguous` with candidates drawn from all bound classes' matching methods, rather than being dropped or downgraded to `unresolved`. Binding shapes outside a direct single-name-target, direct-constructor-call assignment (attribute access on `self`, non-constructor right-hand sides, tuple/multi-assignment targets, and chained or returned-instance calls) MUST continue to resolve as `unresolved`, unchanged from prior behavior.
-(Previously: only `ast.Name` calls were resolved; any `ast.Attribute` call, including instance method calls, always fell back to `unresolved`.)
 
 #### Scenario: Resolve a direct call
 
