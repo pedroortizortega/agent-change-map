@@ -3,6 +3,7 @@ import {
   CURVE_MIN_DROP,
   DETOUR_CLEARANCE,
   MAX_DETOURS,
+  ROUTE_CLEARANCE,
   SIDE_ANCHOR_INSET,
   STUB_LEN,
   edgePathFor,
@@ -371,6 +372,50 @@ describe("edgePathFor — outer-lane fallback", () => {
     expect(waypointMatch).not.toBeNull();
     const wpX = Number(waypointMatch![1]);
     expect(wpX).toBe(0 - DETOUR_CLEARANCE); // exactly the designed local-detour clearance, not tighter
+  });
+
+  // Regression: reported live-testing bug (post-drag). `outerLaneEdgePath`'s two horizontal
+  // escape/entry legs - from the source's/target's own side anchor straight across to the
+  // shared lane `x` - were never checked against `obstacles` at all, unlike the lane's own
+  // vertical run (safe by construction, since `laneX` sits outside every box's horizontal
+  // span). A box unrelated to this edge can end up sitting exactly at the escape leg's own
+  // `y` (near the source's/target's own top edge, per `SIDE_ANCHOR_INSET`), between that
+  // endpoint and the lane - and the previous implementation returned that crossing path
+  // completely unchecked and unchanged.
+  it("keeps the outer-lane fallback's own horizontal escape leg clear of an unrelated box sitting across it", () => {
+    const boxes = new Map<string, Rect>([
+      ["source", { x: 10, y: 0, w: 20, h: 20 }],
+      ["target", { x: 10, y: 400, w: 20, h: 20 }],
+      ["obstacle", { x: 0, y: 200, w: 500, h: 20 }],
+      // Sits directly across the source's own escape leg: that leg runs from (10, 4) to
+      // (-12, 4) (left lane picked, per the "routes through the LEFT outer lane" test above);
+      // this box spans x=[-5,5], y=[0,20], squarely between those two x values at y=4.
+      ["innocent", { x: -5, y: 0, w: 10, h: 20 }],
+    ]);
+    const d = edgePathFor(boxes, "source", "target")!;
+    const points = Array.from(d.matchAll(/-?[\d.]+,-?[\d.]+/g)).map((match) => {
+      const [x, y] = match[0].split(",").map(Number);
+      return { x, y };
+    });
+    const innocent = boxes.get("innocent")!;
+    for (let i = 0; i < points.length - 1; i += 1) {
+      expect(
+        segmentIntersectsRect(points[i], points[i + 1], innocent),
+        `segment ${JSON.stringify(points[i])} -> ${JSON.stringify(points[i + 1])} crosses the unrelated "innocent" box`,
+      ).toBe(false);
+    }
+    // Real clearance, not a boundary graze: no point of the path may land inside the box grown
+    // by ROUTE_CLEARANCE on every side, matching the margin `edgePathsFor` already enforces for
+    // unrelated boxes elsewhere in this module.
+    const grown: Rect = {
+      x: innocent.x - ROUTE_CLEARANCE,
+      y: innocent.y - ROUTE_CLEARANCE,
+      w: innocent.w + 2 * ROUTE_CLEARANCE,
+      h: innocent.h + 2 * ROUTE_CLEARANCE,
+    };
+    for (let i = 0; i < points.length - 1; i += 1) {
+      expect(segmentIntersectsRect(points[i], points[i + 1], grown)).toBe(false);
+    }
   });
 });
 
