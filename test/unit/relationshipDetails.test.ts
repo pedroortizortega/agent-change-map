@@ -1,6 +1,6 @@
 import { JSDOM } from "jsdom";
 import { describe, expect, it } from "vitest";
-import { renderGraphSvg } from "../../webview/graphView.js";
+import { renderGraphSvg, suppressAncestorSelfReferences } from "../../webview/graphView.js";
 import { bindRelationshipDetails } from "../../webview/relationshipDetails.js";
 import type { AnalysisGraph, SourceId } from "../../src/protocol.js";
 
@@ -66,5 +66,55 @@ describe("relationship details popup", () => {
     click(indicator); dispose(); click(indicator);
     expect(doc.querySelector('[role="dialog"]')).toBeNull();
     dom.window.close();
+  });
+});
+
+describe("relationship details popup - ancestor self-reference suppression regression", () => {
+  const moduleId = "module:pkg.a";
+  const classId = "class:pkg.a.C";
+  const orphanId = "function:pkg.a.orphan";
+  const rawGraph: AnalysisGraph = {
+    snapshot: { repoId: "repo", kind: "worktree", contentDigest: "sha256:x" },
+    nodes: [
+      { id: moduleId, kind: "module", qualifiedName: "pkg.a", span },
+      { id: classId, kind: "class", qualifiedName: "pkg.a.C", containerId: moduleId, span },
+      { id: orphanId, kind: "function", qualifiedName: "pkg.a.orphan", span },
+    ],
+    edges: [
+      { kind: "contains", source: moduleId, resolution: { kind: "resolved", target: classId }, span },
+      // Ancestor self-reference: module is the direct containerId parent of class.
+      { kind: "call", source: moduleId, resolution: { kind: "resolved", target: classId }, span },
+      { kind: "call", source: classId, resolution: { kind: "unresolved" }, span },
+      { kind: "call", source: orphanId, resolution: { kind: "ambiguous", candidates: ["x", "y"] }, span },
+    ],
+    diagnostics: [],
+  };
+
+  it("produces a popup with no <li> for the suppressed edge, and edgeIndex values address the correct (suppressed-array) edges", () => {
+    const graph = suppressAncestorSelfReferences(rawGraph);
+    // The ancestor self-reference is gone; only the unresolved and ambiguous edges remain
+    // alongside the contains edge, shifted down by one position.
+    expect(graph.edges).toHaveLength(3);
+    expect(graph.edges.some(edge => edge.kind === "call" && edge.source === moduleId && edge.resolution.kind === "resolved" && edge.resolution.target === classId)).toBe(false);
+
+    const dom = new JSDOM(`<main>${renderGraphSvg(graph, [])}</main>`, { pretendToBeVisual: true });
+    const root = dom.window.document.querySelector("main")!;
+    const edgeSources = graph.edges.map(() => undefined);
+    const dispose = bindRelationshipDetails(root, graph, edgeSources, () => {});
+
+    // The module's only relationship was the suppressed self-reference; it has no indicator.
+    expect(root.querySelector(`[data-relationship-source="${moduleId}"]`)).toBeNull();
+
+    // The class's remaining unresolved edge is listed, addressing its correct position in
+    // the already-suppressed `graph.edges` array (index 1, not its pre-suppression index 2).
+    const classIndicator = root.querySelector<SVGElement>(`[data-relationship-source="${classId}"]`)!;
+    expect(classIndicator).not.toBeNull();
+    classIndicator.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+    const popup = dom.window.document.querySelector('[role="dialog"]')!;
+    const items = Array.from(popup.querySelectorAll("li"));
+    expect(items).toHaveLength(1);
+    const expectedIndex = graph.edges.findIndex(edge => edge.resolution.kind === "unresolved");
+    expect(items[0].getAttribute("data-edge-index")).toBe(String(expectedIndex));
+    dispose(); dom.window.close();
   });
 });

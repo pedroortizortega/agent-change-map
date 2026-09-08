@@ -3,8 +3,8 @@ import { resolve } from "node:path";
 import { JSDOM } from "jsdom";
 import { describe, expect, it } from "vitest";
 import { buildCspMetaTag } from "../../webview/graphView.js";
-import { renderGraphSvg, sectionScope, filterGraph, NESTED_LAYOUT_LIMITS } from "../../webview/graphView.js";
-import type { AnalysisGraph, Entity } from "../../src/protocol.js";
+import { renderGraphSvg, sectionScope, filterGraph, NESTED_LAYOUT_LIMITS, isAncestorSelfReference, suppressAncestorSelfReferences } from "../../webview/graphView.js";
+import type { AnalysisGraph, Edge, Entity } from "../../src/protocol.js";
 import type { CorrelatedDiffEntry } from "../../src/navigation/sourceProvider.js";
 
 function readStylesCss(): string {
@@ -59,6 +59,35 @@ function nestedGraph(): AnalysisGraph {
 
 function parseSvg(svg: string): Document {
   return new JSDOM(svg, { contentType: "image/svg+xml" }).window.document;
+}
+
+/**
+ * Module -> class -> method containment chain, plus two peer functions in the same file that
+ * are not each other's ancestor/descendant. Used to exercise `isAncestorSelfReference` and
+ * `suppressAncestorSelfReferences` (task 1.1).
+ */
+function selfRefGraph(): AnalysisGraph {
+  return {
+    snapshot,
+    nodes: [
+      { id: "module:pkg.a", kind: "module", qualifiedName: "pkg.a", span },
+      { id: "class:pkg.a.C", kind: "class", qualifiedName: "pkg.a.C", containerId: "module:pkg.a", span },
+      { id: "method:pkg.a.C.m", kind: "method", qualifiedName: "pkg.a.C.m", containerId: "class:pkg.a.C", span },
+      { id: "function:pkg.a.f1", kind: "function", qualifiedName: "pkg.a.f1", containerId: "module:pkg.a", span },
+      { id: "function:pkg.a.f2", kind: "function", qualifiedName: "pkg.a.f2", containerId: "module:pkg.a", span },
+    ],
+    edges: [
+      { kind: "contains", source: "module:pkg.a", resolution: { kind: "resolved", target: "class:pkg.a.C" }, span },
+      { kind: "contains", source: "class:pkg.a.C", resolution: { kind: "resolved", target: "method:pkg.a.C.m" }, span },
+      // Direct-parent self-reference: module is the direct containerId parent of class.
+      { kind: "call", source: "module:pkg.a", resolution: { kind: "resolved", target: "class:pkg.a.C" }, span },
+      // Transitive-ancestor self-reference: module is a multi-step containerId ancestor of method.
+      { kind: "call", source: "module:pkg.a", resolution: { kind: "resolved", target: "method:pkg.a.C.m" }, span },
+      // Same-file peer edge: neither is the other's ancestor/descendant.
+      { kind: "call", source: "function:pkg.a.f1", resolution: { kind: "resolved", target: "function:pkg.a.f2" }, span },
+    ],
+    diagnostics: [],
+  };
 }
 
 describe("CSP", () => {
@@ -798,5 +827,133 @@ describe("relationship detail indicators", () => {
     expect(indicators[0].getAttribute("aria-label")).toContain("3 relationship");
     expect(doc.querySelectorAll("g.edge path").length).toBe(1);
     expect(doc.querySelector('[data-edge-index="4"]')!.getAttribute("data-resolution")).toBe("resolved");
+  });
+});
+
+describe("isAncestorSelfReference", () => {
+  it("is true for a module -> own class edge (direct containerId parent)", () => {
+    const g = selfRefGraph();
+    const edge = g.edges[2];
+    expect(isAncestorSelfReference(edge, g.nodes)).toBe(true);
+  });
+
+  it("is true for a module -> own nested method edge (transitive, multi-step ancestor)", () => {
+    const g = selfRefGraph();
+    const edge = g.edges[3];
+    expect(isAncestorSelfReference(edge, g.nodes)).toBe(true);
+  });
+
+  it("is false for a peer function -> sibling function edge in the same file", () => {
+    const g = selfRefGraph();
+    const edge = g.edges[4];
+    expect(isAncestorSelfReference(edge, g.nodes)).toBe(false);
+  });
+
+  it("is false for contains-kind edges", () => {
+    const g = selfRefGraph();
+    expect(isAncestorSelfReference(g.edges[0], g.nodes)).toBe(false);
+    expect(isAncestorSelfReference(g.edges[1], g.nodes)).toBe(false);
+  });
+
+  it("is false for unresolved and ambiguous edges", () => {
+    const g = selfRefGraph();
+    const unresolved: Edge = {
+      kind: "call",
+      source: "module:pkg.a",
+      resolution: { kind: "unresolved" },
+      span,
+    };
+    const ambiguous: Edge = {
+      kind: "call",
+      source: "module:pkg.a",
+      resolution: { kind: "ambiguous", candidates: ["class:pkg.a.C", "method:pkg.a.C.m"] },
+      span,
+    };
+    expect(isAncestorSelfReference(unresolved, g.nodes)).toBe(false);
+    expect(isAncestorSelfReference(ambiguous, g.nodes)).toBe(false);
+  });
+
+  it("is false for an edge referencing an unknown id", () => {
+    const g = selfRefGraph();
+    const unknown: Edge = {
+      kind: "call",
+      source: "module:pkg.a",
+      resolution: { kind: "resolved", target: "function:does.not.exist" },
+      span,
+    };
+    expect(isAncestorSelfReference(unknown, g.nodes)).toBe(false);
+  });
+
+  it("is false and terminates on a containerId cycle (a<->b)", () => {
+    const nodes: Entity[] = [
+      { id: "cycle:a", kind: "class", qualifiedName: "cycle.a", containerId: "cycle:b", span },
+      { id: "cycle:b", kind: "class", qualifiedName: "cycle.b", containerId: "cycle:a", span },
+      { id: "peer:c", kind: "function", qualifiedName: "peer.c", span },
+    ];
+    const edge: Edge = {
+      kind: "call",
+      source: "peer:c",
+      resolution: { kind: "resolved", target: "cycle:a" },
+      span,
+    };
+    expect(isAncestorSelfReference(edge, nodes)).toBe(false);
+  });
+
+  it("is false and terminates on a dangling containerId", () => {
+    const nodes: Entity[] = [
+      { id: "dangling:a", kind: "class", qualifiedName: "dangling.a", containerId: "dangling:missing", span },
+      { id: "peer:c", kind: "function", qualifiedName: "peer.c", span },
+    ];
+    const edge: Edge = {
+      kind: "call",
+      source: "peer:c",
+      resolution: { kind: "resolved", target: "dangling:a" },
+      span,
+    };
+    expect(isAncestorSelfReference(edge, nodes)).toBe(false);
+  });
+
+  it("is true when edge.source === edge.resolution.target", () => {
+    const g = selfRefGraph();
+    const selfEdge: Edge = {
+      kind: "call",
+      source: "function:pkg.a.f1",
+      resolution: { kind: "resolved", target: "function:pkg.a.f1" },
+      span,
+    };
+    expect(isAncestorSelfReference(selfEdge, g.nodes)).toBe(true);
+  });
+});
+
+describe("suppressAncestorSelfReferences", () => {
+  it("drops only the ancestor self-reference edges, leaving nodes untouched", () => {
+    const g = selfRefGraph();
+    const suppressed = suppressAncestorSelfReferences(g);
+    expect(suppressed.nodes).toEqual(g.nodes);
+    expect(suppressed.edges).toHaveLength(g.edges.length - 2);
+    expect(suppressed.edges).not.toContainEqual(g.edges[2]);
+    expect(suppressed.edges).not.toContainEqual(g.edges[3]);
+    expect(suppressed.edges).toContainEqual(g.edges[4]);
+  });
+
+  it("emits no <g class=\"edge\"> for a suppressed edge, and excludes it from indicator counts", () => {
+    const before = selfRefGraph();
+    const beforeSvg = renderGraphSvg(before, []);
+    const beforeDoc = parseSvg(beforeSvg);
+    // Before suppression, both self-reference calls (module -> class, module -> class -> method)
+    // are drawn like any other resolved call, alongside the peer edge: 3 drawn call edges.
+    expect(beforeDoc.querySelectorAll("g.edge").length).toBe(3);
+
+    const suppressed = suppressAncestorSelfReferences(before);
+    const svg = renderGraphSvg(suppressed, []);
+    const doc = parseSvg(svg);
+    const edgeGroups = Array.from(doc.querySelectorAll("g.edge"));
+    // Only the same-file peer edge (f1 -> f2) remains drawable; the two ancestor
+    // self-reference edges are gone entirely, not merely hidden.
+    expect(edgeGroups).toHaveLength(1);
+    expect(edgeGroups[0].querySelector("title")!.textContent).toContain("function:pkg.a.f2");
+    // No relationship indicator is created for the suppressed edges either (their targets
+    // had boxes, so they would have been drawn, never routed into an indicator).
+    expect(doc.querySelector('[data-relationship-source="module:pkg.a"]')).toBeNull();
   });
 });

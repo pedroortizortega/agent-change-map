@@ -62,6 +62,24 @@ describe("ChangeMapSession comparison loading", () => {
     expect(posted.map((m) => m.type)).toEqual(["graphSummary", "graph"]);
   });
 
+  it("excludes an ancestor self-reference edge from graphSummary.edgeCount", () => {
+    const store = makeStore();
+    const { session, posted } = makeDeps(store);
+    const moduleNode: Entity = { id: "module:pkg.a", kind: "module", qualifiedName: "pkg.a", span };
+    const classNode: Entity = { id: "class:pkg.a.C", kind: "class", qualifiedName: "pkg.a.C", containerId: "module:pkg.a", span };
+    const right: AnalysisGraph = {
+      snapshot: rightSnapshot,
+      nodes: [moduleNode, classNode],
+      edges: [
+        // Ancestor self-reference: module is the direct containerId parent of class.
+        { kind: "call", source: "module:pkg.a", resolution: { kind: "resolved", target: "class:pkg.a.C" }, span },
+      ],
+      diagnostics: [],
+    };
+    session.loadComparison(undefined, right, []);
+    expect(posted[0]).toMatchObject({ type: "graphSummary", edgeCount: 0 });
+  });
+
   it("withholds the full graph behind explicit oversized consent", async () => {
     const store = makeStore();
     const { session, posted } = makeDeps(store);
@@ -83,8 +101,10 @@ describe("ChangeMapSession navigation", () => {
     const edgeSpan = { ...span, startByte: 4, endByte: 8, startColumn: 4, endColumn: 8 };
     const right: AnalysisGraph = {
       snapshot: rightSnapshot,
-      nodes: [entity("f:a", "a")],
-      edges: [{ kind: "call", source: "f:a", resolution: { kind: "resolved", target: "f:a" }, span: edgeSpan }],
+      nodes: [entity("f:a", "a"), entity("f:b", "b")],
+      // Distinct, unrelated source/target (not a self-reference) so this fixture is
+      // unaffected by ancestor self-reference suppression.
+      edges: [{ kind: "call", source: "f:a", resolution: { kind: "resolved", target: "f:b" }, span: edgeSpan }],
       diagnostics: [],
     };
     session.loadComparison(undefined, right, []);
