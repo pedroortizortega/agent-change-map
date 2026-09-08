@@ -1,4 +1,5 @@
 import type { AnalysisGraph, Edge, Entity, SourceId } from "./protocol.js";
+import type { EdgeVintage } from "../webview/graphView.js";
 import type { SnapshotStore } from "./snapshots/snapshotStore.js";
 import type { CorrelatedDiffEntry } from "./navigation/sourceProvider.js";
 import { computeContentHash, createSourceId, resolveSource, StaleSourceError } from "./navigation/sourceProvider.js";
@@ -24,7 +25,6 @@ export function mergeGraphsForDisplay(left: AnalysisGraph | undefined, right: An
   const byQualifiedName = new Map<string, Entity>();
   for (const node of left?.nodes ?? []) byQualifiedName.set(node.qualifiedName, node);
   for (const node of right?.nodes ?? []) byQualifiedName.set(node.qualifiedName, node);
-  const edgeKey = (edge: Edge): string => `${edge.kind}:${edge.source}:${edge.span.path}:${edge.span.startByte}:${edge.span.endByte}`;
   const byEdgeKey = new Map<string, Edge>();
   for (const edge of [...(left?.edges ?? []), ...(right?.edges ?? [])]) byEdgeKey.set(edgeKey(edge), edge);
   return {
@@ -83,6 +83,28 @@ function buildEdgeSourceIndex(
     return { side, sourceId: createSourceId(snapshot, edge.span.path, content, edge.span.startByte, edge.span.endByte) };
   });
 }
+
+/**
+ * Derives each displayed edge's vintage by comparing its identity key against the left
+ * (original) and right (worktree) comparison sides independently — pure key comparison, so
+ * it is correct even when `store.getFileContent` fails for that edge's file (success
+ * criterion 7). Index-aligned with `graph.edges`, mirroring `buildEdgeSourceIndex`'s
+ * convention. "current" when the right side has the key, or the edge's `span.path` is
+ * untracked; otherwise "removed" (present-on-both-sides therefore collapses to "current").
+ */
+export function buildEdgeVintages(
+  left: AnalysisGraph | undefined,
+  right: AnalysisGraph | undefined,
+  graph: AnalysisGraph,
+  untrackedPaths: readonly string[],
+): EdgeVintage[] {
+  const rightKeys = new Set((right?.edges ?? []).map(edgeKey));
+  return graph.edges.map((edge) => (rightKeys.has(edgeKey(edge)) || untrackedPaths.includes(edge.span.path) ? "current" : "removed"));
+}
+
+/** Applied when a `requestGraphView` message omits `vintages` or it is explicitly empty:
+ * ghost/removed edges stay hidden until the user opts in (success criterion 4). */
+const DEFAULT_VINTAGES: EdgeVintage[] = ["current"];
 
 export interface SessionDeps {
   /** Resolved by the extension host, never supplied by a webview message. */
@@ -169,12 +191,22 @@ export class ChangeMapSession {
 
   private sendGraph(filter?: GraphFilter): void {
     const suppressed = suppressAncestorSelfReferences(mergeGraphsForDisplay(this.left, this.right));
-    const display = filter ? filterGraph(suppressed, this.diff, filter) : suppressed;
+    const edgeVintages = buildEdgeVintages(this.left, this.right, suppressed, this.untrackedPaths);
+    const effectiveFilter: GraphFilter = { ...filter, vintages: filter?.vintages ?? DEFAULT_VINTAGES };
+    const display = filterGraph(suppressed, this.diff, effectiveFilter, edgeVintages);
     if (filter && isOversized(display)) {
       this.deps.post({ type: "error", message: "Filtered map is still oversized. Choose a smaller section or explicitly render the full map." });
       return;
     }
-    this.deps.post({ type: "graph", graph: display, diff: this.diff, sourceIndex: this.sourceIndex, edgeSources: buildEdgeSourceIndex(this.deps.store, this.left, this.right, display), untrackedPaths: this.untrackedPaths });
+    this.deps.post({
+      type: "graph",
+      graph: display,
+      diff: this.diff,
+      sourceIndex: this.sourceIndex,
+      edgeSources: buildEdgeSourceIndex(this.deps.store, this.left, this.right, display),
+      edgeOrigins: buildEdgeVintages(this.left, this.right, display, this.untrackedPaths),
+      untrackedPaths: this.untrackedPaths,
+    });
   }
 
   /** Records which snippet source backs each variant for the currently selected comparison item, ahead of any run request. */

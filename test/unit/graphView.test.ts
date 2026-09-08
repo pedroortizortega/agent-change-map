@@ -4,6 +4,7 @@ import { JSDOM } from "jsdom";
 import { describe, expect, it } from "vitest";
 import { buildCspMetaTag } from "../../webview/graphView.js";
 import { renderGraphSvg, sectionScope, filterGraph, NESTED_LAYOUT_LIMITS, isAncestorSelfReference, suppressAncestorSelfReferences } from "../../webview/graphView.js";
+import type { EdgeVintage } from "../../webview/graphView.js";
 import type { AnalysisGraph, Edge, Entity } from "../../src/protocol.js";
 import type { CorrelatedDiffEntry } from "../../src/navigation/sourceProvider.js";
 
@@ -156,6 +157,28 @@ describe("graph rendering", () => {
     const filtered = filterGraph(original, [], { relationshipKinds: ["call"] });
     expect(filtered.edges.every((edge) => edge.kind === "call")).toBe(true);
     expect(original.edges.length).toBe(4);
+  });
+
+  it("keeps only edges whose index-aligned vintage is current", () => {
+    const original = graph();
+    const vintages: EdgeVintage[] = ["current", "current", "removed", "current"];
+    const filtered = filterGraph(original, [], { vintages: ["current"] }, vintages);
+    expect(filtered.edges).toEqual(original.edges.filter((_, i) => vintages[i] === "current"));
+  });
+
+  it("filters nothing when vintages is empty or undefined (empty = All)", () => {
+    const original = graph();
+    expect(filterGraph(original, [], {}, []).edges).toEqual(original.edges);
+    expect(filterGraph(original, [], {}, undefined).edges).toEqual(original.edges);
+    expect(filterGraph(original, [], {}).edges).toEqual(original.edges);
+  });
+
+  it("composes vintage filtering with relationshipKinds as an intersection", () => {
+    const original = graph();
+    // index 1 = call/resolved (current), index 2 = call/ambiguous (removed), index 3 = call/unresolved (current)
+    const vintages: EdgeVintage[] = ["current", "current", "removed", "current"];
+    const filtered = filterGraph(original, [], { relationshipKinds: ["call"], vintages: ["current"] }, vintages);
+    expect(filtered.edges).toEqual([original.edges[1], original.edges[3]]);
   });
 });
 

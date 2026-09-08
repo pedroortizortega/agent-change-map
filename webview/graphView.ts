@@ -552,15 +552,17 @@ export interface GraphFilter {
   scopeIds?: string[];
   relationshipKinds?: Edge["kind"][];
   changeStatuses?: ChangeStatus[];
+  vintages?: EdgeVintage[];
 }
 
 /**
- * Applies display-only filters (scope, relationship kind, change status). Never mutates
- * the comparison itself - it returns a new filtered view over the same immutable graph and
- * diff data, matching the "Apply filters" scenario's "without changing the comparison"
- * requirement.
+ * Applies display-only filters (scope, relationship kind, change status, vintage). Never
+ * mutates the comparison itself - it returns a new filtered view over the same immutable
+ * graph and diff data, matching the "Apply filters" scenario's "without changing the
+ * comparison" requirement. `vintages` is index-aligned with the **input** `graph.edges`
+ * (mirroring `buildEdgeSourceIndex`'s convention); an empty or absent value filters nothing.
  */
-export function filterGraph(graph: AnalysisGraph, diff: CorrelatedDiffEntry[], filter: GraphFilter): AnalysisGraph {
+export function filterGraph(graph: AnalysisGraph, diff: CorrelatedDiffEntry[], filter: GraphFilter, vintages?: readonly EdgeVintage[]): AnalysisGraph {
   let nodes = graph.nodes;
   if (filter.scopeIds && filter.scopeIds.length > 0) {
     const scoped = new Set<string>();
@@ -574,10 +576,15 @@ export function filterGraph(graph: AnalysisGraph, diff: CorrelatedDiffEntry[], f
     nodes = nodes.filter((node) => statuses.has(changeStatusFor(node.qualifiedName, diff)));
   }
   const nodeIds = new Set(nodes.map((node) => node.id));
-  let edges = graph.edges.filter((edge) => nodeIds.has(edge.source) || (edge.resolution.kind === "resolved" && nodeIds.has(edge.resolution.target)));
+  let indexedEdges = graph.edges.map((edge, index) => ({ edge, index })).filter(({ edge }) => nodeIds.has(edge.source) || (edge.resolution.kind === "resolved" && nodeIds.has(edge.resolution.target)));
   if (filter.relationshipKinds && filter.relationshipKinds.length > 0) {
     const kinds = new Set(filter.relationshipKinds);
-    edges = edges.filter((edge) => kinds.has(edge.kind));
+    indexedEdges = indexedEdges.filter(({ edge }) => kinds.has(edge.kind));
   }
+  if (filter.vintages && filter.vintages.length > 0 && vintages) {
+    const allowed = new Set(filter.vintages);
+    indexedEdges = indexedEdges.filter(({ index }) => allowed.has(vintages[index]));
+  }
+  const edges = indexedEdges.map(({ edge }) => edge);
   return { ...graph, nodes, edges };
 }

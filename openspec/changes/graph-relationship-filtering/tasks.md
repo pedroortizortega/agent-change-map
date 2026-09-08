@@ -49,28 +49,28 @@ work stalls; PR 2 without PR 3 already ships the ghost-edge fix with `vintages` 
 
 ## Phase 2: Edge Vintage — Host + Protocol (PR 2, base: PR 1 branch)
 
-- [ ] 2.1 RED `test/unit/webviewHost.test.ts` — `buildEdgeVintages`: a byte-shifted left/right pair yields `["current","removed"]` for the two surviving merged edges (ghost-duplicate scenario from the proposal).
-- [ ] 2.2 RED `test/unit/webviewHost.test.ts` — `buildEdgeVintages`: an edge present on both sides is `"current"`.
-- [ ] 2.3 RED `test/unit/webviewHost.test.ts` — `buildEdgeVintages`: an edge present only on the left (original) side is `"removed"`.
-- [ ] 2.4 RED `test/unit/webviewHost.test.ts` — `buildEdgeVintages`: an edge whose `span.path` is in `untrackedPaths` is `"current"` even with no right-side match.
-- [ ] 2.5 RED `test/unit/webviewHost.test.ts` — `buildEdgeVintages`: vintages are correct with a `SnapshotStore` that has no stored content (`store.getFileContent` failure has no effect — success criterion 7).
-- [ ] 2.6 GREEN edit `src/webviewHost.ts`: fold `mergeGraphsForDisplay`'s inline `edgeKey` local into the existing module-level `edgeKey` (one definition governs merge, source index, and vintage). Add `export function buildEdgeVintages(left: AnalysisGraph | undefined, right: AnalysisGraph | undefined, graph: AnalysisGraph, untrackedPaths: readonly string[]): EdgeVintage[]` beside `buildEdgeSourceIndex` — `"current"` when `right?.edges` has the key OR `untrackedPaths.includes(edge.span.path)`, otherwise `"removed"`. Make cases 2.1–2.5 pass.
-- [ ] 2.7 RED `test/unit/graphView.test.ts` — `filterGraph`: `vintages: ["current"]` keeps only the edges whose index-aligned vintage is `"current"`.
-- [ ] 2.8 RED `test/unit/graphView.test.ts` — `filterGraph`: `vintages: []` and `vintages: undefined` filter nothing (existing "empty = All" semantics).
-- [ ] 2.9 RED `test/unit/graphView.test.ts` — `filterGraph`: vintage filtering composes correctly with an existing `relationshipKinds` filter (both applied, intersection result).
-- [ ] 2.10 GREEN edit `webview/graphView.ts`: add `vintages?: EdgeVintage[]` to `GraphFilter`; change `filterGraph` signature to `filterGraph(graph: AnalysisGraph, diff: CorrelatedDiffEntry[], filter: GraphFilter, vintages?: readonly EdgeVintage[])` where `vintages` is index-aligned with the **input** `graph.edges`. Make cases 2.7–2.9 pass.
-- [ ] 2.11 RED `test/unit/webviewProtocol.test.ts` — `requestGraphView` without `vintages` is rejected (field is required, no `.optional()`/`.default()`, matching the sibling arrays' style).
-- [ ] 2.12 RED `test/unit/webviewProtocol.test.ts` — `requestGraphView` with `vintages: ["current"]` is accepted.
-- [ ] 2.13 RED `test/unit/webviewProtocol.test.ts` — `requestGraphView` with `vintages: ["stale"]` is rejected (enum violation).
-- [ ] 2.14 RED `test/unit/webviewProtocol.test.ts` — `requestGraphView` with 3 vintage entries is rejected (`.max(2)`).
-- [ ] 2.15 GREEN edit `src/webviewProtocol.ts`: add `vintages: z.array(z.enum(["current", "removed"])).max(2)` to the inbound `requestGraphView` schema; add `edgeOrigins: ("current" | "removed")[]` (inline union, no `src` → `webview` import) to the outbound `graph` message, documented as index-aligned with `graph.edges`. Make cases 2.11–2.14 pass.
-- [ ] 2.16 RED `test/unit/webviewHost.test.ts` — the `graph` message's `edgeOrigins.length === graph.edges.length`.
-- [ ] 2.17 RED `test/unit/webviewHost.test.ts` — default `sendGraph()` (no filter) already omits the left-only ghost edge from the byte-shift scenario (criterion 4: hidden before the user touches the toolbar).
-- [ ] 2.18 RED `test/unit/webviewHost.test.ts` — `requestGraphView` with `vintages: ["current","removed"]` restores the left-only ghost edge.
-- [ ] 2.19 RED `test/unit/webviewHost.test.ts` — `requestGraphView` with `vintages: ["removed"]` hides the current/worktree edge.
-- [ ] 2.20 GREEN edit `src/webviewHost.ts`: define `const DEFAULT_VINTAGES: EdgeVintage[] = ["current"]`; in `sendGraph`/`loadComparison`, run `buildEdgeVintages` against the suppressed graph, call `filterGraph(suppressed, diff, filter, filter?.vintages ?? DEFAULT_VINTAGES)` to produce `display`, then re-run `buildEdgeVintages(display)` (not index-mapped through the filter) to compute the posted `edgeOrigins`, alongside `buildEdgeSourceIndex(display)`. Make cases 2.16–2.19 pass.
-- [ ] 2.21 GREEN update the existing `requestGraphView` intent fixture at `test/unit/webviewHost.test.ts:356` to include `vintages: []` so it keeps compiling/passing against the now-required field.
-- [ ] 2.22 Run `npm run lint && npm run typecheck && npx vitest run test/unit test/integration` and confirm all green before opening PR 2 against the PR 1 branch.
+- [x] 2.1 RED `test/unit/webviewHost.test.ts` — `buildEdgeVintages`: a byte-shifted left/right pair yields `["current","removed"]` for the two surviving merged edges (ghost-duplicate scenario from the proposal).
+- [x] 2.2 RED `test/unit/webviewHost.test.ts` — `buildEdgeVintages`: an edge present on both sides is `"current"`.
+- [x] 2.3 RED `test/unit/webviewHost.test.ts` — `buildEdgeVintages`: an edge present only on the left (original) side is `"removed"`.
+- [x] 2.4 RED `test/unit/webviewHost.test.ts` — `buildEdgeVintages`: an edge whose `span.path` is in `untrackedPaths` is `"current"` even with no right-side match.
+- [x] 2.5 RED `test/unit/webviewHost.test.ts` — `buildEdgeVintages`: vintages are correct with a `SnapshotStore` that has no stored content (`store.getFileContent` failure has no effect — success criterion 7).
+- [x] 2.6 GREEN edit `src/webviewHost.ts`: fold `mergeGraphsForDisplay`'s inline `edgeKey` local into the existing module-level `edgeKey` (one definition governs merge, source index, and vintage). Add `export function buildEdgeVintages(left: AnalysisGraph | undefined, right: AnalysisGraph | undefined, graph: AnalysisGraph, untrackedPaths: readonly string[]): EdgeVintage[]` beside `buildEdgeSourceIndex` — `"current"` when `right?.edges` has the key OR `untrackedPaths.includes(edge.span.path)`, otherwise `"removed"`. Make cases 2.1–2.5 pass.
+- [x] 2.7 RED `test/unit/graphView.test.ts` — `filterGraph`: `vintages: ["current"]` keeps only the edges whose index-aligned vintage is `"current"`.
+- [x] 2.8 RED `test/unit/graphView.test.ts` — `filterGraph`: `vintages: []` and `vintages: undefined` filter nothing (existing "empty = All" semantics).
+- [x] 2.9 RED `test/unit/graphView.test.ts` — `filterGraph`: vintage filtering composes correctly with an existing `relationshipKinds` filter (both applied, intersection result).
+- [x] 2.10 GREEN edit `webview/graphView.ts`: add `vintages?: EdgeVintage[]` to `GraphFilter`; change `filterGraph` signature to `filterGraph(graph: AnalysisGraph, diff: CorrelatedDiffEntry[], filter: GraphFilter, vintages?: readonly EdgeVintage[])` where `vintages` is index-aligned with the **input** `graph.edges`. Make cases 2.7–2.9 pass.
+- [x] 2.11 RED `test/unit/webviewProtocol.test.ts` — `requestGraphView` without `vintages` is rejected (field is required, no `.optional()`/`.default()`, matching the sibling arrays' style).
+- [x] 2.12 RED `test/unit/webviewProtocol.test.ts` — `requestGraphView` with `vintages: ["current"]` is accepted.
+- [x] 2.13 RED `test/unit/webviewProtocol.test.ts` — `requestGraphView` with `vintages: ["stale"]` is rejected (enum violation).
+- [x] 2.14 RED `test/unit/webviewProtocol.test.ts` — `requestGraphView` with 3 vintage entries is rejected (`.max(2)`).
+- [x] 2.15 GREEN edit `src/webviewProtocol.ts`: add `vintages: z.array(z.enum(["current", "removed"])).max(2)` to the inbound `requestGraphView` schema; add `edgeOrigins: ("current" | "removed")[]` (inline union, no `src` → `webview` import) to the outbound `graph` message, documented as index-aligned with `graph.edges`. Make cases 2.11–2.14 pass.
+- [x] 2.16 RED `test/unit/webviewHost.test.ts` — the `graph` message's `edgeOrigins.length === graph.edges.length`.
+- [x] 2.17 RED `test/unit/webviewHost.test.ts` — default `sendGraph()` (no filter) already omits the left-only ghost edge from the byte-shift scenario (criterion 4: hidden before the user touches the toolbar).
+- [x] 2.18 RED `test/unit/webviewHost.test.ts` — `requestGraphView` with `vintages: ["current","removed"]` restores the left-only ghost edge.
+- [x] 2.19 RED `test/unit/webviewHost.test.ts` — `requestGraphView` with `vintages: ["removed"]` hides the current/worktree edge.
+- [x] 2.20 GREEN edit `src/webviewHost.ts`: define `const DEFAULT_VINTAGES: EdgeVintage[] = ["current"]`; in `sendGraph`/`loadComparison`, run `buildEdgeVintages` against the suppressed graph, call `filterGraph(suppressed, diff, filter, filter?.vintages ?? DEFAULT_VINTAGES)` to produce `display`, then re-run `buildEdgeVintages(display)` (not index-mapped through the filter) to compute the posted `edgeOrigins`, alongside `buildEdgeSourceIndex(display)`. Make cases 2.16–2.19 pass.
+- [x] 2.21 GREEN update the existing `requestGraphView` intent fixture at `test/unit/webviewHost.test.ts:356` to include `vintages: []` so it keeps compiling/passing against the now-required field.
+- [x] 2.22 Run `npm run lint && npm run typecheck && npx vitest run test/unit test/integration` and confirm all green before opening PR 2 against the PR 1 branch.
 
 ## Phase 3: Vintage Toolbar Control (PR 3, base: PR 2 branch)
 

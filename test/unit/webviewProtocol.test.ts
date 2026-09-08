@@ -38,6 +38,14 @@ describe("webview protocol", () => {
     expect(() => webviewToHostMessageSchema.parse({ type: "confirmRun", requestId: "r1", confirmed: true })).not.toThrow();
   });
 
+  it("requires vintages on requestGraphView, bounded to the known enum and at most two entries", () => {
+    const base = { type: "requestGraphView" as const, scopeIds: [], relationshipKinds: [], changeStatuses: [] };
+    expect(() => webviewToHostMessageSchema.parse(base)).toThrow();
+    expect(() => webviewToHostMessageSchema.parse({ ...base, vintages: ["current"] })).not.toThrow();
+    expect(() => webviewToHostMessageSchema.parse({ ...base, vintages: ["stale"] })).toThrow();
+    expect(() => webviewToHostMessageSchema.parse({ ...base, vintages: ["current", "removed", "current"] })).toThrow();
+  });
+
   it("carries a shared ops sequence on sourcePair and drops per-source affectedLines", () => {
     const message: Extract<HostToWebviewMessage, { type: "sourcePair" }> = {
       type: "sourcePair",

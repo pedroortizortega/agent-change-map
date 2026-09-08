@@ -172,7 +172,7 @@ function requestView(): void {
   const scope = byId<HTMLSelectElement>("filter-scope").value;
   const kind = byId<HTMLSelectElement>("filter-kind").value as "contains" | "import" | "call";
   const status = byId<HTMLSelectElement>("filter-status").value as "added" | "removed" | "modified" | "unchanged";
-  vscode.postMessage({ type: "requestGraphView", scopeIds: scope ? [scope] : [], relationshipKinds: kind ? [kind] : [], changeStatuses: status ? [status] : [] });
+  vscode.postMessage({ type: "requestGraphView", scopeIds: scope ? [scope] : [], relationshipKinds: kind ? [kind] : [], changeStatuses: status ? [status] : [], vintages: [] });
 }
 function selectControl(id: string, label: string, values: string[]): HTMLSelectElement {
   const text = document.createElement("label"); text.htmlFor = id; text.textContent = label;
