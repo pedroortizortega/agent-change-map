@@ -23,6 +23,20 @@ body {
   margin-bottom: 8px;
 }
 
+#toolbar fieldset {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--vscode-panel-border, #333);
+  padding: 2px 8px;
+  margin: 0;
+}
+
+#toolbar fieldset legend {
+  padding: 0 4px;
+  font-size: 0.85em;
+}
+
 #oversized-consent {
   border: 1px solid var(--vscode-inputValidation-warningBorder, #b89500);
   padding: 8px;

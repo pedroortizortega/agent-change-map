@@ -1,4 +1,5 @@
 import type { AnalysisGraph, Edge, Entity, SourceId } from "./protocol.js";
+import type { EdgeVintage } from "../webview/graphView.js";
 import type { SnapshotStore } from "./snapshots/snapshotStore.js";
 import type { CorrelatedDiffEntry } from "./navigation/sourceProvider.js";
 import { computeContentHash, createSourceId, resolveSource, StaleSourceError } from "./navigation/sourceProvider.js";
@@ -7,7 +8,7 @@ import type { DirectWriteRequest, WriteEffectPreview, WriteReceipt } from "./edi
 import { WriteConfirmationDeclinedError, WriteGuardError } from "./editing/writeGuard.js";
 import type { RunOptions, RunResult, SnippetSource, SnippetVariant } from "./execution/dockerRunner.js";
 import { isOversized, webviewToHostMessageSchema } from "./webviewProtocol.js";
-import { filterGraph, type GraphFilter } from "../webview/graphView.js";
+import { filterGraph, suppressAncestorSelfReferences, type GraphFilter } from "../webview/graphView.js";
 import type { HostToWebviewMessage } from "./webviewProtocol.js";
 import { diffLines } from "./diff/lineDiff.js";
 
@@ -24,7 +25,6 @@ export function mergeGraphsForDisplay(left: AnalysisGraph | undefined, right: An
   const byQualifiedName = new Map<string, Entity>();
   for (const node of left?.nodes ?? []) byQualifiedName.set(node.qualifiedName, node);
   for (const node of right?.nodes ?? []) byQualifiedName.set(node.qualifiedName, node);
-  const edgeKey = (edge: Edge): string => `${edge.kind}:${edge.source}:${edge.span.path}:${edge.span.startByte}:${edge.span.endByte}`;
   const byEdgeKey = new Map<string, Edge>();
   for (const edge of [...(left?.edges ?? []), ...(right?.edges ?? [])]) byEdgeKey.set(edgeKey(edge), edge);
   return {
@@ -83,6 +83,32 @@ function buildEdgeSourceIndex(
     return { side, sourceId: createSourceId(snapshot, edge.span.path, content, edge.span.startByte, edge.span.endByte) };
   });
 }
+
+/**
+ * Derives each displayed edge's vintage by comparing its identity key against the left
+ * (original) and right (worktree) comparison sides independently — pure key comparison, so
+ * it is correct even when `store.getFileContent` fails for that edge's file (success
+ * criterion 7). Index-aligned with `graph.edges`, mirroring `buildEdgeSourceIndex`'s
+ * convention. "current" when the right side has the key, or the edge's `span.path` is
+ * untracked; otherwise "removed" (present-on-both-sides therefore collapses to "current").
+ */
+export function buildEdgeVintages(
+  left: AnalysisGraph | undefined,
+  right: AnalysisGraph | undefined,
+  graph: AnalysisGraph,
+  untrackedPaths: readonly string[],
+): EdgeVintage[] {
+  const rightKeys = new Set((right?.edges ?? []).map(edgeKey));
+  return graph.edges.map((edge) => (rightKeys.has(edgeKey(edge)) || untrackedPaths.includes(edge.span.path) ? "current" : "removed"));
+}
+
+/** Applied only when a `requestGraphView` message (or the very first, filter-less render)
+ * omits `vintages` entirely: ghost/removed edges stay hidden until the user opts in
+ * (success criterion 4). An explicit empty array is a real user selection (both toolbar
+ * checkboxes unchecked) and is passed through as-is - it hides every edge, it is never
+ * replaced by this default (see `filterGraph`'s doc comment for why empty vintages differs
+ * from the other filters' empty-means-all convention). */
+const DEFAULT_VINTAGES: EdgeVintage[] = ["current"];
 
 export interface SessionDeps {
   /** Resolved by the extension host, never supplied by a webview message. */
@@ -152,7 +178,7 @@ export class ChangeMapSession {
     this.right = right;
     this.diff = diff;
     this.untrackedPaths = options.untrackedPaths ?? [];
-    const display = mergeGraphsForDisplay(left, right);
+    const display = suppressAncestorSelfReferences(mergeGraphsForDisplay(left, right));
     this.sourceIndex = buildSourceIndex(this.deps.store, left, right);
     const oversized = isOversized(display);
     this.deps.post({
@@ -168,13 +194,23 @@ export class ChangeMapSession {
   }
 
   private sendGraph(filter?: GraphFilter): void {
-    const full = mergeGraphsForDisplay(this.left, this.right);
-    const display = filter ? filterGraph(full, this.diff, filter) : full;
+    const suppressed = suppressAncestorSelfReferences(mergeGraphsForDisplay(this.left, this.right));
+    const edgeVintages = buildEdgeVintages(this.left, this.right, suppressed, this.untrackedPaths);
+    const effectiveFilter: GraphFilter = { ...filter, vintages: filter?.vintages ?? DEFAULT_VINTAGES };
+    const display = filterGraph(suppressed, this.diff, effectiveFilter, edgeVintages);
     if (filter && isOversized(display)) {
       this.deps.post({ type: "error", message: "Filtered map is still oversized. Choose a smaller section or explicitly render the full map." });
       return;
     }
-    this.deps.post({ type: "graph", graph: display, diff: this.diff, sourceIndex: this.sourceIndex, edgeSources: buildEdgeSourceIndex(this.deps.store, this.left, this.right, display), untrackedPaths: this.untrackedPaths });
+    this.deps.post({
+      type: "graph",
+      graph: display,
+      diff: this.diff,
+      sourceIndex: this.sourceIndex,
+      edgeSources: buildEdgeSourceIndex(this.deps.store, this.left, this.right, display),
+      edgeOrigins: buildEdgeVintages(this.left, this.right, display, this.untrackedPaths),
+      untrackedPaths: this.untrackedPaths,
+    });
   }
 
   /** Records which snippet source backs each variant for the currently selected comparison item, ahead of any run request. */

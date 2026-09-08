@@ -31,7 +31,7 @@ const variant = z.enum(["original", "current", "draft"]);
 export const webviewToHostMessageSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("ready") }),
   z.object({ type: z.literal("confirmOversized"), confirmed: z.boolean() }),
-  z.object({ type: z.literal("requestGraphView"), scopeIds: z.array(requestId).max(100), relationshipKinds: z.array(z.enum(["contains", "import", "call"])).max(3), changeStatuses: z.array(z.enum(["added", "removed", "modified", "unchanged"])).max(4) }),
+  z.object({ type: z.literal("requestGraphView"), scopeIds: z.array(requestId).max(100), relationshipKinds: z.array(z.enum(["contains", "import", "call"])).max(3), changeStatuses: z.array(z.enum(["added", "removed", "modified", "unchanged"])).max(4), vintages: z.array(z.enum(["current", "removed"])).max(2) }),
   z.object({ type: z.literal("requestSnippetWrite"), requestId, sourceId: sourceIdSchema, content: z.string().max(DTO_LIMITS.maxFileContentBytes) }),
   z.object({ type: z.literal("inspectSources"), nodeId: requestId }),
   z.object({ type: z.literal("navigate"), sourceId: sourceIdSchema, side: z.enum(["left", "right"]) }),
@@ -55,8 +55,8 @@ export type WebviewToHostMessage = z.infer<typeof webviewToHostMessageSchema>;
 
 export type HostToWebviewMessage =
   | { type: "graphSummary"; nodeCount: number; edgeCount: number; diagnosticCount: number; oversized: boolean; sections?: { id: string; label: string }[]; loadReason: "initial" | "refresh" }
-  /** `edgeSources` is index-aligned with `graph.edges`; an absent entry means no exact captured edge location is available. */
-  | { type: "graph"; graph: AnalysisGraph; diff: CorrelatedDiffEntry[]; sourceIndex: Record<string, { left?: SourceId; right?: SourceId }>; edgeSources: ({ sourceId: SourceId; side: "left" | "right" } | undefined)[]; untrackedPaths: string[] }
+  /** `edgeSources` and `edgeOrigins` are index-aligned with `graph.edges`; an absent `edgeSources` entry means no exact captured edge location is available. */
+  | { type: "graph"; graph: AnalysisGraph; diff: CorrelatedDiffEntry[]; sourceIndex: Record<string, { left?: SourceId; right?: SourceId }>; edgeSources: ({ sourceId: SourceId; side: "left" | "right" } | undefined)[]; edgeOrigins: ("current" | "removed")[]; untrackedPaths: string[] }
   | { type: "navigateResult"; ok: true; sourceId: SourceId; content: string; draftContent?: string }
   | { type: "navigateResult"; ok: false; sourceId: SourceId; reason: string }
   | { type: "sourcePair"; sources: { side: "left" | "right"; sourceId: SourceId; content: string; startLine: number; endLine: number }[]; ops: DiffOp[] }

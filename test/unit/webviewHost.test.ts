@@ -2,14 +2,14 @@ import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join, parse } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { ChangeMapSession, mergeGraphsForDisplay } from "../../src/webviewHost.js";
+import { ChangeMapSession, mergeGraphsForDisplay, buildEdgeVintages } from "../../src/webviewHost.js";
 import { SnapshotStore } from "../../src/snapshots/snapshotStore.js";
 import { DraftStore } from "../../src/editing/draftStore.js";
 import { computeContentHash, createSourceId } from "../../src/navigation/sourceProvider.js";
 import { performGuardedWrite, WriteConfirmationDeclinedError } from "../../src/editing/writeGuard.js";
 import { OVERSIZED_THRESHOLDS } from "../../src/webviewProtocol.js";
 import type { HostToWebviewMessage } from "../../src/webviewProtocol.js";
-import type { AnalysisGraph, Entity } from "../../src/protocol.js";
+import type { AnalysisGraph, Edge, Entity } from "../../src/protocol.js";
 import type { RunResult, SnippetSource } from "../../src/execution/dockerRunner.js";
 
 const rightSnapshot = { repoId: "repo", kind: "worktree" as const, contentDigest: "sha256:right" };
@@ -53,6 +53,116 @@ describe("mergeGraphsForDisplay", () => {
   });
 });
 
+describe("buildEdgeVintages", () => {
+  function edgeAt(startByte: number, endByte: number): Edge {
+    return { kind: "call", source: "f:a", resolution: { kind: "resolved", target: "f:b" }, span: { ...span, startByte, endByte } };
+  }
+
+  it("marks the byte-shifted left-only and right-only edges of a ghost-duplicate pair as removed/current", () => {
+    const leftOnly = edgeAt(0, 5);
+    const rightOnly = edgeAt(2, 7);
+    const left: AnalysisGraph = { snapshot: rightSnapshot, nodes: [], edges: [leftOnly], diagnostics: [] };
+    const right: AnalysisGraph = { snapshot: rightSnapshot, nodes: [], edges: [rightOnly], diagnostics: [] };
+    const merged: AnalysisGraph = { snapshot: rightSnapshot, nodes: [], edges: [leftOnly, rightOnly], diagnostics: [] };
+    expect(buildEdgeVintages(left, right, merged, [])).toEqual(["removed", "current"]);
+  });
+
+  it("marks an edge present on both sides as current", () => {
+    const shared = edgeAt(0, 5);
+    const left: AnalysisGraph = { snapshot: rightSnapshot, nodes: [], edges: [shared], diagnostics: [] };
+    const right: AnalysisGraph = { snapshot: rightSnapshot, nodes: [], edges: [shared], diagnostics: [] };
+    const merged: AnalysisGraph = { snapshot: rightSnapshot, nodes: [], edges: [shared], diagnostics: [] };
+    expect(buildEdgeVintages(left, right, merged, [])).toEqual(["current"]);
+  });
+
+  it("marks an edge present only on the left (original) side as removed", () => {
+    const onlyLeft = edgeAt(0, 5);
+    const left: AnalysisGraph = { snapshot: rightSnapshot, nodes: [], edges: [onlyLeft], diagnostics: [] };
+    const right: AnalysisGraph = { snapshot: rightSnapshot, nodes: [], edges: [], diagnostics: [] };
+    const merged: AnalysisGraph = { snapshot: rightSnapshot, nodes: [], edges: [onlyLeft], diagnostics: [] };
+    expect(buildEdgeVintages(left, right, merged, [])).toEqual(["removed"]);
+  });
+
+  it("marks an edge whose span.path is untracked as current even with no right-side match", () => {
+    const untracked = edgeAt(0, 5);
+    const left: AnalysisGraph = { snapshot: rightSnapshot, nodes: [], edges: [untracked], diagnostics: [] };
+    const right: AnalysisGraph = { snapshot: rightSnapshot, nodes: [], edges: [], diagnostics: [] };
+    const merged: AnalysisGraph = { snapshot: rightSnapshot, nodes: [], edges: [untracked], diagnostics: [] };
+    expect(buildEdgeVintages(left, right, merged, [untracked.span.path])).toEqual(["current"]);
+  });
+
+  it("is correct even when the SnapshotStore has no stored content for the edge's file", () => {
+    const store = new SnapshotStore();
+    expect(store.getFileContent(rightSnapshot, "m.py")).toBeUndefined();
+    const onlyLeft = edgeAt(0, 5);
+    const left: AnalysisGraph = { snapshot: rightSnapshot, nodes: [], edges: [onlyLeft], diagnostics: [] };
+    const merged: AnalysisGraph = { snapshot: rightSnapshot, nodes: [], edges: [onlyLeft], diagnostics: [] };
+    expect(buildEdgeVintages(left, undefined, merged, [])).toEqual(["removed"]);
+  });
+});
+
+describe("ChangeMapSession edge vintage default and filtering", () => {
+  function ghostGraphs(): { left: AnalysisGraph; right: AnalysisGraph } {
+    const leftOnly: Edge = { kind: "call", source: "f:a", resolution: { kind: "resolved", target: "f:b" }, span: { ...span, startByte: 0, endByte: 5 } };
+    const rightOnly: Edge = { kind: "call", source: "f:a", resolution: { kind: "resolved", target: "f:b" }, span: { ...span, startByte: 2, endByte: 7 } };
+    const nodes = [entity("f:a", "a"), entity("f:b", "b")];
+    const left: AnalysisGraph = { snapshot: rightSnapshot, nodes, edges: [leftOnly], diagnostics: [] };
+    const right: AnalysisGraph = { snapshot: rightSnapshot, nodes, edges: [rightOnly], diagnostics: [] };
+    return { left, right };
+  }
+
+  it("posts edgeOrigins index-aligned with graph.edges", () => {
+    const { session, posted } = makeDeps(makeStore());
+    const { left, right } = ghostGraphs();
+    session.loadComparison(left, right, []);
+    const graphMessage = posted.find((m) => m.type === "graph");
+    expect(graphMessage).toMatchObject({ type: "graph" });
+    if (graphMessage?.type !== "graph") throw new Error("expected graph message");
+    expect(graphMessage.edgeOrigins.length).toBe(graphMessage.graph.edges.length);
+  });
+
+  it("omits the left-only ghost edge by default before the user touches the toolbar", () => {
+    const { session, posted } = makeDeps(makeStore());
+    const { left, right } = ghostGraphs();
+    session.loadComparison(left, right, []);
+    const graphMessage = posted.find((m) => m.type === "graph");
+    if (graphMessage?.type !== "graph") throw new Error("expected graph message");
+    expect(graphMessage.graph.edges).toHaveLength(1);
+    expect(graphMessage.graph.edges[0].span.startByte).toBe(2);
+  });
+
+  it("restores the left-only ghost edge when vintages includes both", async () => {
+    const { session, posted } = makeDeps(makeStore());
+    const { left, right } = ghostGraphs();
+    session.loadComparison(left, right, []);
+    await session.handleIntent({ type: "requestGraphView", scopeIds: [], relationshipKinds: [], changeStatuses: [], vintages: ["current", "removed"] });
+    const graphMessage = posted.filter((m) => m.type === "graph").at(-1);
+    if (graphMessage?.type !== "graph") throw new Error("expected graph message");
+    expect(graphMessage.graph.edges).toHaveLength(2);
+  });
+
+  it("hides the current/worktree edge when vintages is [\"removed\"]", async () => {
+    const { session, posted } = makeDeps(makeStore());
+    const { left, right } = ghostGraphs();
+    session.loadComparison(left, right, []);
+    await session.handleIntent({ type: "requestGraphView", scopeIds: [], relationshipKinds: [], changeStatuses: [], vintages: ["removed"] });
+    const graphMessage = posted.filter((m) => m.type === "graph").at(-1);
+    if (graphMessage?.type !== "graph") throw new Error("expected graph message");
+    expect(graphMessage.graph.edges).toHaveLength(1);
+    expect(graphMessage.graph.edges[0].span.startByte).toBe(0);
+  });
+
+  it("hides every edge when both toolbar checkboxes are unchecked (vintages: [])", async () => {
+    const { session, posted } = makeDeps(makeStore());
+    const { left, right } = ghostGraphs();
+    session.loadComparison(left, right, []);
+    await session.handleIntent({ type: "requestGraphView", scopeIds: [], relationshipKinds: [], changeStatuses: [], vintages: [] });
+    const graphMessage = posted.filter((m) => m.type === "graph").at(-1);
+    if (graphMessage?.type !== "graph") throw new Error("expected graph message");
+    expect(graphMessage.graph.edges).toHaveLength(0);
+  });
+});
+
 describe("ChangeMapSession comparison loading", () => {
   it("sends the full graph immediately when it is not oversized", () => {
     const store = makeStore();
@@ -60,6 +170,24 @@ describe("ChangeMapSession comparison loading", () => {
     const right: AnalysisGraph = { snapshot: rightSnapshot, nodes: [entity("f:a", "a")], edges: [], diagnostics: [] };
     session.loadComparison(undefined, right, []);
     expect(posted.map((m) => m.type)).toEqual(["graphSummary", "graph"]);
+  });
+
+  it("excludes an ancestor self-reference edge from graphSummary.edgeCount", () => {
+    const store = makeStore();
+    const { session, posted } = makeDeps(store);
+    const moduleNode: Entity = { id: "module:pkg.a", kind: "module", qualifiedName: "pkg.a", span };
+    const classNode: Entity = { id: "class:pkg.a.C", kind: "class", qualifiedName: "pkg.a.C", containerId: "module:pkg.a", span };
+    const right: AnalysisGraph = {
+      snapshot: rightSnapshot,
+      nodes: [moduleNode, classNode],
+      edges: [
+        // Ancestor self-reference: module is the direct containerId parent of class.
+        { kind: "call", source: "module:pkg.a", resolution: { kind: "resolved", target: "class:pkg.a.C" }, span },
+      ],
+      diagnostics: [],
+    };
+    session.loadComparison(undefined, right, []);
+    expect(posted[0]).toMatchObject({ type: "graphSummary", edgeCount: 0 });
   });
 
   it("withholds the full graph behind explicit oversized consent", async () => {
@@ -83,8 +211,10 @@ describe("ChangeMapSession navigation", () => {
     const edgeSpan = { ...span, startByte: 4, endByte: 8, startColumn: 4, endColumn: 8 };
     const right: AnalysisGraph = {
       snapshot: rightSnapshot,
-      nodes: [entity("f:a", "a")],
-      edges: [{ kind: "call", source: "f:a", resolution: { kind: "resolved", target: "f:a" }, span: edgeSpan }],
+      nodes: [entity("f:a", "a"), entity("f:b", "b")],
+      // Distinct, unrelated source/target (not a self-reference) so this fixture is
+      // unaffected by ancestor self-reference suppression.
+      edges: [{ kind: "call", source: "f:a", resolution: { kind: "resolved", target: "f:b" }, span: edgeSpan }],
       diagnostics: [],
     };
     session.loadComparison(undefined, right, []);
@@ -353,7 +483,7 @@ describe("audit regressions", () => {
     const graph: AnalysisGraph = { snapshot: rightSnapshot, nodes: Array.from({length: 301}, (_,i) => entity(`f:${i}`, `q${i}`)), edges: [], diagnostics: [] };
     session.loadComparison(undefined, graph, []);
     expect(posted[0]).toMatchObject({ sections: expect.arrayContaining([expect.objectContaining({ id: "f:0" })]) });
-    await session.handleIntent({ type: "requestGraphView", scopeIds: ["f:0"], relationshipKinds: [], changeStatuses: [] });
+    await session.handleIntent({ type: "requestGraphView", scopeIds: ["f:0"], relationshipKinds: [], changeStatuses: [], vintages: [] });
     expect(posted.at(-1)).toMatchObject({ type: "graph", graph: { nodes: [expect.objectContaining({ id: "f:0" })] } });
   });
 });
