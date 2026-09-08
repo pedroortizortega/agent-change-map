@@ -62,16 +62,17 @@ function boxesFromDom(root: Element): Map<string, Rect> {
   return boxes;
 }
 const dragSpan = { path: "d.py", startByte: 0, endByte: 3, startLine: 1, startColumn: 0, endLine: 1, endColumn: 3 };
-/** Two root-level function nodes with a resolved `call` edge `a -> b`, used by the plain drag,
- * click-suppression, and refresh-persistence cases. */
+/** Two root-level MODULE (container-kind, dashed-stroke) nodes with a resolved `call` edge
+ * `a -> b`, used by the plain drag, click-suppression, and refresh-persistence cases — these
+ * exercise the drag *mechanism* itself, which only ever runs on a container-kind node. */
 function twoNodeGraph(): AnalysisGraph {
   return {
     snapshot,
     nodes: [
-      { id: "function:a", kind: "function", qualifiedName: "a", span: dragSpan },
-      { id: "function:b", kind: "function", qualifiedName: "b", span: dragSpan },
+      { id: "module:a", kind: "module", qualifiedName: "a", span: dragSpan },
+      { id: "module:b", kind: "module", qualifiedName: "b", span: dragSpan },
     ],
-    edges: [{ kind: "call", source: "function:a", resolution: { kind: "resolved", target: "function:b" }, span: dragSpan }],
+    edges: [{ kind: "call", source: "module:a", resolution: { kind: "resolved", target: "module:b" }, span: dragSpan }],
     diagnostics: [],
   };
 }
@@ -366,9 +367,9 @@ it("discloses unresolved relationships without selecting the node and navigates 
 // Case 21: above-threshold drag updates the dragged node's transform.
 it("updates the dragged node's transform once the pointer moves past the drag threshold", async () => {
   session.loadComparison(undefined, twoNodeGraph(), []);
-  const before = translateOf(element('[data-node-id="function:a"]'));
-  drag('[data-node-id="function:a"]', { x: 100, y: 100 }, { x: 130, y: 140 });
-  const after = translateOf(element('[data-node-id="function:a"]'));
+  const before = translateOf(element('[data-node-id="module:a"]'));
+  drag('[data-node-id="module:a"]', { x: 100, y: 100 }, { x: 130, y: 140 });
+  const after = translateOf(element('[data-node-id="module:a"]'));
   expect(after).toEqual({ x: before.x + 30, y: before.y + 40 });
 });
 
@@ -378,7 +379,7 @@ it("re-routes an attached edge's path live, during pointermove, before pointerup
   session.loadComparison(undefined, twoNodeGraph(), []);
   const edgePath = element<SVGPathElement>('[data-edge-index="0"] path');
   const before = edgePath.getAttribute("d");
-  const el = element('[data-node-id="function:a"]');
+  const el = element('[data-node-id="module:a"]');
   pointer("pointerdown", el, { x: 100, y: 100 });
   pointer("pointermove", dom.window.document, { x: 130, y: 140 });
   const duringDrag = edgePath.getAttribute("d");
@@ -391,7 +392,7 @@ it("re-routes an attached edge's path live, during pointermove, before pointerup
 it("still fires click-to-navigate when the pointer sequence stays below the drag threshold", async () => {
   session.loadComparison(undefined, twoNodeGraph(), []);
   intents.length = 0;
-  drag('[data-node-id="function:a"]', { x: 100, y: 100 }, { x: 102, y: 101 });
+  drag('[data-node-id="module:a"]', { x: 100, y: 100 }, { x: 102, y: 101 });
   expect(intents.some(intent => intent.type === "inspectSources")).toBe(true);
 });
 
@@ -400,10 +401,10 @@ it("still fires click-to-navigate when the pointer sequence stays below the drag
 it("suppresses click-to-navigate for the drag's own click but not for the next full click", async () => {
   session.loadComparison(undefined, twoNodeGraph(), []);
   intents.length = 0;
-  drag('[data-node-id="function:a"]', { x: 100, y: 100 }, { x: 130, y: 140 });
+  drag('[data-node-id="module:a"]', { x: 100, y: 100 }, { x: 130, y: 140 });
   expect(intents.some(intent => intent.type === "inspectSources")).toBe(false);
 
-  drag('[data-node-id="function:a"]', { x: 200, y: 200 }, { x: 200, y: 200 });
+  drag('[data-node-id="module:a"]', { x: 200, y: 200 }, { x: 200, y: 200 });
   expect(intents.some(intent => intent.type === "inspectSources")).toBe(true);
 });
 
@@ -429,12 +430,12 @@ it("re-anchors a descendant's edge when its container is dragged, matching edgeP
 // Case 26: a dragged position survives a simulated refresh render (`transform` = base + dx/dy).
 it("keeps a dragged position across a refresh render", async () => {
   session.loadComparison(undefined, twoNodeGraph(), []);
-  drag('[data-node-id="function:a"]', { x: 100, y: 100 }, { x: 130, y: 140 });
-  const draggedTransform = translateOf(element('[data-node-id="function:a"]'));
+  drag('[data-node-id="module:a"]', { x: 100, y: 100 }, { x: 130, y: 140 });
+  const draggedTransform = translateOf(element('[data-node-id="module:a"]'));
 
   session.loadComparison(undefined, twoNodeGraph(), [], { loadReason: "refresh" });
-  await vi.waitFor(() => expect(element('[data-node-id="function:a"]')).not.toBeNull());
-  const afterRefresh = translateOf(element('[data-node-id="function:a"]'));
+  await vi.waitFor(() => expect(element('[data-node-id="module:a"]')).not.toBeNull());
+  const afterRefresh = translateOf(element('[data-node-id="module:a"]'));
   expect(afterRefresh).toEqual(draggedTransform);
 });
 
@@ -442,13 +443,82 @@ it("keeps a dragged position across a refresh render", async () => {
 // surviving node's override still applies.
 it("drops a stale override without error while a surviving node's override still applies", async () => {
   session.loadComparison(undefined, twoNodeGraph(), []);
-  drag('[data-node-id="function:a"]', { x: 100, y: 100 }, { x: 130, y: 140 });
-  drag('[data-node-id="function:b"]', { x: 400, y: 400 }, { x: 420, y: 445 });
-  const survivorExpected = translateOf(element('[data-node-id="function:b"]'));
+  drag('[data-node-id="module:a"]', { x: 100, y: 100 }, { x: 130, y: 140 });
+  drag('[data-node-id="module:b"]', { x: 400, y: 400 }, { x: 420, y: 445 });
+  const survivorExpected = translateOf(element('[data-node-id="module:b"]'));
 
   const onlyB: AnalysisGraph = { ...twoNodeGraph(), nodes: [twoNodeGraph().nodes[1]!], edges: [] };
   expect(() => session.loadComparison(undefined, onlyB, [], { loadReason: "refresh" })).not.toThrow();
-  await vi.waitFor(() => expect(element('[data-node-id="function:b"]')).not.toBeNull());
-  expect(dom.window.document.querySelector('[data-node-id="function:a"]')).toBeNull();
-  expect(translateOf(element('[data-node-id="function:b"]'))).toEqual(survivorExpected);
+  await vi.waitFor(() => expect(element('[data-node-id="module:b"]')).not.toBeNull());
+  expect(dom.window.document.querySelector('[data-node-id="module:a"]')).toBeNull();
+  expect(translateOf(element('[data-node-id="module:b"]'))).toEqual(survivorExpected);
+});
+
+// Case 28: only container (dashed-stroke) kinds are draggable; leaf (solid-stroke) kinds are not.
+it("never starts a drag on a leaf node, but still drags its container as before", async () => {
+  session.loadComparison(undefined, containerGraph(), []);
+  const leafBefore = translateOf(element('[data-node-id="function:pkg.f"]'));
+  const leafEdgeBefore = element<SVGPathElement>('[data-edge-index="1"] path').getAttribute("d");
+  drag('[data-node-id="function:pkg.f"]', { x: 300, y: 300 }, { x: 340, y: 360 });
+  expect(translateOf(element('[data-node-id="function:pkg.f"]'))).toEqual(leafBefore);
+  expect(element<SVGPathElement>('[data-edge-index="1"] path').getAttribute("d")).toBe(leafEdgeBefore);
+
+  // Regression: the container itself must still drag exactly as before, moving its nested
+  // descendant along with it via ordinary SVG transform composition.
+  const containerBefore = translateOf(element('[data-node-id="module:pkg"]'));
+  drag('[data-node-id="module:pkg"]', { x: 300, y: 300 }, { x: 340, y: 360 });
+  expect(translateOf(element('[data-node-id="module:pkg"]'))).toEqual({ x: containerBefore.x + 40, y: containerBefore.y + 60 });
+  expect(element<SVGPathElement>('[data-edge-index="1"] path').getAttribute("d")).not.toBe(leafEdgeBefore);
+});
+
+/** Absolute `x`/`y` of `el` itself: the sum of its own and every ancestor `<g>`'s local
+ * `translate(x,y)` up to (excluding) `root` — same accumulation `boxesFromDom` performs per
+ * node, generalized to any element (here, a relationship-indicator nested inside a node's own
+ * `<g>` rather than a `[data-node-id]` element itself). */
+function accumulatedPosition(el: Element, root: Element): { x: number; y: number } {
+  let x = 0;
+  let y = 0;
+  let current: Element | null = el;
+  while (current && current !== root) {
+    const t = translateOf(current);
+    x += t.x;
+    y += t.y;
+    current = current.parentElement;
+  }
+  return { x, y };
+}
+
+/** A container (`module:pkg`) nesting `function:pkg.f`, which has one unresolved import — so
+ * `function:pkg.f` gets a relationship indicator, nested inside its own `<g>`, inside the
+ * container's `<g>`. Used to prove the indicator travels with a dragged ancestor container. */
+function indicatorContainerGraph(): AnalysisGraph {
+  return {
+    snapshot,
+    nodes: [
+      { id: "module:pkg", kind: "module", qualifiedName: "pkg", span: dragSpan },
+      { id: "function:pkg.f", kind: "function", qualifiedName: "pkg.f", containerId: "module:pkg", span: dragSpan },
+    ],
+    edges: [
+      { kind: "contains", source: "module:pkg", resolution: { kind: "resolved", target: "function:pkg.f" }, span: dragSpan },
+      { kind: "import", source: "function:pkg.f", resolution: { kind: "unresolved" }, span: dragSpan },
+    ],
+    diagnostics: [],
+  };
+}
+
+// Case 29: a relationship indicator, nested inside its own node's `<g>`, lands at the same
+// visual spot as the old top-level-sibling absolute-position approach for a static render, and
+// travels with a dragged ancestor container by exactly the drag's dx/dy.
+it("keeps a descendant's relationship indicator visually anchored, including through a container drag", async () => {
+  session.loadComparison(undefined, indicatorContainerGraph(), []);
+  const graphEl = element('#graph');
+  const indicator = element('[data-relationship-source="function:pkg.f"]');
+  const nodeBox = boxesFromDom(graphEl).get("function:pkg.f")!;
+  const before = accumulatedPosition(indicator, graphEl);
+  // Regression: matches the old absolute formula `translate(box.x + box.w - 34, box.y + 7)`.
+  expect(before).toEqual({ x: nodeBox.x + nodeBox.w - 34, y: nodeBox.y + 7 });
+
+  drag('[data-node-id="module:pkg"]', { x: 300, y: 300 }, { x: 340, y: 360 });
+  const after = accumulatedPosition(element('[data-relationship-source="function:pkg.f"]'), graphEl);
+  expect(after).toEqual({ x: before.x + 40, y: before.y + 60 });
 });

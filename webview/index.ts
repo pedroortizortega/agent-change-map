@@ -1,9 +1,9 @@
 import { bindRelationshipDetails } from "./relationshipDetails.js";
-import { renderGraphSvg } from "./graphView.js";
+import { renderGraphSvg, isContainerKind } from "./graphView.js";
 import { edgePathFor, type Point, type Rect } from "./edgeGeometry.js";
 import { PositionOverrides, type Offset } from "./positionOverrides.js";
 import type { HostToWebviewMessage, WebviewToHostMessage } from "../src/webviewProtocol.js";
-import type { AnalysisGraph, SourceId } from "../src/protocol.js";
+import type { AnalysisGraph, Entity, SourceId } from "../src/protocol.js";
 import type { SnippetVariant } from "../src/execution/dockerRunner.js";
 import type { DiffOp } from "../src/diff/lineDiff.js";
 
@@ -457,7 +457,15 @@ function handleHostMessage(message: HostToWebviewMessage): void {
           if (suppressNextClick) return;
           choosePair(node.getAttribute("data-node-id")!);
         });
-        node.addEventListener("pointerdown", (event) => startDrag(event as PointerEvent, node));
+        node.addEventListener("pointerdown", (event) => {
+          if (isContainerKind(node.getAttribute("data-node-kind") as Entity["kind"])) {
+            startDrag(event as PointerEvent, node);
+          } else {
+            // A leaf is never draggable, but its `pointerdown` must not bubble to an
+            // ancestor container's own listener and start a drag on the container instead.
+            event.stopPropagation();
+          }
+        });
       }
       const navigateEdge = (index: number): void => {
         const edge = message.graph.edges[index];

@@ -76,6 +76,16 @@ const KIND_STYLE: Record<Entity["kind"], KindStyle> = {
   method: { strokeWidth: 2, rx: 6 },
 };
 
+/**
+ * The single source of truth for which kinds are draggable containers: exactly the dashed-
+ * stroke kinds in `KIND_STYLE` (currently `package`/`module`). Derived from `KIND_STYLE` rather
+ * than duplicated as a separate hardcoded list, so the dashed-stroke convention and the
+ * draggable convention can never drift apart.
+ */
+export function isContainerKind(kind: Entity["kind"]): boolean {
+  return KIND_STYLE[kind].dasharray !== undefined;
+}
+
 /** Emits `<rect class="node-box status-*">` with inline geometry-carrying kind encoding
  * (`stroke-width`/`stroke-dasharray`/`rx`/`fill="none"`) shared by both the nested and flat
  * layout paths. */
@@ -296,6 +306,18 @@ function renderProvenanceBadge(untracked: boolean, w: number): string {
   return untracked ? `<circle class="provenance-untracked" cx="${w - 8}" cy="8" r="3"></circle>` : "";
 }
 
+/**
+ * Emits `<g class="relationship-indicator">` at LOCAL coordinates relative to its own node's
+ * box (`translate(w - 34, 7)`), for nesting as a child of that node's own `<g>` so it inherits
+ * any dragged ancestor's transform automatically via ordinary SVG transform composition. `w`
+ * is the node's own box width; no absolute coordinates are needed once nested. Markup shape
+ * (attributes, child elements) is unchanged from the previous top-level-sibling rendering.
+ */
+function renderRelationshipIndicator(nodeId: string, qualifiedName: string, count: number, w: number): string {
+  const label = `Show ${count} relationship ${count === 1 ? "detail" : "details"} for ${qualifiedName}`;
+  return `<g class="relationship-indicator" data-relationship-source="${escapeXml(nodeId)}" transform="translate(${w - 34},7)" role="button" tabindex="0" aria-haspopup="dialog" aria-expanded="false" aria-label="${escapeXml(label)}"><title>${escapeXml(label)}</title><rect width="24" height="18" rx="5"></rect><text x="12" y="13" text-anchor="middle">${count > 99 ? "99+" : count}</text></g>`;
+}
+
 function place(
   node: Entity,
   absX: number,
@@ -308,6 +330,7 @@ function place(
   out: string[],
   diff: CorrelatedDiffEntry[],
   untrackedPaths: readonly string[],
+  relationshipCounts: ReadonlyMap<string, number>,
 ): void {
   const size = measure(node, childrenOf, memo);
   boxes.set(node.id, { x: absX, y: absY, w: size.w, h: size.h });
@@ -319,9 +342,11 @@ function place(
   out.push(renderNodeRect(node.kind, status, size.w, size.h));
   out.push(`<text class="node-label" x="8" y="20">${escapeXml(node.qualifiedName)}</text>`);
   out.push(renderProvenanceBadge(untracked, size.w));
+  const count = relationshipCounts.get(node.id);
+  if (count) out.push(renderRelationshipIndicator(node.id, node.qualifiedName, count, size.w));
   let offsetY = HEADER_H + PAD_Y;
   for (const child of childrenOf.get(node.id) ?? []) {
-    place(child, absX + PAD_X, absY + offsetY, PAD_X, offsetY, childrenOf, memo, boxes, out, diff, untrackedPaths);
+    place(child, absX + PAD_X, absY + offsetY, PAD_X, offsetY, childrenOf, memo, boxes, out, diff, untrackedPaths, relationshipCounts);
     offsetY += measure(child, childrenOf, memo).h + GAP_Y;
   }
   out.push(`</g>`);
@@ -383,20 +408,20 @@ function routedPaths(edges: readonly Edge[], boxes: Map<string, Rect>): Map<numb
   return new Map(visible.map(({ index }, i) => [index, paths[i]]));
 }
 
-/** One compact control per source; graph data (not serialized HTML) populates its popup. */
-function renderRelationshipIndicators(graph: AnalysisGraph, boxes: ReadonlyMap<string, Rect>): string {
+/**
+ * Counts, per source node id, edges eligible for a relationship indicator: a non-`contains`
+ * edge whose source is in `boxes` and whose target is either unresolved/ambiguous or resolved
+ * to a node outside the current view. Shared by both the nested (`place`, one indicator nested
+ * per node) and flat (`renderFlatSvg`) layout paths.
+ */
+function relationshipCountsFor(graph: AnalysisGraph, boxes: ReadonlyMap<string, Rect>): Map<string, number> {
   const counts = new Map<string, number>();
   for (const edge of graph.edges) {
     if (edge.kind !== "contains" && boxes.has(edge.source) && (edge.resolution.kind !== "resolved" || !boxes.has(edge.resolution.target))) {
       counts.set(edge.source, (counts.get(edge.source) ?? 0) + 1);
     }
   }
-  return graph.nodes.map(node => {
-    const count = counts.get(node.id); const box = boxes.get(node.id);
-    if (!count || !box) return "";
-    const label = `Show ${count} relationship ${count === 1 ? "detail" : "details"} for ${node.qualifiedName}`;
-    return `<g class="relationship-indicator" data-relationship-source="${escapeXml(node.id)}" transform="translate(${box.x + box.w - 34},${box.y + 7})" role="button" tabindex="0" aria-haspopup="dialog" aria-expanded="false" aria-label="${escapeXml(label)}"><title>${escapeXml(label)}</title><rect width="24" height="18" rx="5"></rect><text x="12" y="13" text-anchor="middle">${count > 99 ? "99+" : count}</text></g>`;
-  }).join("");
+  return counts;
 }
 
 /** Include outside lanes and arrowheads rather than clipping them at the old node-only bounds. */
@@ -427,11 +452,22 @@ export function renderGraphSvg(graph: AnalysisGraph, diff: CorrelatedDiffEntry[]
   const childrenOf = computeChildrenOf(graph.nodes, graph.edges);
   const memo = new Map<string, Size>();
   const boxes = new Map<string, Rect>();
+  // A first pass over `place`'s own box-computation logic (via `measure`/absolute-position
+  // arithmetic) is unnecessary here: `boxes` only needs to exist before counting, so the counts
+  // are computed against a boxes map built the same way `place` builds one, ahead of emitting
+  // markup, by walking the same containment tree once for absolute positions only.
+  let probeY = MARGIN;
+  for (const root of childrenOf.get(undefined) ?? []) {
+    probeBoxes(root, MARGIN, probeY, childrenOf, memo, boxes);
+    probeY += measure(root, childrenOf, memo).h + ROOT_GAP;
+  }
+  const relationshipCounts = relationshipCountsFor(graph, boxes);
+
   const nodeLines: string[] = [];
   let rootY = MARGIN;
   let maxRight = MARGIN;
   for (const root of childrenOf.get(undefined) ?? []) {
-    place(root, MARGIN, rootY, MARGIN, rootY, childrenOf, memo, boxes, nodeLines, diff, untrackedPaths);
+    place(root, MARGIN, rootY, MARGIN, rootY, childrenOf, memo, boxes, nodeLines, diff, untrackedPaths, relationshipCounts);
     const size = measure(root, childrenOf, memo);
     maxRight = Math.max(maxRight, MARGIN + size.w);
     rootY += size.h + ROOT_GAP;
@@ -447,7 +483,20 @@ export function renderGraphSvg(graph: AnalysisGraph, diff: CorrelatedDiffEntry[]
   });
 
   const viewport = routeViewport(paths, width, height);
-  return `<svg xmlns="http://www.w3.org/2000/svg" ${viewport} role="img" aria-label="Change map">${DEFS}${nodeLines.join("")}${edgeLines.join("")}${renderRelationshipIndicators(graph, boxes)}</svg>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" ${viewport} role="img" aria-label="Change map">${DEFS}${nodeLines.join("")}${edgeLines.join("")}</svg>`;
+}
+
+/** Computes absolute `boxes` for a containment subtree without emitting any markup, used only
+ * to seed `relationshipCountsFor` before the real `place` pass renders nodes (which need to
+ * already know their own count to nest their indicator inline). */
+function probeBoxes(node: Entity, absX: number, absY: number, childrenOf: Map<string | undefined, Entity[]>, memo: Map<string, Size>, boxes: Map<string, Rect>): void {
+  const size = measure(node, childrenOf, memo);
+  boxes.set(node.id, { x: absX, y: absY, w: size.w, h: size.h });
+  let offsetY = HEADER_H + PAD_Y;
+  for (const child of childrenOf.get(node.id) ?? []) {
+    probeBoxes(child, absX + PAD_X, absY + offsetY, childrenOf, memo, boxes);
+    offsetY += measure(child, childrenOf, memo).h + GAP_Y;
+  }
 }
 
 /**
@@ -460,16 +509,21 @@ function renderFlatSvg(graph: AnalysisGraph, diff: CorrelatedDiffEntry[], untrac
   const nodeSpacingY = 48;
   const flatW = 220;
   const boxes = new Map<string, Rect>();
+  for (const [index, node] of graph.nodes.entries()) {
+    boxes.set(node.id, { x: 16, y: 24 + index * nodeSpacingY, w: flatW, h: NODE_H });
+  }
+  const relationshipCounts = relationshipCountsFor(graph, boxes);
   const nodeLines = graph.nodes.map((node: Entity, index: number) => {
     const y = 24 + index * nodeSpacingY;
-    boxes.set(node.id, { x: 16, y, w: flatW, h: NODE_H });
     const status = changeStatusFor(node.qualifiedName, diff);
     const untracked = untrackedPaths.includes(node.span.path);
+    const count = relationshipCounts.get(node.id);
     return [
       `<g class="node" data-node-id="${escapeXml(node.id)}" data-node-kind="${node.kind}" data-change-status="${status}" data-provenance="${untracked ? "untracked" : "tracked"}" transform="translate(16,${y})">`,
       renderNodeRect(node.kind, status, flatW, NODE_H),
       `<text class="node-label" x="8" y="20">${escapeXml(node.qualifiedName)}</text>`,
       renderProvenanceBadge(untracked, flatW),
+      count ? renderRelationshipIndicator(node.id, node.qualifiedName, count, flatW) : "",
       `</g>`,
     ].join("");
   });
@@ -483,7 +537,7 @@ function renderFlatSvg(graph: AnalysisGraph, diff: CorrelatedDiffEntry[], untrac
 
   const height = Math.max(120, 24 + graph.nodes.length * nodeSpacingY + 40);
   const viewport = routeViewport(paths, 960, height);
-  return `<svg xmlns="http://www.w3.org/2000/svg" ${viewport} role="img" aria-label="Change map">${DEFS}${nodeLines.join("")}${edgeLines.join("")}${renderRelationshipIndicators(graph, boxes)}</svg>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" ${viewport} role="img" aria-label="Change map">${DEFS}${nodeLines.join("")}${edgeLines.join("")}</svg>`;
 }
 
 /**
