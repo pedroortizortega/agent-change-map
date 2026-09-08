@@ -89,6 +89,73 @@ describe("Python AST analyzer", () => {
     await expect(analyzePython({ type: "analyze", snapshot, files: [{ path: "a.py", content: "" }] }, ".")).rejects.toThrow(/absolute extension root/);
   });
 
+  it("resolves direct-name calls unchanged by the _lexical_candidates extraction (characterization guard)", async () => {
+    const graph = await analyze([{ path: "local.py", content: "def helper(): pass\ndef run(): return helper()\n" }, { path: "other.py", content: "class Noise:\n    def helper(self): pass\n" }]);
+    const call = graph.edges.find((edge) => edge.kind === "call");
+    const helper = graph.nodes.find((node) => node.qualifiedName === "local.helper");
+    expect(call?.resolution).toEqual({ kind: "resolved", target: helper?.id });
+  });
+
+  it("resolves a call through a locally constructed instance variable", async () => {
+    const graph = await analyze([{ path: "local.py", content: "class Route:\n    def get_info(self): pass\n\ndef run():\n    route = Route()\n    return route.get_info()\n" }]);
+    const callAt = (line: number) => graph.edges.find((edge) => edge.kind === "call" && edge.span.startLine === line);
+    const method = graph.nodes.find((node) => node.qualifiedName === "local.Route.get_info");
+    expect(callAt(6)?.resolution).toEqual({ kind: "resolved", target: method?.id });
+  });
+
+  it("reports ambiguous candidates when an instance variable is reassigned across branches", async () => {
+    const graph = await analyze([{ path: "local.py", content: "class A:\n    def go(self): pass\n\nclass B:\n    def go(self): pass\n\ndef run(flag):\n    if flag:\n        x = A()\n    else:\n        x = B()\n    return x.go()\n" }]);
+    const callAt = (line: number) => graph.edges.find((edge) => edge.kind === "call" && edge.span.startLine === line);
+    const goA = graph.nodes.find((node) => node.qualifiedName === "local.A.go");
+    const goB = graph.nodes.find((node) => node.qualifiedName === "local.B.go");
+    expect(callAt(12)?.resolution).toEqual({ kind: "ambiguous", candidates: [goA?.id, goB?.id].sort() });
+  });
+
+  it("keeps repeated assignment of the same class resolved rather than ambiguous", async () => {
+    const graph = await analyze([{ path: "local.py", content: "class Route:\n    def get_info(self): pass\n\ndef run(flag):\n    x = Route()\n    if flag:\n        x = Route()\n    return x.get_info()\n" }]);
+    const callAt = (line: number) => graph.edges.find((edge) => edge.kind === "call" && edge.span.startLine === line);
+    expect(callAt(8)?.resolution.kind).toBe("resolved");
+  });
+
+  it("leaves instance calls unresolved when the constructor class is unknown", async () => {
+    const graph = await analyze([{ path: "local.py", content: "def run():\n    x = Unknown()\n    return x.method()\n" }]);
+    const callAt = (line: number) => graph.edges.find((edge) => edge.kind === "call" && edge.span.startLine === line);
+    expect(callAt(3)?.resolution).toEqual({ kind: "unresolved" });
+  });
+
+  it("leaves instance calls unresolved when the bound class has no matching method", async () => {
+    const graph = await analyze([{ path: "local.py", content: "class Route:\n    def get_info(self): pass\n\ndef run():\n    route = Route()\n    return route.missing()\n" }]);
+    const callAt = (line: number) => graph.edges.find((edge) => edge.kind === "call" && edge.span.startLine === line);
+    expect(callAt(6)?.resolution).toEqual({ kind: "unresolved" });
+  });
+
+  it("leaves unsupported instance-binding shapes unresolved", async () => {
+    const graph = await analyze([{ path: "local.py", content: "class Route:\n    def get_info(self): pass\n\ndef factory():\n    return Route()\n\nclass Holder:\n    def __init__(self):\n        self.route = Route()\n    def run(self):\n        return self.route.get_info()\n\ndef chained():\n    return factory().get_info()\n\ndef tupled():\n    a, b = Route(), Route()\n    return a.get_info()\n\ndef rebound():\n    r = Route()\n    s = r\n    return s.get_info()\n\ndef chain_assigned():\n    p = q = Route()\n    return p.get_info()\n" }]);
+    const callAt = (line: number) => graph.edges.find((edge) => edge.kind === "call" && edge.span.startLine === line);
+    for (const line of [11, 14, 18, 23, 27]) {
+      expect(callAt(line)?.resolution).toEqual({ kind: "unresolved" });
+    }
+  });
+
+  it("scopes instance bindings to the assignment's own scope", async () => {
+    const graph = await analyze([{ path: "local.py", content: "class Route:\n    def get_info(self): pass\n\ndef bind():\n    route = Route()\n\ndef other(route):\n    return route.get_info()\n" }]);
+    const callAt = (line: number) => graph.edges.find((edge) => edge.kind === "call" && edge.span.startLine === line);
+    expect(callAt(8)?.resolution).toEqual({ kind: "unresolved" });
+  });
+
+  it("resolves instance calls to a class bound by a from-import", async () => {
+    const graph = await analyze([
+      { path: "pkg/__init__.py", content: "" },
+      { path: "pkg/routes.py", content: "class Route4:\n    def get_info(self): pass\n" },
+      { path: "pkg/app.py", content: "from pkg.routes import Route4\n\nclass Main:\n    def run(self):\n        instance = Route4()\n        print(instance.get_info())\n" },
+    ]);
+    const method = graph.nodes.find((node) => node.qualifiedName === "pkg.routes.Route4.get_info");
+    // Line 6 is `print(instance.get_info())`, which contains two call edges (print, get_info);
+    // disambiguate by column since `print(` is 6 characters wide.
+    const call = graph.edges.find((edge) => edge.kind === "call" && edge.span.path === "pkg/app.py" && edge.span.startLine === 6 && edge.span.startColumn === 14);
+    expect(call?.resolution).toEqual({ kind: "resolved", target: method?.id });
+  });
+
   it("times out and bounds child output deterministically", async () => {
     const roots: string[] = [];
     const makeRoot = async (program: string) => {

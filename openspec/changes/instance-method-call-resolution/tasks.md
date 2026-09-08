@@ -26,7 +26,7 @@ grab the constructor edge).
 
 ## 0. Setup
 
-- [ ] 0.1 Confirm current branch and branch the tracker from
+- [x] 0.1 Confirm current branch and branch the tracker from
       `feat/agent-change-map-mvp` (or the repo's current default integration
       branch, verified via `git branch --show-current` / `git log`) as
       `feat/instance-method-call-resolution`.
@@ -41,7 +41,7 @@ small extracted helper"; supports every scenario in
 backs all existing direct-call (`ast.Name`) resolution and must remain
 unchanged in behavior.
 
-- [ ] 1.1 **RED** — Add a regression test proving `_resolve_lexical`'s existing
+- [x] 1.1 **RED** — Add a regression test proving `_resolve_lexical`'s existing
       behavior is unchanged by the extraction. Reuse the existing test file's
       `analyze()` helper; assert a direct-name call still resolves exactly as
       before (e.g. a same-scope function call resolving to `resolved`, and an
@@ -53,7 +53,7 @@ unchanged in behavior.
       refactoring, then confirm it still passes after). Note in the task log
       that this is a characterization/regression guard, not a RED test in the
       usual "fails first" sense, since no behavior is changing.
-- [ ] 1.2 **GREEN/REFACTOR** — Extract `_lexical_candidates(name, scope, module,
+- [x] 1.2 **GREEN/REFACTOR** — Extract `_lexical_candidates(name, scope, module,
       symbols, aliases) -> list[str]` from `_resolve_lexical` exactly per
       design.md §2 code block; reduce `_resolve_lexical` to
       `return _resolution(_lexical_candidates(...))`. Run the full existing
@@ -76,38 +76,38 @@ are non-functional in isolation). Tasks 2.x write the RED tests first; GREEN for
 each requires 2, 3, and 4 code landing together, then each RED test is run to
 confirm it passes.
 
-- [ ] 2.1 **RED** — Add test case 1: `"resolves a call through a locally
+- [x] 2.1 **RED** — Add test case 1: `"resolves a call through a locally
       constructed instance variable"` (design.md §4, case 1 exact source).
       Assert `callAt(6)?.resolution` equals
       `{ kind: "resolved", target: <id of local.Route.get_info> }`. Run and
       confirm it fails (currently `unresolved`, since `ast.Attribute` calls are
       never resolved).
-- [ ] 2.2 **RED** — Add test case 3: `"keeps repeated assignment of the same
+- [x] 2.2 **RED** — Add test case 3: `"keeps repeated assignment of the same
       class resolved rather than ambiguous"` (dedup guard; design.md §4, case
       3 exact source). Assert `callAt(8)?.resolution.kind` is `"resolved"`. Run
       and confirm it fails.
-- [ ] 2.3 **RED** — Add test case 4: `"leaves instance calls unresolved when
+- [x] 2.3 **RED** — Add test case 4: `"leaves instance calls unresolved when
       the constructor class is unknown"` (design.md §4, case 4 exact source).
       Assert `callAt(3)?.resolution` equals `{ kind: "unresolved" }`. This
       already passes today by coincidence (no resolution branch exists yet) —
       run it now only to establish the pre-change baseline; re-assert after
       GREEN in 4.x that it still passes for the *correct* reason (miss in
       `variable_classes`, not "no branch exists").
-- [ ] 2.4 **RED** — Add test case 5: `"leaves instance calls unresolved when
+- [x] 2.4 **RED** — Add test case 5: `"leaves instance calls unresolved when
       the bound class has no matching method"` (design.md §4, case 5 exact
       source). Assert `callAt(6)?.resolution` equals `{ kind: "unresolved" }`.
       Same baseline note as 2.3.
-- [ ] 2.5 **RED** — Add test case 6: `"leaves unsupported instance-binding
+- [x] 2.5 **RED** — Add test case 6: `"leaves unsupported instance-binding
       shapes unresolved"` (design.md §4, case 6 exact source — covers
       `self.attr` propagation, chained/returned instances, tuple targets,
       non-constructor RHS, chained assignment). Assert all five `.get_info()`
       lines (11, 14, 18, 23, 27) resolve to `{ kind: "unresolved" }`. Baseline
       note as 2.3/2.4.
-- [ ] 2.6 **RED** — Add test case 7: `"scopes instance bindings to the
+- [x] 2.6 **RED** — Add test case 7: `"scopes instance bindings to the
       assignment's own scope"` (design.md §4, case 7 exact source). Assert
       `callAt(8)?.resolution` equals `{ kind: "unresolved" }`. Baseline note as
       2.3/2.4.
-- [ ] 2.7 **GREEN** — Implement `visit_Assign` in `FileVisitor` exactly per
+- [x] 2.7 **GREEN** — Implement `visit_Assign` in `FileVisitor` exactly per
       design.md §1 code block: declare `self.local_bindings:
       list[tuple[str, str, str]] = []` in `__init__` immediately after
       `self.import_aliases`; add `visit_Assign` between `visit_ImportFrom`/
@@ -128,17 +128,17 @@ Spec link: design.md §2 "The fold"; proposal.md "Approach" step 2; spec.md
 scenario "Instance variable reassigned to different classes across branches"
 (dedup requirement, D5).
 
-- [ ] 3.1 **RED** — Add test case 2: `"reports ambiguous candidates when an
+- [x] 3.1 **RED** — Add test case 2: `"reports ambiguous candidates when an
       instance variable is reassigned across branches"` (design.md §4, case 2
       exact source). Assert `callAt(12)?.resolution` equals
       `{ kind: "ambiguous", candidates: [<local.A.go>, <local.B.go>].sort() }`.
       Run and confirm it fails.
-- [ ] 3.2 **RED** — Add test case 8: `"resolves instance calls to a class
+- [x] 3.2 **RED** — Add test case 8: `"resolves instance calls to a class
       bound by a from-import"` (design.md §4, case 8 exact source — three
       files: `pkg/__init__.py`, `pkg/routes.py`, `pkg/app.py`). Assert the
       `pkg/app.py` line-6 call edge resolves to `pkg.routes.Route4.get_info`.
       Run and confirm it fails.
-- [ ] 3.3 **GREEN** — Implement the fold exactly per design.md §2: add
+- [x] 3.3 **GREEN** — Implement the fold exactly per design.md §2: add
       `qualified_by_id: dict[str, str] = {node["id"]: node["qualifiedName"] for
       node in nodes}` after the `by_qualified_name` build; add the
       `variable_classes: dict[str, list[str]] = {}` loop as a **separate loop
@@ -162,13 +162,13 @@ unresolvable constructor class", "Instance call with no matching method",
 variable bound from a non-constructor expression remains unresolved", "Chained
 or returned-instance call remains unresolved".
 
-- [ ] 4.1 **GREEN** — Add the `elif isinstance(call.func, ast.Attribute) and
+- [x] 4.1 **GREEN** — Add the `elif isinstance(call.func, ast.Attribute) and
       isinstance(call.func.value, ast.Name)` branch exactly per design.md §3
       code block, replacing current lines 181–186. Union semantics: one flat
       `candidates` list, extended once per bound class via
       `by_qualified_name.get(f"{class_name}.{call.func.attr}", [])`, passed
       once to `_resolution()`.
-- [ ] 4.2 **GREEN (confirm)** — Re-run all RED tests from sections 2 and 3
+- [x] 4.2 **GREEN (confirm)** — Re-run all RED tests from sections 2 and 3
       (cases 1–8) plus the section-1 regression guard. All must now pass:
       - case 1 (2.1) → `resolved`
       - case 2 (3.1) → `ambiguous`, both candidates sorted
@@ -180,7 +180,7 @@ or returned-instance call remains unresolved".
       - case 7 (2.6) → `unresolved` (scope isolation, no outward walk — D8)
       - case 8 (3.2) → `resolved` to `pkg.routes.Route4.get_info` (alias +
         class-scope-skip interaction)
-- [ ] 4.3 **REFACTOR** — Re-read the full diff against design.md §1–§3 code
+- [x] 4.3 **REFACTOR** — Re-read the full diff against design.md §1–§3 code
       blocks for exact match (variable names, condition order, dedup guards,
       unconditional `generic_visit`). No behavior change expected; this is a
       structural-fidelity pass, not new logic.
@@ -189,10 +189,10 @@ or returned-instance call remains unresolved".
 
 ## 5. Full verification gate
 
-- [ ] 5.1 Run `npm run lint && npm run typecheck && npx vitest run test/unit
+- [x] 5.1 Run `npm run lint && npm run typecheck && npx vitest run test/unit
       test/integration`. All must be green before opening the PR. Do not open
       the PR against the tracker branch until this gate passes.
-- [ ] 5.2 Confirm the existing regression guard (design.md §4 "Regression
+- [x] 5.2 Confirm the existing regression guard (design.md §4 "Regression
       guard" — `obj.dynamic()` in the first test, line 17) still resolves
       `unresolved`: `obj` is never bound, so it misses `variable_classes` and
       the `ast.Name` branch also misses it; no existing assertion should have

@@ -57,6 +57,7 @@ class FileVisitor(ast.NodeVisitor):
         self.calls: list[tuple[str, str, ast.Call]] = []
         self.from_imports: list[tuple[dict[str, Any], str]] = []
         self.import_aliases: list[tuple[str, str, str]] = []
+        self.local_bindings: list[tuple[str, str, str]] = []
         self.stack: list[tuple[str, str, str]] = [(root_id, module, "module")]
 
     @property
@@ -120,6 +121,12 @@ class FileVisitor(ast.NodeVisitor):
             return f"{base}.{node.module}" if base else node.module
         return base or None
 
+    def visit_Assign(self, node: ast.Assign) -> None:
+        """Bind `var = ClassName(...)` for the current scope; every other assignment shape is ignored."""
+        if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name):
+            self.local_bindings.append((self.current_qualified_name, node.targets[0].id, node.value.func.id))
+        self.generic_visit(node)
+
     def visit_Call(self, node: ast.Call) -> None:
         self.calls.append((self.current_id, self.current_qualified_name, node))
         self.generic_visit(node)
@@ -171,6 +178,8 @@ def analyze(request: dict[str, Any]) -> dict[str, Any]:
     for node in nodes:
         by_qualified_name.setdefault(node["qualifiedName"], []).append(node["id"])
 
+    qualified_by_id: dict[str, str] = {node["id"]: node["qualifiedName"] for node in nodes}
+
     alias_targets: dict[str, list[str]] = {}
     for visitor in visitors:
         for edge, qualified_name in visitor.from_imports:
@@ -178,29 +187,53 @@ def analyze(request: dict[str, Any]) -> dict[str, Any]:
         for scope, local_name, target_qualified_name in visitor.import_aliases:
             alias_targets.setdefault(f"{scope}.{local_name}", []).extend(by_qualified_name.get(target_qualified_name, []))
 
+    variable_classes: dict[str, list[str]] = {}
+    for visitor in visitors:
+        for scope, var, constructor in visitor.local_bindings:
+            class_names: list[str] = []
+            for identifier in _lexical_candidates(constructor, scope, visitor.module, by_qualified_name, alias_targets):
+                if not identifier.startswith("class:"):
+                    continue
+                name = qualified_by_id[identifier]
+                if name not in class_names:
+                    class_names.append(name)
+            if not class_names:
+                continue
+            bound = variable_classes.setdefault(f"{scope}.{var}", [])
+            bound.extend(name for name in class_names if name not in bound)
+
     for visitor in visitors:
         for source_id, scope, call in visitor.calls:
             resolution: dict[str, Any] = {"kind": "unresolved"}
             if isinstance(call.func, ast.Name):
                 resolution = _resolve_lexical(call.func.id, scope, visitor.module, by_qualified_name, alias_targets)
+            elif isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name):
+                candidates: list[str] = []
+                for class_name in variable_classes.get(f"{scope}.{call.func.value.id}", []):
+                    candidates.extend(by_qualified_name.get(f"{class_name}.{call.func.attr}", []))
+                resolution = _resolution(candidates)
             edges.append({"kind": "call", "source": source_id, "resolution": resolution, "span": visitor.source.span(call)})
 
     return {"snapshot": request["snapshot"], "nodes": nodes, "edges": edges, "diagnostics": diagnostics}
 
 
-def _resolve_lexical(name: str, scope: str, module: str, symbols: dict[str, list[str]], aliases: dict[str, list[str]]) -> dict[str, Any]:
+def _lexical_candidates(name: str, scope: str, module: str, symbols: dict[str, list[str]], aliases: dict[str, list[str]]) -> list[str]:
     current = scope
     while True:
         candidates = symbols.get(f"{current}.{name}", []) + aliases.get(f"{current}.{name}", [])
         if candidates:
-            return _resolution(candidates)
+            return candidates
         if current == module:
             break
         current = current.rpartition(".")[0]
         # Class attributes are not lexical bindings inside method bodies.
         if current and symbols.get(current, [""])[0].startswith("class:"):
             current = current.rpartition(".")[0]
-    return {"kind": "unresolved"}
+    return []
+
+
+def _resolve_lexical(name: str, scope: str, module: str, symbols: dict[str, list[str]], aliases: dict[str, list[str]]) -> dict[str, Any]:
+    return _resolution(_lexical_candidates(name, scope, module, symbols, aliases))
 
 
 def _resolution(candidates: list[str]) -> dict[str, Any]:
