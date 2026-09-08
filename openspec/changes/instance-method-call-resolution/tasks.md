@@ -197,7 +197,7 @@ or returned-instance call remains unresolved".
       `unresolved`: `obj` is never bound, so it misses `variable_classes` and
       the `ast.Name` branch also misses it; no existing assertion should have
       required a change.
-- [ ] 5.3 Open the single PR against the tracker branch
+- [x] 5.3 Open the single PR against the tracker branch
       (`feat/instance-method-call-resolution` → `feat/agent-change-map-mvp`),
       referencing `openspec/changes/instance-method-call-resolution/proposal.md`,
       `design.md`, and this `tasks.md`.
