@@ -428,6 +428,11 @@ export interface RoutingEdge {
 
 interface Port { anchor: Point; escape: Point }
 const LANE_GAP = 12;
+/** Minimum gap kept between a routed segment and the actual boundary of an unrelated
+ * (non-endpoint) obstacle box - a route may run right up to this margin, never inside it, so
+ * a line never visually touches a box it has nothing to do with. Well under `LANE_GAP`, so it
+ * never fights the port/escape spacing already reserved around every box. */
+export const ROUTE_CLEARANCE = 2;
 
 function simplifyRoute(points: Point[]): Point[] {
   const result: Point[] = [];
@@ -526,11 +531,20 @@ export function edgePathsFor(boxes: ReadonlyMap<string, Rect>, edges: readonly R
     const targetContainsSource = source !== target && rectFullyInside(source, target);
     const sources = routingPorts(source, sourceSlot, counts.get(edge.source)!, sourceContainsTarget);
     const targets = routingPorts(target, targetSlot, counts.get(edge.target!)!, targetContainsSource);
-    const obstacles = [...boxes.values()].filter(box => {
-      if (box === source) return !sourceContainsTarget;
-      if (box === target) return !targetContainsSource;
-      return !rectFullyInside(source, box) && !rectFullyInside(target, box);
-    }).map(box => ({ x: box.x + EPS, y: box.y + EPS, w: box.w - 2 * EPS, h: box.h - 2 * EPS }));
+    // The edge's own source/target box is kept at the near-zero EPS margin: a port's anchor
+    // sits exactly on that box's own boundary, so shrinking it further would falsely flag the
+    // route's own first/last segment as "entering" its own endpoint. Every genuinely unrelated
+    // box instead gets a real ROUTE_CLEARANCE margin grown OUTWARD, not shrunk inward, so a
+    // route must stay clear of the box's actual boundary by a visible amount - not just avoid
+    // literally crossing into its interior, which still let a route visually touch or graze an
+    // unrelated box's edge.
+    const obstacles = [...boxes.values()].flatMap(box => {
+      let margin: number;
+      if (box === source) { if (sourceContainsTarget) return []; margin = EPS; }
+      else if (box === target) { if (targetContainsSource) return []; margin = EPS; }
+      else { if (rectFullyInside(source, box) || rectFullyInside(target, box)) return []; margin = -ROUTE_CLEARANCE; }
+      return [{ x: box.x + margin, y: box.y + margin, w: box.w - 2 * margin, h: box.h - 2 * margin }];
+    });
     const containers = [...boxes.values()].filter(box =>
       (box !== source && rectFullyInside(source, box)) || (box !== target && rectFullyInside(target, box)));
     // Ancestors permit short endpoint crossings, not long transit through their gutters.
