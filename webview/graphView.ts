@@ -560,7 +560,11 @@ export interface GraphFilter {
  * mutates the comparison itself - it returns a new filtered view over the same immutable
  * graph and diff data, matching the "Apply filters" scenario's "without changing the
  * comparison" requirement. `vintages` is index-aligned with the **input** `graph.edges`
- * (mirroring `buildEdgeSourceIndex`'s convention); an empty or absent value filters nothing.
+ * (mirroring `buildEdgeSourceIndex`'s convention). Unlike `scopeIds`/`relationshipKinds`/
+ * `changeStatuses`, an empty `filter.vintages` does NOT mean "no restriction": the vintage
+ * toolbar is a checkbox pair, not a multi-select dropdown, so "nothing checked" means "show
+ * nothing" (an explicit `[]` hides every edge). Only an entirely absent `filter.vintages`
+ * (`undefined` - the field was never supplied) skips vintage filtering altogether.
  */
 export function filterGraph(graph: AnalysisGraph, diff: CorrelatedDiffEntry[], filter: GraphFilter, vintages?: readonly EdgeVintage[]): AnalysisGraph {
   let nodes = graph.nodes;
@@ -581,7 +585,7 @@ export function filterGraph(graph: AnalysisGraph, diff: CorrelatedDiffEntry[], f
     const kinds = new Set(filter.relationshipKinds);
     indexedEdges = indexedEdges.filter(({ edge }) => kinds.has(edge.kind));
   }
-  if (filter.vintages && filter.vintages.length > 0 && vintages) {
+  if (filter.vintages !== undefined && vintages) {
     const allowed = new Set(filter.vintages);
     indexedEdges = indexedEdges.filter(({ index }) => allowed.has(vintages[index]));
   }

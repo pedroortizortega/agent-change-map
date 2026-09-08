@@ -151,6 +151,16 @@ describe("ChangeMapSession edge vintage default and filtering", () => {
     expect(graphMessage.graph.edges).toHaveLength(1);
     expect(graphMessage.graph.edges[0].span.startByte).toBe(0);
   });
+
+  it("hides every edge when both toolbar checkboxes are unchecked (vintages: [])", async () => {
+    const { session, posted } = makeDeps(makeStore());
+    const { left, right } = ghostGraphs();
+    session.loadComparison(left, right, []);
+    await session.handleIntent({ type: "requestGraphView", scopeIds: [], relationshipKinds: [], changeStatuses: [], vintages: [] });
+    const graphMessage = posted.filter((m) => m.type === "graph").at(-1);
+    if (graphMessage?.type !== "graph") throw new Error("expected graph message");
+    expect(graphMessage.graph.edges).toHaveLength(0);
+  });
 });
 
 describe("ChangeMapSession comparison loading", () => {

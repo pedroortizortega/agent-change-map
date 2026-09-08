@@ -166,11 +166,18 @@ describe("graph rendering", () => {
     expect(filtered.edges).toEqual(original.edges.filter((_, i) => vintages[i] === "current"));
   });
 
-  it("filters nothing when vintages is empty or undefined (empty = All)", () => {
+  it("filters nothing when filter.vintages itself is absent (undefined), regardless of edge vintage data", () => {
     const original = graph();
     expect(filterGraph(original, [], {}, []).edges).toEqual(original.edges);
     expect(filterGraph(original, [], {}, undefined).edges).toEqual(original.edges);
     expect(filterGraph(original, [], {}).edges).toEqual(original.edges);
+  });
+
+  it("hides every edge when filter.vintages is explicitly [] (both toolbar checkboxes unchecked)", () => {
+    const original = graph();
+    const vintages: EdgeVintage[] = ["current", "current", "removed", "current"];
+    const filtered = filterGraph(original, [], { vintages: [] }, vintages);
+    expect(filtered.edges).toEqual([]);
   });
 
   it("composes vintage filtering with relationshipKinds as an intersection", () => {
