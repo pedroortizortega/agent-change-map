@@ -172,7 +172,8 @@ function requestView(): void {
   const scope = byId<HTMLSelectElement>("filter-scope").value;
   const kind = byId<HTMLSelectElement>("filter-kind").value as "contains" | "import" | "call";
   const status = byId<HTMLSelectElement>("filter-status").value as "added" | "removed" | "modified" | "unchanged";
-  vscode.postMessage({ type: "requestGraphView", scopeIds: scope ? [scope] : [], relationshipKinds: kind ? [kind] : [], changeStatuses: status ? [status] : [], vintages: [] });
+  const vintages = (["current", "removed"] as const).filter(v => byId<HTMLInputElement>(`vintage-${v}`).checked);
+  vscode.postMessage({ type: "requestGraphView", scopeIds: scope ? [scope] : [], relationshipKinds: kind ? [kind] : [], changeStatuses: status ? [status] : [], vintages });
 }
 function selectControl(id: string, label: string, values: string[]): HTMLSelectElement {
   const text = document.createElement("label"); text.htmlFor = id; text.textContent = label;
@@ -188,6 +189,17 @@ function initialize(): void {
   selectControl("filter-scope", "Section", [""]);
   selectControl("filter-status", "Change", ["", "added", "removed", "modified", "unchanged"]);
   byId("filter-kind").addEventListener("change", requestView);
+  const vintage = document.createElement("fieldset"); vintage.id = "filter-vintage";
+  const vintageLegend = document.createElement("legend"); vintageLegend.textContent = "Vintage";
+  vintage.append(vintageLegend);
+  for (const value of ["current", "removed"] as const) {
+    const label = document.createElement("label");
+    const check = document.createElement("input");
+    check.type = "checkbox"; check.id = `vintage-${value}`; check.checked = value === "current";
+    check.addEventListener("change", requestView);
+    label.append(check, document.createTextNode(value)); vintage.append(label);
+  }
+  byId("toolbar").append(vintage);
   const actions = document.createElement("section"); actions.id = "source-actions";
   const editorLabel = document.createElement("label"); editorLabel.htmlFor = "draft-content"; editorLabel.textContent = "Snippet draft (does not write to disk)";
   const editor = document.createElement("textarea"); editor.id = "draft-content"; editor.rows = 10;

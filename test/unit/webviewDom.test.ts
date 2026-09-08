@@ -294,3 +294,25 @@ it("discloses unresolved relationships without selecting the node and navigates 
   session.loadComparison(undefined, graph, []);
   expect(dom.window.document.querySelector('[role="dialog"]')).toBeNull();
 });
+
+it("exposes a vintage toolbar fieldset defaulting to current-only", () => {
+  const current = element<HTMLInputElement>('#vintage-current');
+  const removed = element<HTMLInputElement>('#vintage-removed');
+  expect(current.checked).toBe(true);
+  expect(removed.checked).toBe(false);
+  expect(element('#filter-vintage legend').textContent).toBe("Vintage");
+});
+
+it("posts requestGraphView with both vintages when Removed is checked", () => {
+  const removed = element<HTMLInputElement>('#vintage-removed');
+  removed.checked = true;
+  removed.dispatchEvent(new dom.window.Event('change'));
+  expect(intents.at(-1)).toMatchObject({ type: "requestGraphView", vintages: ["current", "removed"] });
+});
+
+it("posts requestGraphView with an empty vintages array when both are unchecked", () => {
+  const current = element<HTMLInputElement>('#vintage-current');
+  current.checked = false;
+  current.dispatchEvent(new dom.window.Event('change'));
+  expect(intents.at(-1)).toMatchObject({ type: "requestGraphView", vintages: [] });
+});
