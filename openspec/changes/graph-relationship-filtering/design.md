@@ -49,7 +49,13 @@ required against its own input, so it never has to re-derive anything.
 ### Decision 5: Default vintage is applied by the host, not by `filterGraph`
 
 `sendGraph` uses `filter?.vintages ?? DEFAULT_VINTAGES` with `const DEFAULT_VINTAGES: EdgeVintage[] =
-["current"]`. An explicitly empty array keeps the codebase's existing "empty = All" semantics.
+["current"]`. `??` only substitutes on a genuinely absent field (the very first, filter-less render);
+an explicitly empty array is a real user selection (both toolbar checkboxes unchecked) and is passed
+through unchanged. **Amendment (post-`sdd-verify`)**: unlike `scopeIds`/`relationshipKinds`/
+`changeStatuses`, `filterGraph` does NOT treat an empty `vintages` as "no restriction" — a checkbox
+pair's "nothing checked" means "show nothing," per the spec's "Both vintages unchecked hides all
+edges" scenario. `filterGraph` checks `filter.vintages !== undefined`, not `.length > 0`, so an empty
+array filters every edge out (fixed in the graph-relationship-filtering-empty-vintages-fix follow-up).
 **Rationale**: success criterion 4 requires the ghost gone on first render, before the user touches
 the toolbar — but `filterGraph` defaulting a filter on would be surprising and untestable in isolation.
 

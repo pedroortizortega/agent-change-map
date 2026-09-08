@@ -102,8 +102,12 @@ export function buildEdgeVintages(
   return graph.edges.map((edge) => (rightKeys.has(edgeKey(edge)) || untrackedPaths.includes(edge.span.path) ? "current" : "removed"));
 }
 
-/** Applied when a `requestGraphView` message omits `vintages` or it is explicitly empty:
- * ghost/removed edges stay hidden until the user opts in (success criterion 4). */
+/** Applied only when a `requestGraphView` message (or the very first, filter-less render)
+ * omits `vintages` entirely: ghost/removed edges stay hidden until the user opts in
+ * (success criterion 4). An explicit empty array is a real user selection (both toolbar
+ * checkboxes unchecked) and is passed through as-is - it hides every edge, it is never
+ * replaced by this default (see `filterGraph`'s doc comment for why empty vintages differs
+ * from the other filters' empty-means-all convention). */
 const DEFAULT_VINTAGES: EdgeVintage[] = ["current"];
 
 export interface SessionDeps {
