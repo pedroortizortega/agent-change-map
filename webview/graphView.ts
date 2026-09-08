@@ -399,7 +399,7 @@ function renderEdge(edge: Edge, index: number, boxes: Map<string, Rect>, path: s
 }
 
 /** Exclude containment before allocating connector ports, while preserving protocol indices. */
-function routedPaths(edges: readonly Edge[], boxes: Map<string, Rect>): Map<number, string | undefined> {
+export function routedPaths(edges: readonly Edge[], boxes: Map<string, Rect>): Map<number, string | undefined> {
   const visible = edges.map((edge, index) => ({ edge, index })).filter(({ edge }) => edge.kind !== "contains" && edge.resolution.kind === "resolved" && boxes.has(edge.resolution.target));
   const paths = edgePathsFor(boxes, visible.map(({ edge }) => ({
     source: edge.source,

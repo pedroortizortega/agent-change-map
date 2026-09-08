@@ -3,7 +3,8 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ChangeMapSession } from "../../src/webviewHost.js";
 import { SnapshotStore } from "../../src/snapshots/snapshotStore.js";
 import { DraftStore } from "../../src/editing/draftStore.js";
-import { edgePathFor, type Rect } from "../../webview/edgeGeometry.js";
+import { type Rect } from "../../webview/edgeGeometry.js";
+import { routedPaths } from "../../webview/graphView.js";
 import type { AnalysisGraph } from "../../src/protocol.js";
 import type { WebviewToHostMessage } from "../../src/webviewProtocol.js";
 
@@ -37,7 +38,7 @@ const drag = (selector: string, from: { x: number; y: number }, to: { x: number;
 /** Absolute `x`/`y` = sum of ancestor `<g transform="translate(x,y)">` values up to (excluding)
  * `root`; `w`/`h` read off the node's own child `<rect>`. Independent of `webview/index.ts`'s
  * production `readBoxes()` — this is a test-side assertion helper, not a second implementation
- * of routing math (the routing math itself always comes from `edgePathFor`). */
+ * of routing math (the routing math itself always comes from the coordinated `routedPaths`). */
 function translateOf(el: Element): { x: number; y: number } {
   const match = /translate\(([-\d.]+),\s*([-\d.]+)\)/.exec(el.getAttribute("transform") ?? "");
   return match ? { x: Number(match[1]), y: Number(match[2]) } : { x: 0, y: 0 };
@@ -408,9 +409,12 @@ it("suppresses click-to-navigate for the drag's own click but not for the next f
   expect(intents.some(intent => intent.type === "inspectSources")).toBe(true);
 });
 
-// Case 25: container drag — a descendant's edge `d` equals `edgePathFor` over boxes offset by
-// the accumulated delta.
-it("re-anchors a descendant's edge when its container is dragged, matching edgePathFor over offset boxes", async () => {
+// Case 25: container drag — a descendant's edge `d` equals the coordinated batch router
+// (`routedPaths`, the same one the static render uses) over boxes offset by the accumulated
+// delta — never the single-edge `edgePathFor` fallback, which ignores every other edge's
+// port/lane allocation (see the bug this guards against: a per-edge recompute during drag can
+// deform/cross paths that a coordinated re-route would have avoided).
+it("re-anchors a descendant's edge when its container is dragged, matching the coordinated router over offset boxes", async () => {
   session.loadComparison(undefined, containerGraph(), []);
   const graphEl = element('#graph');
   const baseBoxes = boxesFromDom(graphEl);
@@ -422,7 +426,7 @@ it("re-anchors a descendant's edge when its container is dragged, matching edgeP
     const box = baseBoxes.get(id)!;
     liveBoxes.set(id, { ...box, x: box.x + dx, y: box.y + dy });
   }
-  const expected = edgePathFor(liveBoxes, "function:pkg.f", "function:g");
+  const expected = routedPaths(containerGraph().edges, liveBoxes).get(1);
   const actual = element<SVGPathElement>('[data-edge-index="1"] path').getAttribute("d");
   expect(actual).toBe(expected);
 });
@@ -521,4 +525,49 @@ it("keeps a descendant's relationship indicator visually anchored, including thr
   drag('[data-node-id="module:pkg"]', { x: 300, y: 300 }, { x: 340, y: 360 });
   const after = accumulatedPosition(element('[data-relationship-source="function:pkg.f"]'), graphEl);
   expect(after).toEqual({ x: before.x + 40, y: before.y + 60 });
+});
+
+/** Five root-level MODULE (container-kind) nodes stacked vertically by `renderGraphSvg`'s
+ * clustering, with `d`/`e` each calling both `a` and `c` (mirroring
+ * `coordinatedRouting.test.ts`'s fan-in/fan-out fixture): unrelated box `b` sits between `a`
+ * and `c`, so a coordinated re-route around it is required to avoid crossing straight through
+ * it. Used to prove drag-time re-routing stays coordinated, not per-edge independent. */
+function fanRoutingGraph(): AnalysisGraph {
+  const kind = "module" as const;
+  return {
+    snapshot,
+    nodes: [
+      { id: "module:a", kind, qualifiedName: "a", span: dragSpan },
+      { id: "module:b", kind, qualifiedName: "b", span: dragSpan },
+      { id: "module:c", kind, qualifiedName: "c", span: dragSpan },
+      { id: "module:d", kind, qualifiedName: "d", span: dragSpan },
+      { id: "module:e", kind, qualifiedName: "e", span: dragSpan },
+    ],
+    edges: [
+      // Distinct spans: `mergeGraphsForDisplay`'s edge dedup key is kind+source+span, so
+      // same-source edges sharing a span would otherwise collapse into one.
+      { kind: "call", source: "module:e", resolution: { kind: "resolved", target: "module:a" }, span: { ...dragSpan, startByte: 0, endByte: 1 } },
+      { kind: "call", source: "module:d", resolution: { kind: "resolved", target: "module:a" }, span: { ...dragSpan, startByte: 1, endByte: 2 } },
+      { kind: "call", source: "module:e", resolution: { kind: "resolved", target: "module:c" }, span: { ...dragSpan, startByte: 2, endByte: 3 } },
+      { kind: "call", source: "module:d", resolution: { kind: "resolved", target: "module:c" }, span: { ...dragSpan, startByte: 3, endByte: 4 } },
+    ],
+    diagnostics: [],
+  };
+}
+
+// Case 30 (regression): dragging one container must re-route every edge through the exact same
+// coordinated batch router (`routedPaths`/`edgePathsFor`) a from-scratch render would use — a
+// per-edge independent recompute (the prior `edgePathFor`-per-edge approach) can deform/cross
+// paths that cut through unrelated boxes even where a coordinated re-route finds open space.
+it("re-routes every edge identically to a fresh coordinated render after a container drag", async () => {
+  const fanGraph = fanRoutingGraph();
+  session.loadComparison(undefined, fanGraph, []);
+  const graphEl = element('#graph');
+  drag('[data-node-id="module:d"]', { x: 300, y: 300 }, { x: 260, y: 250 });
+  const boxesAfterDrag = boxesFromDom(graphEl);
+  const expected = routedPaths(fanGraph.edges, boxesAfterDrag);
+  for (let index = 0; index < fanGraph.edges.length; index++) {
+    const actual = dom.window.document.querySelector<SVGPathElement>(`[data-edge-index="${index}"] path`)?.getAttribute("d");
+    expect(actual, `Edge ${index}'s post-drag path must match a fresh coordinated re-render`).toBe(expected.get(index));
+  }
 });

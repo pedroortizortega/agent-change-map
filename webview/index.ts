@@ -1,6 +1,6 @@
 import { bindRelationshipDetails } from "./relationshipDetails.js";
-import { renderGraphSvg, isContainerKind } from "./graphView.js";
-import { edgePathFor, type Point, type Rect } from "./edgeGeometry.js";
+import { renderGraphSvg, isContainerKind, routedPaths } from "./graphView.js";
+import { type Point, type Rect } from "./edgeGeometry.js";
 import { PositionOverrides, type Offset } from "./positionOverrides.js";
 import type { HostToWebviewMessage, WebviewToHostMessage } from "../src/webviewProtocol.js";
 import type { AnalysisGraph, Entity, SourceId } from "../src/protocol.js";
@@ -94,7 +94,6 @@ interface DragState {
   origin: Offset;
   movedIds: Set<string>;
   boxes: Map<string, Rect>;
-  edges: number[];
 }
 let dragState: DragState | undefined;
 /** Set on a completed (above-threshold) drag's `pointerup`; consumed once by the very next
@@ -134,23 +133,20 @@ function readBoxes(): Map<string, Rect> {
   return boxes;
 }
 
-/** Recomputes and writes one edge's `d` from `boxes` via the single shared `edgePathFor` entry
- * point (design.md Decision 1); a `contains` edge or an edge whose path is undefined (missing
- * source box) is left untouched. */
-function updateEdgePath(index: number, boxes: ReadonlyMap<string, Rect>): void {
-  const edge = graph?.edges[index];
-  if (!edge || edge.kind === "contains") return;
-  const targetId = edge.resolution.kind === "resolved" ? edge.resolution.target : undefined;
-  const path = edgePathFor(boxes, edge.source, targetId);
-  if (path === undefined) return;
-  const pathEl = byId("graph").querySelector<SVGPathElement>(`[data-edge-index="${index}"] path`);
-  if (pathEl) pathEl.setAttribute("d", path);
-}
-
-/** Full re-route pass over every edge against `boxes` (design.md Decision 2: only on drop / on
- * render, never on every `pointermove` tick). */
-function updateAllEdges(boxes: ReadonlyMap<string, Rect>): void {
-  (graph?.edges ?? []).forEach((_edge, index) => updateEdgePath(index, boxes));
+/** Re-routes every edge against `boxes` in one coordinated pass, via the exact same batch
+ * router (`routedPaths`, backed by `edgePathsFor`) the static render uses — never per-edge
+ * `edgePathFor`, which ignores every other edge's port/lane allocation and can cut through
+ * unrelated boxes that a coordinated re-route would have avoided. The full edge set and full
+ * box map are always passed in, even for a live in-drag preview, because the coordinated
+ * router needs the complete picture to make correct port-allocation decisions. */
+function updateAllEdges(boxes: Map<string, Rect>): void {
+  if (!graph) return;
+  const paths = routedPaths(graph.edges, boxes);
+  for (const [index, path] of paths) {
+    if (path === undefined) continue;
+    const pathEl = byId("graph").querySelector<SVGPathElement>(`[data-edge-index="${index}"] path`);
+    if (pathEl) pathEl.setAttribute("d", path);
+  }
 }
 
 function onDragMove(event: PointerEvent): void {
@@ -168,7 +164,7 @@ function onDragMove(event: PointerEvent): void {
     const box = dragState.boxes.get(id);
     if (box) liveBoxes.set(id, { ...box, x: box.x + totalDx, y: box.y + totalDy });
   }
-  for (const index of dragState.edges) updateEdgePath(index, liveBoxes);
+  updateAllEdges(liveBoxes);
 }
 
 function onDragEnd(event: PointerEvent): void {
@@ -199,12 +195,6 @@ function startDrag(event: PointerEvent, el: SVGGElement): void {
   suppressNextClick = false;
   const movedIds = new Set<string>([nodeId, ...Array.from(el.querySelectorAll("[data-node-id]")).map((d) => d.getAttribute("data-node-id")!)]);
   const boxes = readBoxes();
-  const edges: number[] = [];
-  (graph?.edges ?? []).forEach((edge, index) => {
-    if (edge.kind === "contains") return;
-    const targetId = edge.resolution.kind === "resolved" ? edge.resolution.target : undefined;
-    if (movedIds.has(edge.source) || (targetId && movedIds.has(targetId))) edges.push(index);
-  });
   dragState = {
     nodeId,
     el,
@@ -215,7 +205,6 @@ function startDrag(event: PointerEvent, el: SVGGElement): void {
     origin: positionOverrides.get(nodeId) ?? { dx: 0, dy: 0 },
     movedIds,
     boxes,
-    edges,
   };
   if (typeof el.setPointerCapture === "function") {
     try { el.setPointerCapture(event.pointerId); } catch { /* unsupported (e.g. jsdom) */ }
