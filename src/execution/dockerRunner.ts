@@ -88,6 +88,17 @@ export const DEFAULT_RUN_LIMITS: RunLimits = {
 };
 
 /**
+ * Introspection round-trips only run `inspect.signature()` over already-imported code, so
+ * they are bounded far more tightly than an ordinary snippet run (design D2).
+ */
+export const INTROSPECTION_TIMEOUT_MS = 5_000;
+
+/** Merges `overrides` over the introspection-specific defaults - a 5s timeout instead of {@link DEFAULT_RUN_LIMITS}'s 10s - never the other way around. */
+export function resolveIntrospectionLimits(overrides: Partial<RunLimits> = {}): RunLimits {
+  return { ...DEFAULT_RUN_LIMITS, timeoutMs: INTROSPECTION_TIMEOUT_MS, ...overrides };
+}
+
+/**
  * Rejects any snippet that is not a genuine, directly-executable Python source file
  * before a Docker container is ever created. Only a plain `.py` path is eligible;
  * everything else - `requirements.txt`, `CMakeLists.txt`, an executable-bit `.md`/`.mdx`
@@ -360,6 +371,75 @@ export async function runSnippet(source: SnippetSource, options: RunOptions = {}
   if (outcomeKind === "cancelled") return { variant: source.variant, kind: "cancelled", stdout, stderr };
   if (exitCode === 0) return { variant: source.variant, kind: "success", exitCode, stdout, stderr };
   return { variant: source.variant, kind: "failure", exitCode: exitCode ?? -1, stdout, stderr };
+}
+
+const ACM_SENTINEL = "<<ACM>>";
+
+export interface IntrospectionParameter {
+  name: string;
+  kind?: string;
+  annotation?: string | null;
+  defaultRepr?: string | null;
+  required?: boolean;
+}
+
+export type IntrospectionOutcome =
+  | { kind: "signatureResult"; parameters: IntrospectionParameter[] }
+  | { kind: "signatureUnavailable"; reason: string };
+
+/**
+ * Scans `stdout` for lines beginning with the `<<ACM>>` sentinel and returns the JSON
+ * payload of only the *final* matching line. Earlier matches are ignored on purpose:
+ * attacker-controlled `print()` output inside the introspected/called code could forge an
+ * earlier sentinel-prefixed line, but it cannot control what this runner appends *after*
+ * its own real result frame, so the last match is always the authoritative one.
+ */
+function parseAcmFrame(stdout: string): unknown {
+  let lastPayload: string | undefined;
+  for (const line of stdout.split("\n")) {
+    if (line.startsWith(ACM_SENTINEL)) {
+      lastPayload = line.slice(ACM_SENTINEL.length);
+    }
+  }
+  if (lastPayload === undefined) return undefined;
+  try {
+    return JSON.parse(lastPayload);
+  } catch {
+    return undefined;
+  }
+}
+
+function isIntrospectionFrame(value: unknown): value is { ok: true; parameters: IntrospectionParameter[] } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as { ok?: unknown }).ok === true &&
+    Array.isArray((value as { parameters?: unknown }).parameters)
+  );
+}
+
+function toIntrospectionOutcome(result: RunResult): IntrospectionOutcome {
+  if (result.kind !== "success") {
+    return { kind: "signatureUnavailable", reason: result.kind };
+  }
+  const frame = parseAcmFrame(result.stdout);
+  if (!isIntrospectionFrame(frame)) {
+    return { kind: "signatureUnavailable", reason: "malformed or absent <<ACM>> introspection frame" };
+  }
+  return { kind: "signatureResult", parameters: frame.parameters };
+}
+
+/**
+ * Thin wrapper over {@link runSnippet}: same hardened argv, same sandbox flags, same
+ * `assertEligibleForExecution` pre-spawn guard - only the timeout is tightened to
+ * {@link INTROSPECTION_TIMEOUT_MS} and the result is parsed out of the `<<ACM>>` sentinel
+ * frame instead of returned as a raw {@link RunResult}. Never throws on a malformed or
+ * absent frame; that shape is reported as `signatureUnavailable` instead.
+ */
+export async function runIntrospection(source: SnippetSource, options: RunOptions = {}): Promise<IntrospectionOutcome> {
+  const limits = resolveIntrospectionLimits(options.limits);
+  const result = await runSnippet(source, { ...options, limits });
+  return toIntrospectionOutcome(result);
 }
 
 /**

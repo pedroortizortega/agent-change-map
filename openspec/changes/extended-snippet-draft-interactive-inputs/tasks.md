@@ -17,17 +17,17 @@ Depends on: nothing (first slice). Unblocks: Slice 1b, and Slice 2 (needs `targe
 
 ### 1a.1 — `entitySchema.target` field (D1)
 
-- [ ] **RED**: `test/unit/protocol.test.ts` — add cases asserting `entitySchema` accepts an
+- [x] **RED**: `test/unit/protocol.test.ts` — add cases asserting `entitySchema` accepts an
       optional `target: { module, dottedName, callableKind: "function"|"class" }`, rejects a
       malformed `target` shape, and still validates an entity with `target` entirely absent
       (back-compat with existing golden fixtures).
       Satisfies: `python-structure-analysis` spec, Requirement "Address a specific callable for
       introspection and invocation" (all three scenarios).
-- [ ] **GREEN**: `src/protocol.ts` — add optional `target` to `entitySchema`.
+- [x] **GREEN**: `src/protocol.ts` — add optional `target` to `entitySchema`.
 
 ### 1a.2 — Analyzer emits `target` per function/method/class (D1, spec: python-structure-analysis)
 
-- [ ] **RED**: `test/unit/pythonAnalyzer.test.ts` — add cases for: top-level function entity
+- [x] **RED**: `test/unit/pythonAnalyzer.test.ts` — add cases for: top-level function entity
       carries `target.module`/`target.dottedName`/`callableKind: "function"`; class entity's
       `target` resolves to `__init__` addressing (`callableKind: "class"`, dottedName still names
       the class — introspection consumer applies the `__init__` step, per design driver shape);
@@ -37,11 +37,11 @@ Depends on: nothing (first slice). Unblocks: Slice 1b, and Slice 2 (needs `targe
       Satisfies: `python-structure-analysis` spec scenarios "Function entity carries an
       addressable module path and qualified name", "Class entity resolves to its constructor for
       introspection", "Method entity carries identity relative to its containing class".
-- [ ] **GREEN**: `python/analyzer.py` — emit `target` per function/method/class entity.
+- [x] **GREEN**: `python/analyzer.py` — emit `target` per function/method/class entity.
 
 ### 1a.3 — Driver synthesis (`buildIntrospectionDriver`) — pure, no I/O (D2/D3)
 
-- [ ] **RED**: `test/unit/callDriver.test.ts` (new file) — cases:
+- [x] **RED**: `test/unit/callDriver.test.ts` (new file) — cases:
       - happy path: given module source + dottedName + `callableKind: "function"`, the produced
         driver text embeds the module source as a base64 literal and decodes it via
         `base64.b64decode`.
@@ -55,12 +55,12 @@ Depends on: nothing (first slice). Unblocks: Slice 1b, and Slice 2 (needs `targe
       JSON payload, never interpolated into source" (scenario "An adversarial value must not
       execute as code" — introspection path shares the same driver synthesis, so this is proven
       here for the base64-envelope invariant reused by slice 2's call driver).
-- [ ] **GREEN**: `src/execution/callDriver.ts` (new) — `buildIntrospectionDriver(content,
+- [x] **GREEN**: `src/execution/callDriver.ts` (new) — `buildIntrospectionDriver(content,
       dottedName, callableKind)`; pure string synthesis + base64 encoding, no I/O.
 
 ### 1a.4 — `runIntrospection()` wrapper + `<<ACM>>` frame parsing (D2)
 
-- [ ] **RED**: `test/unit/dockerRunner.test.ts` — cases:
+- [x] **RED**: `test/unit/dockerRunner.test.ts` — cases:
       - `runIntrospection()` delegates to the same hardened argv builder as `runSnippet`/`runCall`
         (asserts `buildDockerRunArgs`/`killAndVerifyContainer` are not bypassed or duplicated).
       - `<<ACM>>` sentinel line parsed into structured JSON; when multiple lines match the
@@ -80,7 +80,7 @@ Depends on: nothing (first slice). Unblocks: Slice 1b, and Slice 2 (needs `targe
       (scenario "Introspection round-trip runs under full sandbox restrictions",
       "Introspection is refused if a required restriction cannot be applied"); Threat Matrix row
       "Documentation-like paths".
-- [ ] **GREEN**: `src/execution/dockerRunner.ts` — `runIntrospection()` thin wrapper over
+- [x] **GREEN**: `src/execution/dockerRunner.ts` — `runIntrospection()` thin wrapper over
       `runSnippet()`; `<<ACM>>` frame parser (last-match-wins).
 
 **Slice 1a exit criteria**: `entitySchema.target` shipped and consumed by the analyzer; pure

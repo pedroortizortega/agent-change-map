@@ -75,7 +75,11 @@ class FileVisitor(ast.NodeVisitor):
         actual_kind = "method" if kind == "function" and self.stack[-1][2] == "class" else kind
         span = self.source.span(node)
         identifier = entity_id(actual_kind, qualified_name, span["startByte"])
-        self.nodes.append({"id": identifier, "kind": actual_kind, "qualifiedName": qualified_name, "containerId": self.current_id, "span": span})
+        module_prefix = f"{self.module}." if self.module else ""
+        dotted_name = qualified_name[len(module_prefix):] if module_prefix and qualified_name.startswith(module_prefix) else qualified_name
+        callable_kind = "class" if kind == "class" else "function"
+        target = {"module": self.module, "dottedName": dotted_name, "callableKind": callable_kind}
+        self.nodes.append({"id": identifier, "kind": actual_kind, "qualifiedName": qualified_name, "containerId": self.current_id, "span": span, "target": target})
         self.edges.append({"kind": "contains", "source": self.current_id, "resolution": {"kind": "resolved", "target": identifier}, "span": span})
         self.stack.append((identifier, qualified_name, actual_kind))
         self.generic_visit(node)

@@ -252,6 +252,34 @@ describe("Python AST analyzer", () => {
     expect(callAt(12)?.resolution).toEqual({ kind: "resolved", target: method?.id });
   });
 
+  it("carries an addressable module path and qualified name for a top-level function", async () => {
+    const graph = await analyze([{ path: "pkg/sample.py", content: "def run():\n    pass\n" }]);
+    const entity = graph.nodes.find((node) => node.qualifiedName === "pkg.sample.run");
+    expect(entity?.target).toEqual({ module: "pkg.sample", dottedName: "run", callableKind: "function" });
+  });
+
+  it("resolves a class entity's target to itself with callableKind class (introspection consumer applies __init__)", async () => {
+    const graph = await analyze([{ path: "pkg/sample.py", content: "class Widget:\n    def __init__(self):\n        pass\n" }]);
+    const entity = graph.nodes.find((node) => node.qualifiedName === "pkg.sample.Widget");
+    expect(entity?.target).toEqual({ module: "pkg.sample", dottedName: "Widget", callableKind: "class" });
+  });
+
+  it("qualifies an instance method's target relative to its containing class, not an unrelated same-named method", async () => {
+    const graph = await analyze([{ path: "pkg/sample.py", content: "class A:\n    def go(self):\n        pass\n\nclass B:\n    def go(self):\n        pass\n" }]);
+    const methodA = graph.nodes.find((node) => node.qualifiedName === "pkg.sample.A.go");
+    const methodB = graph.nodes.find((node) => node.qualifiedName === "pkg.sample.B.go");
+    expect(methodA?.target).toEqual({ module: "pkg.sample", dottedName: "A.go", callableKind: "function" });
+    expect(methodB?.target).toEqual({ module: "pkg.sample", dottedName: "B.go", callableKind: "function" });
+  });
+
+  it("gives nested and module-level defs distinct dottedNames", async () => {
+    const graph = await analyze([{ path: "pkg/sample.py", content: "def outer():\n    def inner():\n        pass\n    return inner\n" }]);
+    const outer = graph.nodes.find((node) => node.qualifiedName === "pkg.sample.outer");
+    const inner = graph.nodes.find((node) => node.qualifiedName === "pkg.sample.outer.inner");
+    expect(outer?.target).toEqual({ module: "pkg.sample", dottedName: "outer", callableKind: "function" });
+    expect(inner?.target).toEqual({ module: "pkg.sample", dottedName: "outer.inner", callableKind: "function" });
+  });
+
   it("times out and bounds child output deterministically", async () => {
     const roots: string[] = [];
     const makeRoot = async (program: string) => {
