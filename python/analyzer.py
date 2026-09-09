@@ -58,6 +58,8 @@ class FileVisitor(ast.NodeVisitor):
         self.from_imports: list[tuple[dict[str, Any], str]] = []
         self.import_aliases: list[tuple[str, str, str]] = []
         self.local_bindings: list[tuple[str, str, str]] = []
+        self.attribute_bindings: list[tuple[str, str, str]] = []
+        self.self_scopes: set[str] = set()
         self.stack: list[tuple[str, str, str]] = [(root_id, module, "module")]
 
     @property
@@ -91,10 +93,11 @@ class FileVisitor(ast.NodeVisitor):
         self.add_definition(node, "function")
 
     def _bind_signature(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
-        """Record parameter annotations for the scope this definition opens."""
+        """Record the receiver, parameter annotations, and return sources for the scope this definition opens."""
         scope = f"{self.current_qualified_name}.{node.name}"
         parameters = node.args.posonlyargs + node.args.args + node.args.kwonlyargs
-        if self.stack[-1][2] == "class" and parameters and parameters[0].arg == "self":
+        if self.stack[-1][2] == "class" and parameters and parameters[0].arg == "self" and not any(isinstance(decorator, ast.Name) and decorator.id in {"staticmethod", "classmethod"} for decorator in node.decorator_list):
+            self.self_scopes.add(scope)
             parameters = parameters[1:]
         for parameter in parameters:
             if isinstance(parameter.annotation, ast.Name):
@@ -140,9 +143,11 @@ class FileVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def _bind_target(self, target: ast.expr, class_name: str) -> None:
-        """Route a plain-name target to the lexical binding table."""
+        """Route a plain-name target to the lexical binding table and a `self.attr` target to its class's table."""
         if isinstance(target, ast.Name):
             self.local_bindings.append((self.current_qualified_name, target.id, class_name))
+        elif isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name) and target.value.id == "self" and self.current_qualified_name in self.self_scopes:
+            self.attribute_bindings.append((self.current_qualified_name, target.attr, class_name))
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
         """Bind `x: ClassName` from the annotation alone, whether or not a value is assigned."""
@@ -218,14 +223,28 @@ def analyze(request: dict[str, Any]) -> dict[str, Any]:
                 continue
             _extend(variable_classes.setdefault(f"{scope}.{var}", []), class_names)
 
+    attribute_classes: dict[str, list[str]] = {}
+    for visitor in visitors:
+        for scope, attribute, raw in visitor.attribute_bindings:
+            class_names = _class_names(raw, scope, visitor.module, by_qualified_name, alias_targets, qualified_by_id)
+            if not class_names:
+                continue
+            _extend(attribute_classes.setdefault(f"{scope.rpartition('.')[0]}.{attribute}", []), class_names)
+
     for visitor in visitors:
         for source_id, scope, call in visitor.calls:
             resolution: dict[str, Any] = {"kind": "unresolved"}
             if isinstance(call.func, ast.Name):
                 resolution = _resolve_lexical(call.func.id, scope, visitor.module, by_qualified_name, alias_targets)
-            elif isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name):
+            elif isinstance(call.func, ast.Attribute):
+                receiver = call.func.value
+                class_names: list[str] = []
+                if isinstance(receiver, ast.Name):
+                    class_names = variable_classes.get(f"{scope}.{receiver.id}", [])
+                elif isinstance(receiver, ast.Attribute) and isinstance(receiver.value, ast.Name) and receiver.value.id == "self" and scope in visitor.self_scopes:
+                    class_names = attribute_classes.get(f"{scope.rpartition('.')[0]}.{receiver.attr}", [])
                 candidates: list[str] = []
-                for class_name in variable_classes.get(f"{scope}.{call.func.value.id}", []):
+                for class_name in class_names:
                     candidates.extend(by_qualified_name.get(f"{class_name}.{call.func.attr}", []))
                 resolution = _resolution(candidates)
             edges.append({"kind": "call", "source": source_id, "resolution": resolution, "span": visitor.source.span(call)})
