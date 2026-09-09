@@ -4,7 +4,7 @@ import { type Point, type Rect } from "./edgeGeometry.js";
 import { PositionOverrides, type Offset } from "./positionOverrides.js";
 import type { HostToWebviewMessage, WebviewToHostMessage } from "../src/webviewProtocol.js";
 import type { AnalysisGraph, Entity, SourceId } from "../src/protocol.js";
-import type { SnippetVariant } from "../src/execution/dockerRunner.js";
+import type { IntrospectionParameter, SnippetVariant } from "../src/execution/dockerRunner.js";
 import type { DiffOp } from "../src/diff/lineDiff.js";
 
 /** Consecutive `unchanged` ops at or above this length collapse behind a click-to-expand summary. */
@@ -24,6 +24,14 @@ let activeRun: string | undefined;
 let pendingAction: { type: "confirmRun" | "confirmDirectWrite"; requestId: string } | undefined;
 let editingEnabled = false;
 let initialized = false;
+/** The `targetId` (entity id) and `requestId` of the most recently issued `requestSignature`,
+ * used to discard a stale `signatureResult`/`signatureUnavailable` reply that arrives after
+ * the user has since selected a different node (design D2/D4). */
+let currentTargetId: string | undefined;
+let currentSignatureRequestId: string | undefined;
+/** Names of raw-JSON parameter fields currently holding unparseable text; a non-empty set
+ * blocks the (not-yet-implemented, slice 2) call action. */
+const invalidRawJsonParams = new Set<string>();
 
 function byId<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -366,6 +374,148 @@ function renderDiffPanel(ops: DiffOp[], expanded: Set<string>): void {
   }
   panel.append(table);
 }
+/** Pure widget-mapping table (design.md's "Widget mapping"): `int`/`float` → number,
+ * `bool` → checkbox, `str` → text, `Optional[X]` → a toggle plus `X`'s own widget, and
+ * everything else — `list[…]`, `dict[…]`, missing/unrecognized annotations, and
+ * `*args`/`**kwargs` (python's `VAR_POSITIONAL`/`VAR_KEYWORD` parameter kinds) — a raw-JSON
+ * textarea fallback rather than guessing a type or dropping the parameter. */
+type Widget =
+  | { kind: "number" }
+  | { kind: "checkbox" }
+  | { kind: "text" }
+  | { kind: "optional"; inner: Widget }
+  | { kind: "raw-json" };
+
+function widgetFor(param: Pick<IntrospectionParameter, "annotation" | "kind">): Widget {
+  if (param.kind === "VAR_POSITIONAL" || param.kind === "VAR_KEYWORD") return { kind: "raw-json" };
+  const annotation = param.annotation?.trim();
+  if (!annotation) return { kind: "raw-json" };
+  if (annotation === "int" || annotation === "float") return { kind: "number" };
+  if (annotation === "bool") return { kind: "checkbox" };
+  if (annotation === "str") return { kind: "text" };
+  const optionalMatch = /^(?:typing\.)?Optional\[(.+)\]$/.exec(annotation);
+  if (optionalMatch) return { kind: "optional", inner: widgetFor({ annotation: optionalMatch[1] }) };
+  return { kind: "raw-json" };
+}
+
+function updateSignatureValidity(): void {
+  byId("signature-form-validity").textContent = invalidRawJsonParams.size > 0 ? "Fix invalid JSON before calling." : "";
+}
+
+function validateRawJson(name: string, textarea: HTMLTextAreaElement): void {
+  const errorEl = document.querySelector<HTMLElement>(`[data-param-error="${name}"]`);
+  const text = textarea.value.trim();
+  if (text === "") {
+    invalidRawJsonParams.delete(name);
+    if (errorEl) errorEl.textContent = "";
+  } else {
+    try {
+      JSON.parse(text);
+      invalidRawJsonParams.delete(name);
+      if (errorEl) errorEl.textContent = "";
+    } catch {
+      invalidRawJsonParams.add(name);
+      if (errorEl) errorEl.textContent = "Invalid JSON.";
+    }
+  }
+  updateSignatureValidity();
+}
+
+function inputForWidget(widget: Widget, name: string): HTMLElement {
+  if (widget.kind === "number" || widget.kind === "text") {
+    const el = document.createElement("input");
+    el.type = widget.kind;
+    el.dataset.param = name;
+    return el;
+  }
+  if (widget.kind === "checkbox") {
+    const el = document.createElement("input");
+    el.type = "checkbox";
+    el.dataset.param = name;
+    return el;
+  }
+  if (widget.kind === "raw-json") {
+    const el = document.createElement("textarea");
+    el.className = "raw-json";
+    el.dataset.param = name;
+    el.addEventListener("input", () => validateRawJson(name, el));
+    return el;
+  }
+  const wrap = document.createElement("span");
+  wrap.className = "optional-widget";
+  const toggle = document.createElement("input");
+  toggle.type = "checkbox";
+  toggle.dataset.paramToggle = name;
+  const inner = inputForWidget(widget.inner, name);
+  (inner as HTMLInputElement | HTMLTextAreaElement).disabled = true;
+  toggle.addEventListener("change", () => {
+    (inner as HTMLInputElement | HTMLTextAreaElement).disabled = !toggle.checked;
+    if (!toggle.checked && inner instanceof HTMLTextAreaElement) validateRawJson(name, inner);
+  });
+  wrap.append(toggle, inner);
+  return wrap;
+}
+
+function parameterRow(param: IntrospectionParameter): HTMLDivElement {
+  const row = document.createElement("div");
+  row.className = "param-row";
+  row.dataset.paramRow = param.name;
+  const label = document.createElement("label");
+  label.textContent = `${param.name}${param.required ? "" : " (optional)"}`;
+  row.append(label, inputForWidget(widgetFor(param), param.name));
+  const error = document.createElement("p");
+  error.className = "param-error";
+  error.dataset.paramError = param.name;
+  row.append(error);
+  return row;
+}
+
+function clearSignatureForm(): void {
+  currentSignatureRequestId = undefined;
+  invalidRawJsonParams.clear();
+  const form = byId("signature-form");
+  form.textContent = "";
+  form.removeAttribute("data-state");
+  byId("signature-status").textContent = "";
+  byId("signature-form-validity").textContent = "";
+}
+
+function renderSignatureForm(parameters: IntrospectionParameter[], cached: boolean): void {
+  invalidRawJsonParams.clear();
+  const form = byId("signature-form");
+  form.textContent = "";
+  form.removeAttribute("data-state");
+  for (const param of parameters) form.append(parameterRow(param));
+  byId("signature-status").textContent = `${parameters.length} parameter(s)${cached ? " (cached)" : ""}.`;
+  updateSignatureValidity();
+}
+
+function renderSignatureUnavailable(reason: string): void {
+  invalidRawJsonParams.clear();
+  const form = byId("signature-form");
+  form.textContent = "";
+  form.setAttribute("data-state", "unavailable");
+  byId("signature-status").textContent = `Signature unavailable: ${reason}`;
+  byId("signature-form-validity").textContent = "";
+}
+
+/** Issues `requestSignature` for the just-selected node's target (design D2/D4), if any.
+ * Mirrors `inspectSources`: fired immediately on selection, using whichever comparison side
+ * (current preferred, then original) has a resolvable source for this node. Silently clears
+ * the form instead of requesting when the node has no `target` or no resolvable source — this
+ * is normal (e.g. a package/module container node), not an error. */
+function requestSignatureFor(targetNode: Entity | undefined, pair: { left?: SourceId; right?: SourceId } | undefined): void {
+  clearSignatureForm();
+  if (!targetNode?.target) { currentTargetId = undefined; return; }
+  const sourceId = pair?.right ?? pair?.left;
+  if (!sourceId) { currentTargetId = undefined; return; }
+  currentTargetId = targetNode.id;
+  const requestId = `sig-${++nextId}`;
+  currentSignatureRequestId = requestId;
+  byId("signature-status").textContent = "Introspecting signature…";
+  vscode.postMessage({ type: "requestSignature", requestId, sourceId, targetId: targetNode.id });
+}
+
 function choosePair(nodeId: string): void {
   selectedNodeId = nodeId;
   selected = undefined;
@@ -386,6 +536,7 @@ function choosePair(nodeId: string): void {
     byId("source-actions").append(control);
   }
   vscode.postMessage({ type: "inspectSources", nodeId });
+  requestSignatureFor(graph?.nodes.find((candidate) => candidate.id === nodeId), selectedPair);
 }
 function requestView(): void {
   const scope = byId<HTMLSelectElement>("filter-scope").value;
@@ -456,7 +607,12 @@ function initialize(): void {
   const confirmation = document.createElement("section"); confirmation.id = "confirmation"; confirmation.setAttribute("aria-live", "polite");
   const status = document.createElement("p"); status.id = "action-status"; status.setAttribute("role", "status");
   const output = document.createElement("pre"); output.id = "run-output"; output.setAttribute("aria-live", "polite");
-  document.body.append(actions, editorLabel, editor, save, write, variants, run, cancel, confirmation, status, output);
+  const signatureSection = document.createElement("section"); signatureSection.id = "signature-section";
+  const signatureStatus = document.createElement("p"); signatureStatus.id = "signature-status"; signatureStatus.setAttribute("role", "status");
+  const signatureForm = document.createElement("div"); signatureForm.id = "signature-form";
+  const signatureValidity = document.createElement("p"); signatureValidity.id = "signature-form-validity"; signatureValidity.setAttribute("role", "status");
+  signatureSection.append(signatureStatus, signatureForm, signatureValidity);
+  document.body.append(actions, editorLabel, editor, save, write, variants, run, cancel, confirmation, status, output, signatureSection);
   setEditingEnabled(false);
   vscode.postMessage({ type: "ready" });
 }
@@ -489,6 +645,7 @@ function handleHostMessage(message: HostToWebviewMessage): void {
       // navigation is refused until the user re-selects (or the "graph" case below
       // re-issues inspectSources for the same node id once the refreshed graph renders).
       selected = undefined; selectedPair = undefined; setEditingEnabled(false);
+      clearSignatureForm();
       if (message.loadReason === "initial") {
         graph = undefined;
         selectedNodeId = undefined;
@@ -591,6 +748,14 @@ function handleHostMessage(message: HostToWebviewMessage): void {
     case "error": byId("action-status").textContent = `Error: ${message.message}`; break;
     case "refreshResult": byId("action-status").textContent = message.ok ? "Refreshed." : `Refresh refused: ${message.reason}`; break;
     case "refreshDeferred": byId("action-status").textContent = `Auto-refresh deferred: ${message.reason}`; break;
+    case "signatureResult":
+      if (message.requestId !== currentSignatureRequestId || message.targetId !== currentTargetId) break;
+      renderSignatureForm(message.parameters, message.cached);
+      break;
+    case "signatureUnavailable":
+      if (message.requestId !== currentSignatureRequestId || message.targetId !== currentTargetId) break;
+      renderSignatureUnavailable(message.reason);
+      break;
   }
 }
 window.addEventListener("message", (event: MessageEvent<HostToWebviewMessage>) => handleHostMessage(event.data));

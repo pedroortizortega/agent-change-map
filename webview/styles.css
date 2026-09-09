@@ -196,3 +196,38 @@ button:disabled { opacity: 0.5; }
 .relationship-popup li + li { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--vscode-widget-border, #444); }
 .relationship-popup p { margin: 6px 0; }
 .relationship-location { font-family: var(--vscode-editor-font-family, monospace); opacity: 0.85; }
+
+#signature-section {
+  border-top: 1px solid var(--vscode-panel-border, #444);
+  margin-top: 8px;
+  padding-top: 8px;
+}
+#signature-form .param-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 4px 0;
+}
+#signature-form .param-row label {
+  min-width: 8em;
+}
+#signature-form textarea.raw-json {
+  font-family: var(--vscode-editor-font-family, monospace);
+  min-width: 16em;
+  min-height: 3em;
+}
+#signature-form .param-error {
+  margin: 0;
+  color: var(--acm-status-removed);
+  min-height: 1em;
+}
+#signature-form[data-state="unavailable"] {
+  opacity: 0.6;
+}
+#signature-status[aria-disabled="true"],
+#signature-form[data-state="unavailable"] {
+  font-style: italic;
+}
+#signature-form-validity:not(:empty) {
+  color: var(--acm-status-removed);
+}
