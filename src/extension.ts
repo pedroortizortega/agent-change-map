@@ -6,7 +6,7 @@ import { resolveRepoRoot, type GitSelection } from "./git/gitService.js";
 import { SnapshotStore } from "./snapshots/snapshotStore.js";
 import { DraftStore } from "./editing/draftStore.js";
 import { performGuardedWrite } from "./editing/writeGuard.js";
-import { runSnippet } from "./execution/dockerRunner.js";
+import { runIntrospection, runSnippet } from "./execution/dockerRunner.js";
 import { ChangeMapSession } from "./webviewHost.js";
 import { ComparisonController, type FileWatcherHandle } from "./comparisonController.js";
 import type { SourceId } from "./protocol.js";
@@ -215,6 +215,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi | undef
         },
         performWrite: performGuardedWrite,
         runSnippet,
+        runIntrospection,
         requestRefresh: () => controllerRef.current!.requestRefresh(),
         onIdle: () => controllerRef.current!.onIdle(),
       });

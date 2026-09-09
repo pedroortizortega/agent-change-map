@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { AnalysisGraph, Edge, Entity, SourceId } from "./protocol.js";
 import type { EdgeVintage } from "../webview/graphView.js";
 import type { SnapshotStore } from "./snapshots/snapshotStore.js";
@@ -6,7 +7,8 @@ import { computeContentHash, createSourceId, resolveSource, StaleSourceError } f
 import type { DraftStore } from "./editing/draftStore.js";
 import type { DirectWriteRequest, WriteEffectPreview, WriteReceipt } from "./editing/writeGuard.js";
 import { WriteConfirmationDeclinedError, WriteGuardError } from "./editing/writeGuard.js";
-import type { RunOptions, RunResult, SnippetSource, SnippetVariant } from "./execution/dockerRunner.js";
+import type { IntrospectionOutcome, IntrospectionParameter, RunOptions, RunResult, SnippetSource, SnippetVariant } from "./execution/dockerRunner.js";
+import { buildIntrospectionDriver } from "./execution/callDriver.js";
 import { isOversized, webviewToHostMessageSchema } from "./webviewProtocol.js";
 import { filterGraph, suppressAncestorSelfReferences, type GraphFilter } from "../webview/graphView.js";
 import type { HostToWebviewMessage } from "./webviewProtocol.js";
@@ -110,6 +112,13 @@ export function buildEdgeVintages(
  * from the other filters' empty-means-all convention). */
 const DEFAULT_VINTAGES: EdgeVintage[] = ["current"];
 
+/** Bounded LRU capacity for the host-side introspection cache (design D4). */
+const INTROSPECTION_CACHE_CAPACITY = 32;
+
+function sha256Hex(content: string): string {
+  return createHash("sha256").update(content, "utf8").digest("hex");
+}
+
 export interface SessionDeps {
   /** Resolved by the extension host, never supplied by a webview message. */
   repoRoot: string;
@@ -120,6 +129,13 @@ export interface SessionDeps {
   openSource: (sourceId: SourceId, side: "left" | "right", content: string) => void | Promise<void>;
   performWrite: (request: DirectWriteRequest) => Promise<WriteReceipt>;
   runSnippet: (source: SnippetSource, options?: RunOptions) => Promise<RunResult>;
+  /**
+   * Runs a synthesized introspection driver program inside the sandbox (design D2). Absent
+   * when Docker is unavailable to this host — `handleRequestSignature` then always replies
+   * `signatureUnavailable` rather than attempting a spawn, mirroring `requestRefresh`'s
+   * optional-dependency convention.
+   */
+  runIntrospection?: (source: SnippetSource, options?: RunOptions) => Promise<IntrospectionOutcome>;
   /**
    * Re-runs capture/diff/analysis for the panel's original selection and re-loads the
    * result. Absent when the session is constructed without refresh support (e.g. a stale
@@ -149,6 +165,9 @@ export class ChangeMapSession {
   private readonly pendingWriteConfirmations = new Map<string, (confirmed: boolean) => void>();
   private readonly pendingRunConfirmations = new Map<string, (confirmed: boolean) => void>();
   private readonly activeRuns = new Map<string, AbortController>();
+  /** Bounded LRU (design D4), insertion order used as recency order: a hit is moved to the
+   * end via delete+re-insert; the oldest (front) entry is evicted once size exceeds the cap. */
+  private readonly introspectionCache = new Map<string, IntrospectionParameter[]>();
 
   private untrackedPaths: string[] = [];
 
@@ -293,6 +312,9 @@ export class ChangeMapSession {
       case "requestRefresh":
         await this.handleRequestRefresh(message.requestId);
         return;
+      case "requestSignature":
+        await this.handleRequestSignature(message.requestId, message.sourceId, message.targetId);
+        return;
     }
   }
 
@@ -318,6 +340,64 @@ export class ChangeMapSession {
       const reason = error instanceof Error ? error.message : String(error);
       this.deps.post({ type: "refreshResult", requestId, ok: false, reason });
     }
+  }
+
+  /**
+   * Resolves the target's signature (design D2/D4): looks up `entity.target` for `targetId`,
+   * resolves the current snippet content for `sourceId` (the freshest unsaved draft, if any,
+   * otherwise the resolved source), and checks the bounded LRU cache keyed
+   * `${targetId}|${sha256(content)}` before spawning a sandboxed introspection round-trip.
+   * Never throws: every failure path (no target metadata, stale source, Docker unavailable,
+   * non-zero exit, malformed `<<ACM>>` frame) replies `signatureUnavailable` instead.
+   */
+  private async handleRequestSignature(requestId: string, sourceId: SourceId, targetId: string): Promise<void> {
+    const target = this.findEntityById(targetId)?.target;
+    if (!target) {
+      this.deps.post({ type: "signatureUnavailable", requestId, targetId, reason: "This selection has no introspectable target." });
+      return;
+    }
+    let content: string;
+    try {
+      content = this.deps.draftStore.get(sourceId)?.content ?? resolveSource(this.deps.store, sourceId);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.deps.post({ type: "signatureUnavailable", requestId, targetId, reason });
+      return;
+    }
+    const cacheKey = `${targetId}|${sha256Hex(content)}`;
+    const cached = this.introspectionCache.get(cacheKey);
+    if (cached) {
+      // Move to most-recently-used.
+      this.introspectionCache.delete(cacheKey);
+      this.introspectionCache.set(cacheKey, cached);
+      this.deps.post({ type: "signatureResult", requestId, targetId, parameters: cached, cached: true });
+      return;
+    }
+    if (!this.deps.runIntrospection) {
+      this.deps.post({ type: "signatureUnavailable", requestId, targetId, reason: "Docker is not available; the input/call form is disabled." });
+      return;
+    }
+    const driver = buildIntrospectionDriver(content, target.dottedName, target.callableKind);
+    const outcome = await this.deps.runIntrospection({ variant: "current", path: sourceId.posixPath, content: driver });
+    if (outcome.kind !== "signatureResult") {
+      this.deps.post({ type: "signatureUnavailable", requestId, targetId, reason: outcome.reason });
+      return;
+    }
+    this.cacheSignature(cacheKey, outcome.parameters);
+    this.deps.post({ type: "signatureResult", requestId, targetId, parameters: outcome.parameters, cached: false });
+  }
+
+  private cacheSignature(key: string, parameters: IntrospectionParameter[]): void {
+    this.introspectionCache.delete(key);
+    this.introspectionCache.set(key, parameters);
+    if (this.introspectionCache.size > INTROSPECTION_CACHE_CAPACITY) {
+      const oldest = this.introspectionCache.keys().next().value;
+      if (oldest !== undefined) this.introspectionCache.delete(oldest);
+    }
+  }
+
+  private findEntityById(id: string): Entity | undefined {
+    return this.right?.nodes.find((node) => node.id === id) ?? this.left?.nodes.find((node) => node.id === id);
   }
 
   private describeBusy(): string {
