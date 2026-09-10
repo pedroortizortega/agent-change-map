@@ -231,3 +231,256 @@ export async function resolveThemeDocument(themeId: string, io: ThemeResolverIO)
   const entryPath = join(contributor.extensionPath, contributor.themePath);
   return resolveIncludeChain(entryPath, io.readFile);
 }
+
+/**
+ * Color extraction, override precedence, and the never-throw degrade path (design D8,
+ * slice 3a-ii). Consumes an already-merged, JSONC-clean theme document produced by
+ * {@link resolveThemeDocument} / {@link resolveIncludeChain} above — this half has no
+ * knowledge of `include`-chain resolution or JSONC stripping.
+ */
+
+/** The identifier/lexer-token roles this feature colors. Kept intentionally small per D7/D8. */
+export type TokenRole =
+  | "self"
+  | "parameter"
+  | "className"
+  | "functionName"
+  | "importedName"
+  | "builtin"
+  | "keyword"
+  | "string"
+  | "comment"
+  | "number";
+
+const ALL_ROLES: readonly TokenRole[] = [
+  "self",
+  "parameter",
+  "className",
+  "functionName",
+  "importedName",
+  "builtin",
+  "keyword",
+  "string",
+  "comment",
+  "number",
+];
+
+/**
+ * Candidate TextMate scopes per role, most-specific first (used only to seed matching -
+ * the actual winner is chosen by longest-prefix/last-rule-wins over the theme's own rule
+ * order, per D8 step 7).
+ */
+const ROLE_SCOPES: Record<TokenRole, readonly string[]> = {
+  self: ["variable.language.self", "variable.language", "variable.parameter"],
+  parameter: ["variable.parameter", "variable"],
+  className: ["entity.name.type.class", "entity.name.type", "support.class"],
+  functionName: ["entity.name.function", "support.function"],
+  importedName: ["variable.other.readwrite.alias", "entity.name.namespace", "variable"],
+  builtin: ["support.function.builtin", "support.type", "support.class"],
+  keyword: ["keyword.control", "keyword"],
+  string: ["string"],
+  comment: ["comment"],
+  number: ["constant.numeric"],
+};
+
+/** Candidate semantic token color keys per role, tried by exact-key lookup only (D8 step 7 -
+ * no selector-specificity engine for modifiers/language suffixes). */
+const ROLE_SEMANTIC_KEYS: Record<TokenRole, readonly string[]> = {
+  self: ["selfParameter", "variable.readonly"],
+  parameter: ["parameter"],
+  className: ["class"],
+  functionName: ["function"],
+  importedName: ["namespace"],
+  builtin: ["function.defaultLibrary", "class.defaultLibrary"],
+  keyword: ["keyword"],
+  string: ["string"],
+  comment: ["comment"],
+  number: ["number"],
+};
+
+/** Kind-based default palette: the terminal fallback for a role that resolves nowhere else. */
+export const DEFAULT_PALETTE: Record<"light" | "dark" | "highContrast", Record<TokenRole, string>> = {
+  dark: {
+    self: "#569CD6",
+    parameter: "#9CDCFE",
+    className: "#4EC9B0",
+    functionName: "#DCDCAA",
+    importedName: "#9CDCFE",
+    builtin: "#4EC9B0",
+    keyword: "#C586C0",
+    string: "#CE9178",
+    comment: "#6A9955",
+    number: "#B5CEA8",
+  },
+  light: {
+    self: "#0000FF",
+    parameter: "#001080",
+    className: "#267F99",
+    functionName: "#795E26",
+    importedName: "#001080",
+    builtin: "#267F99",
+    keyword: "#AF00DB",
+    string: "#A31515",
+    comment: "#008000",
+    number: "#098658",
+  },
+  highContrast: {
+    self: "#3B8EEA",
+    parameter: "#FFFFFF",
+    className: "#4EC9B0",
+    functionName: "#DCDCAA",
+    importedName: "#FFFFFF",
+    builtin: "#4EC9B0",
+    keyword: "#C586C0",
+    string: "#CE9178",
+    comment: "#7CA668",
+    number: "#B5CEA8",
+  },
+};
+
+/** One parsed TextMate rule: the scopes it applies to, and the foreground color it sets. */
+interface TokenColorRule {
+  scopes: readonly string[];
+  foreground: string;
+}
+
+/**
+ * Parses a document's (or an override's) `tokenColors` entries into `{scopes, foreground}`
+ * rules. `scope` may be a single comma-separated string or an array of strings, per the
+ * TextMate theme convention. Returns `[]` when `tokenColors` is absent or is not an array
+ * (e.g. a `.tmTheme` plist *path string*, which this feature does not parse) - callers then
+ * fall through to the next precedence layer instead of throwing.
+ */
+function extractTokenColorRules(source: { tokenColors?: unknown } | undefined): TokenColorRule[] {
+  const raw = source?.tokenColors;
+  if (!Array.isArray(raw)) return [];
+  const rules: TokenColorRule[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const scopeValue = (entry as { scope?: unknown }).scope;
+    const scopes = Array.isArray(scopeValue)
+      ? scopeValue.filter((value): value is string => typeof value === "string")
+      : typeof scopeValue === "string"
+        ? scopeValue.split(",").map((value) => value.trim())
+        : [];
+    const settings = (entry as { settings?: unknown }).settings;
+    const foreground = typeof settings === "object" && settings !== null ? (settings as { foreground?: unknown }).foreground : undefined;
+    if (scopes.length === 0 || typeof foreground !== "string") continue;
+    rules.push({ scopes, foreground });
+  }
+  return rules;
+}
+
+/**
+ * Finds the best-matching rule's foreground color for `candidateScopes`, per D8 step 7:
+ * longest dotted-scope prefix wins; ties broken by last-matching-rule-wins (later entries
+ * in the `tokenColors` array override earlier ones, matching VS Code's own ordering).
+ */
+function matchTokenColorScope(rules: readonly TokenColorRule[], candidateScopes: readonly string[]): string | undefined {
+  let best: { foreground: string; specificity: number; index: number } | undefined;
+  rules.forEach((rule, index) => {
+    for (const ruleScope of rule.scopes) {
+      for (const candidate of candidateScopes) {
+        if (candidate !== ruleScope && !candidate.startsWith(`${ruleScope}.`)) continue;
+        const specificity = ruleScope.split(".").length;
+        if (!best || specificity > best.specificity || (specificity === best.specificity && index > best.index)) {
+          best = { foreground: rule.foreground, specificity, index };
+        }
+      }
+    }
+  });
+  return best?.foreground;
+}
+
+/**
+ * Exact-key lookup only into a semantic-token-color map (either the theme's own
+ * `semanticTokenColors` or the `editor.semanticTokenColorCustomizations.rules` override) -
+ * no selector-specificity engine for modifiers/language suffixes, per D8 step 7's
+ * deliberate accuracy ceiling. A matched entry may be a bare color string or a
+ * `{ foreground }` object, per VS Code's own semantic token color schema.
+ */
+function matchSemanticTokenColor(semanticColors: Record<string, unknown>, candidateKeys: readonly string[]): string | undefined {
+  for (const key of candidateKeys) {
+    const entry = semanticColors[key];
+    if (typeof entry === "string") return entry;
+    if (typeof entry === "object" && entry !== null && typeof (entry as { foreground?: unknown }).foreground === "string") {
+      return (entry as { foreground: string }).foreground;
+    }
+  }
+  return undefined;
+}
+
+function asSemanticColorMap(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+}
+
+/** Highest-precedence overrides, sourced from workspace configuration (design D8 step 6). */
+export interface ThemeOverrides {
+  /** Raw value of `editor.semanticTokenColorCustomizations` (its `.rules` object is used). */
+  semanticTokenColorCustomizations?: unknown;
+  /** The `workbench.colorCustomizations.textMateRules` array, already extracted by the caller. */
+  colorCustomizationsTextMateRules?: unknown;
+}
+
+export interface ThemeTokens {
+  kind: "light" | "dark" | "highContrast";
+  colors: Record<TokenRole, string>;
+}
+
+/**
+ * Maps a resolved theme document to per-role colors, in the precedence order design D8
+ * mandates: `editor.semanticTokenColorCustomizations` override -> `workbench.
+ * colorCustomizations.textMateRules` override -> theme `semanticTokenColors` -> theme
+ * `tokenColors` scope fallback -> kind-based default palette. Never throws: an absent or
+ * malformed `themeDocument` (e.g. `undefined`, or a `tokenColors` plist path string)
+ * simply yields fewer matches, falling through to the default palette for those roles.
+ */
+export function resolveTokenColors(
+  themeDocument: Record<string, unknown> | undefined,
+  kind: "light" | "dark" | "highContrast",
+  overrides: ThemeOverrides = {},
+): ThemeTokens {
+  const palette = DEFAULT_PALETTE[kind];
+  const themeTokenColorRules = extractTokenColorRules(themeDocument);
+  const themeSemanticColors = asSemanticColorMap(themeDocument?.semanticTokenColors);
+  const overrideSemanticColors = asSemanticColorMap(
+    typeof overrides.semanticTokenColorCustomizations === "object" && overrides.semanticTokenColorCustomizations !== null
+      ? (overrides.semanticTokenColorCustomizations as { rules?: unknown }).rules
+      : undefined,
+  );
+  const overrideTokenColorRules = extractTokenColorRules({ tokenColors: overrides.colorCustomizationsTextMateRules });
+
+  const colors = {} as Record<TokenRole, string>;
+  for (const role of ALL_ROLES) {
+    colors[role] =
+      matchSemanticTokenColor(overrideSemanticColors, ROLE_SEMANTIC_KEYS[role]) ??
+      matchTokenColorScope(overrideTokenColorRules, ROLE_SCOPES[role]) ??
+      matchSemanticTokenColor(themeSemanticColors, ROLE_SEMANTIC_KEYS[role]) ??
+      matchTokenColorScope(themeTokenColorRules, ROLE_SCOPES[role]) ??
+      palette[role];
+  }
+  return { kind, colors };
+}
+
+export interface ThemeResolutionInput {
+  themeId: string;
+  kind: "light" | "dark" | "highContrast";
+  io: ThemeResolverIO;
+  overrides?: ThemeOverrides;
+}
+
+/**
+ * The never-throw entry point (design D8's "total and silent-to-the-user-but-logged"
+ * degradation contract): resolves the theme document and extracts colors, but any failure
+ * anywhere in that pipeline - theme not found, extension disabled mid-session, malformed
+ * JSON, an `include` cycle/depth overflow, a plist-path `tokenColors` - degrades to the
+ * full kind-based default palette rather than throwing or rejecting.
+ */
+export async function resolveThemeTokens(input: ThemeResolutionInput): Promise<ThemeTokens> {
+  try {
+    const document = await resolveThemeDocument(input.themeId, input.io);
+    return resolveTokenColors(document, input.kind, input.overrides);
+  } catch {
+    return { kind: input.kind, colors: { ...DEFAULT_PALETTE[input.kind] } };
+  }
+}
