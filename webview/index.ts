@@ -4,7 +4,7 @@ import { type Point, type Rect } from "./edgeGeometry.js";
 import { PositionOverrides, type Offset } from "./positionOverrides.js";
 import type { HostToWebviewMessage, WebviewToHostMessage } from "../src/webviewProtocol.js";
 import type { AnalysisGraph, Entity, SourceId } from "../src/protocol.js";
-import type { IntrospectionParameter, SnippetVariant } from "../src/execution/dockerRunner.js";
+import type { IntrospectionParameter, RunResult, SnippetVariant } from "../src/execution/dockerRunner.js";
 import type { DiffOp } from "../src/diff/lineDiff.js";
 
 /** Consecutive `unchanged` ops at or above this length collapse behind a click-to-expand summary. */
@@ -21,7 +21,7 @@ let selected: SourceId | undefined;
 let selectedPair: { left?: SourceId; right?: SourceId } | undefined;
 let nextId = 0;
 let activeRun: string | undefined;
-let pendingAction: { type: "confirmRun" | "confirmDirectWrite"; requestId: string } | undefined;
+let pendingAction: { type: "confirmRun" | "confirmDirectWrite" | "confirmCall"; requestId: string } | undefined;
 let editingEnabled = false;
 let initialized = false;
 /** The `targetId` (entity id) and `requestId` of the most recently issued `requestSignature`,
@@ -30,8 +30,11 @@ let initialized = false;
 let currentTargetId: string | undefined;
 let currentSignatureRequestId: string | undefined;
 /** Names of raw-JSON parameter fields currently holding unparseable text; a non-empty set
- * blocks the (not-yet-implemented, slice 2) call action. */
+ * blocks the call action. */
 const invalidRawJsonParams = new Set<string>();
+/** The parameters of the currently rendered signature form, used to gather call args by
+ * name/widget shape when the "Call function" button is clicked. */
+let currentParameters: IntrospectionParameter[] = [];
 
 function byId<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -58,8 +61,9 @@ function updateEffectActionAvailability(): void {
   const disabled = !editingEnabled || !!pendingAction || !!activeRun;
   byId<HTMLButtonElement>("write-snippet").disabled = disabled;
   byId<HTMLButtonElement>("request-run").disabled = disabled;
+  updateCallAvailability();
 }
-function reserveAction(type: "confirmRun" | "confirmDirectWrite", requestId: string): boolean {
+function reserveAction(type: "confirmRun" | "confirmDirectWrite" | "confirmCall", requestId: string): boolean {
   if (pendingAction) return false;
   pendingAction = { type, requestId };
   updateEffectActionAvailability();
@@ -400,6 +404,7 @@ function widgetFor(param: Pick<IntrospectionParameter, "annotation" | "kind">): 
 
 function updateSignatureValidity(): void {
   byId("signature-form-validity").textContent = invalidRawJsonParams.size > 0 ? "Fix invalid JSON before calling." : "";
+  updateCallAvailability();
 }
 
 function validateRawJson(name: string, textarea: HTMLTextAreaElement): void {
@@ -472,31 +477,88 @@ function parameterRow(param: IntrospectionParameter): HTMLDivElement {
 
 function clearSignatureForm(): void {
   currentSignatureRequestId = undefined;
+  currentParameters = [];
   invalidRawJsonParams.clear();
   const form = byId("signature-form");
   form.textContent = "";
   form.removeAttribute("data-state");
   byId("signature-status").textContent = "";
   byId("signature-form-validity").textContent = "";
+  updateCallAvailability();
 }
 
 function renderSignatureForm(parameters: IntrospectionParameter[], cached: boolean): void {
   invalidRawJsonParams.clear();
+  currentParameters = parameters;
   const form = byId("signature-form");
   form.textContent = "";
   form.removeAttribute("data-state");
   for (const param of parameters) form.append(parameterRow(param));
   byId("signature-status").textContent = `${parameters.length} parameter(s)${cached ? " (cached)" : ""}.`;
   updateSignatureValidity();
+  updateCallAvailability();
 }
 
 function renderSignatureUnavailable(reason: string): void {
   invalidRawJsonParams.clear();
+  currentParameters = [];
   const form = byId("signature-form");
   form.textContent = "";
   form.setAttribute("data-state", "unavailable");
   byId("signature-status").textContent = `Signature unavailable: ${reason}`;
   byId("signature-form-validity").textContent = "";
+  updateCallAvailability();
+}
+
+/** Enabled only when a target is selected with a rendered (available) signature form,
+ * no invalid raw-JSON field, and no other confirmation/run currently pending. */
+function updateCallAvailability(): void {
+  const unavailable = byId("signature-form").getAttribute("data-state") === "unavailable";
+  const disabled = !currentTargetId || unavailable || invalidRawJsonParams.size > 0 || !!pendingAction || !!activeRun;
+  byId<HTMLButtonElement>("call-function").disabled = disabled;
+}
+
+/** Reads the current widget-rendered value for one parameter out of the signature form,
+ * per the widget mapping table: numbers/text/checkboxes read directly off their input;
+ * `Optional[X]` reads `null` when its toggle is unchecked, otherwise `X`'s own widget
+ * value; raw-JSON textareas are `JSON.parse`d (already validated not to be invalid by
+ * `invalidRawJsonParams`) - an empty raw-JSON/optional-off/empty-number field is omitted
+ * from the args object entirely (`undefined`), leaving the target's own default in play. */
+function valueForWidget(widget: Widget, name: string): unknown {
+  if (widget.kind === "number") {
+    const el = document.querySelector<HTMLInputElement>(`[data-param="${name}"]`)!;
+    return el.value === "" ? undefined : Number(el.value);
+  }
+  if (widget.kind === "text") {
+    const el = document.querySelector<HTMLInputElement>(`[data-param="${name}"]`)!;
+    return el.value;
+  }
+  if (widget.kind === "checkbox") {
+    const el = document.querySelector<HTMLInputElement>(`[data-param="${name}"]`)!;
+    return el.checked;
+  }
+  if (widget.kind === "raw-json") {
+    const el = document.querySelector<HTMLTextAreaElement>(`[data-param="${name}"]`)!;
+    const text = el.value.trim();
+    return text === "" ? undefined : JSON.parse(text);
+  }
+  const toggle = document.querySelector<HTMLInputElement>(`[data-param-toggle="${name}"]`)!;
+  if (!toggle.checked) return null;
+  return valueForWidget(widget.inner, name);
+}
+
+/** Gathers the current form's values into a plain args object keyed by parameter name,
+ * omitting any parameter whose widget produced `undefined` (no value supplied). Returns
+ * `undefined` instead of a partial object when any raw-JSON field currently holds
+ * unparseable text - the caller must not send a call in that state. */
+function gatherArgs(): Record<string, unknown> | undefined {
+  if (invalidRawJsonParams.size > 0) return undefined;
+  const args: Record<string, unknown> = {};
+  for (const param of currentParameters) {
+    const value = valueForWidget(widgetFor(param), param.name);
+    if (value !== undefined) args[param.name] = value;
+  }
+  return args;
 }
 
 /** Issues `requestSignature` for the just-selected node's target (design D2/D4), if any.
@@ -612,11 +674,26 @@ function initialize(): void {
   const signatureForm = document.createElement("div"); signatureForm.id = "signature-form";
   const signatureValidity = document.createElement("p"); signatureValidity.id = "signature-form-validity"; signatureValidity.setAttribute("role", "status");
   signatureSection.append(signatureStatus, signatureForm, signatureValidity);
-  document.body.append(actions, editorLabel, editor, save, write, variants, run, cancel, confirmation, status, output, signatureSection);
+  const callSection = document.createElement("section"); callSection.id = "call-box";
+  const callButton = button("call-function", "Call function", () => {
+    if (pendingAction || activeRun || !currentTargetId) return;
+    const args = gatherArgs();
+    if (!args) return;
+    const sourceId = selectedPair?.right ?? selectedPair?.left;
+    if (!sourceId) return;
+    const requestId = `call-${++nextId}`;
+    if (!reserveAction("confirmCall", requestId)) return;
+    byId("call-result").textContent = "";
+    vscode.postMessage({ type: "requestCall", requestId, sourceId, targetId: currentTargetId, args });
+  });
+  const callStatus = document.createElement("p"); callStatus.id = "call-status"; callStatus.setAttribute("role", "status");
+  const callResult = document.createElement("pre"); callResult.id = "call-result"; callResult.setAttribute("aria-live", "polite");
+  callSection.append(callButton, callStatus, callResult);
+  document.body.append(actions, editorLabel, editor, save, write, variants, run, cancel, confirmation, status, output, signatureSection, callSection);
   setEditingEnabled(false);
   vscode.postMessage({ type: "ready" });
 }
-function confirmAction(type: "confirmRun" | "confirmDirectWrite", requestId: string, description: string): void {
+function confirmAction(type: "confirmRun" | "confirmDirectWrite" | "confirmCall", requestId: string, description: string): void {
   if (!pendingAction || pendingAction.type !== type || pendingAction.requestId !== requestId) return;
   const container = byId("confirmation"); container.textContent = "";
   const preview = document.createElement("pre"); preview.textContent = description;
@@ -625,8 +702,8 @@ function confirmAction(type: "confirmRun" | "confirmDirectWrite", requestId: str
     if (responded) return;
     responded = true;
     container.textContent = "";
-    if (type === "confirmRun" && !confirmed) {
-      activeRun = undefined;
+    if ((type === "confirmRun" || type === "confirmCall") && !confirmed) {
+      if (type === "confirmRun") activeRun = undefined;
       clearPendingAction(requestId);
     } else {
       container.textContent = "Waiting for result…";
@@ -635,6 +712,22 @@ function confirmAction(type: "confirmRun" | "confirmDirectWrite", requestId: str
   };
   container.append(preview, button("confirm-action", "Confirm", () => respond(true)), button("decline-action", "Decline", () => respond(false)));
 }
+/** Renders a call outcome the same way `runResult` renders a snippet run result -
+ * success/failure/timeout/cancelled, with captured output - plus the decoded return
+ * value's repr when the call succeeded and the `<<ACM>>` frame parsed. */
+function renderCallResult(result: RunResult, returnRepr?: string): void {
+  const el = byId("call-result");
+  if (result.kind === "success" || result.kind === "failure") {
+    const label = result.kind === "success" ? "Success" : "Failure";
+    const repr = result.kind === "success" && returnRepr !== undefined ? ` (returned ${returnRepr})` : "";
+    el.append(document.createTextNode(`${label}${repr} (exit code ${result.exitCode})\n${result.stdout}${result.stderr}`));
+  } else if (result.kind === "timeout") {
+    el.append(document.createTextNode(`Timeout (after ${result.timeoutMs}ms)\n${result.stdout}${result.stderr}`));
+  } else {
+    el.append(document.createTextNode(`${result.kind}`));
+  }
+}
+
 function handleHostMessage(message: HostToWebviewMessage): void {
   initialize();
   switch (message.type) {
@@ -738,7 +831,13 @@ function handleHostMessage(message: HostToWebviewMessage): void {
     case "directWritePreview": confirmAction("confirmDirectWrite", message.requestId, `Write to ${message.preview.path}\nDestructive: ${message.preview.isDestructive}\nBefore (complete file):\n${message.preview.previousContent}\nAfter (complete file):\n${message.preview.nextContent}`); break;
     case "directWriteResult": clearPendingAction(message.requestId); byId("confirmation").textContent = ""; byId("action-status").textContent = message.ok ? `Written: ${message.path}` : `Write refused: ${message.reason}`; break;
     case "runConfirmationRequired": confirmAction("confirmRun", message.requestId, `Run ${message.variants.join(", ")} in Docker? No network; read-only root; no host mounts; non-root user; CPU/memory/PID/time/output limits.\n${(message.sources ?? []).map(source => `${source.variant}: ${source.path ?? "unavailable"}\n${source.content ?? "No saved source"}`).join("\n")}`); break;
-    case "runEvent": if (message.requestId === activeRun) byId("run-output").append(document.createTextNode(`[${message.seq} ${message.variant} ${message.channel}] ${message.data}\n`)); break;
+    case "runEvent":
+      if (message.requestId === activeRun) {
+        byId("run-output").append(document.createTextNode(`[${message.seq} ${message.variant} ${message.channel}] ${message.data}\n`));
+      } else if (pendingAction?.type === "confirmCall" && pendingAction.requestId === message.requestId) {
+        byId("call-result").append(document.createTextNode(`[${message.seq} ${message.channel}] ${message.data}\n`));
+      }
+      break;
     case "runResult": if (message.requestId === activeRun) { byId("run-output").append(document.createTextNode(message.results.map(result => {
       if (result.kind === "success" || result.kind === "failure") return `${result.variant}: ${result.kind} (exit code ${result.exitCode})`;
       if (result.kind === "timeout") return `${result.variant}: timeout (after ${result.timeoutMs}ms)`;
@@ -755,6 +854,15 @@ function handleHostMessage(message: HostToWebviewMessage): void {
     case "signatureUnavailable":
       if (message.requestId !== currentSignatureRequestId || message.targetId !== currentTargetId) break;
       renderSignatureUnavailable(message.reason);
+      break;
+    case "callConfirmationRequired":
+      confirmAction("confirmCall", message.requestId, `Call ${message.dottedName} with args:\n${message.argsPreview}`);
+      break;
+    case "callResult":
+      clearPendingAction(message.requestId);
+      byId("confirmation").textContent = "";
+      renderCallResult(message.result, message.returnRepr);
+      updateEffectActionAvailability();
       break;
   }
 }

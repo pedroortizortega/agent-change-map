@@ -771,3 +771,94 @@ describe("signature introspection parameter form", () => {
     expect(dom.window.document.querySelectorAll('#signature-form input, #signature-form textarea')).toHaveLength(0);
   });
 });
+
+describe("call function box", () => {
+  function targetGraph(): AnalysisGraph {
+    return {
+      snapshot,
+      nodes: [{ id: "function:f", kind: "function", qualifiedName: "f", span: node.span, target: { module: "m", dottedName: "f", callableKind: "function" } }],
+      edges: [],
+      diagnostics: [],
+    };
+  }
+
+  function withIntrospectionAndCall(
+    parameters: { name: string; kind?: string; annotation?: string | null; defaultRepr?: string | null; required?: boolean }[],
+    callImpl?: ReturnType<typeof vi.fn>,
+  ) {
+    const introspection = vi.fn().mockResolvedValue({ kind: "signatureResult", parameters });
+    const call = callImpl ?? vi.fn();
+    session = new ChangeMapSession({
+      repoRoot: "/repo",
+      store: new SnapshotStore(),
+      draftStore: new DraftStore(),
+      openSource: vi.fn(),
+      performWrite: vi.fn(),
+      runSnippet: vi.fn(),
+      runIntrospection: introspection,
+      runCall: call,
+      post: message => dom.window.dispatchEvent(new dom.window.MessageEvent("message", { data: message })),
+    });
+    (session as unknown as { deps: { store: SnapshotStore } }).deps.store.store({ snapshot, files: [{ path: "m.py", content: "def f(x):\n    return x\n", provenance: "tracked" }] });
+    session.loadComparison(undefined, targetGraph(), []);
+    return { introspection, call };
+  }
+
+  it("shows a confirm step with the exact args JSON preview before any requestCall triggers a spawn", async () => {
+    const { call } = withIntrospectionAndCall([{ name: "x", kind: "POSITIONAL_OR_KEYWORD", annotation: "int", required: true }]);
+    click('[data-node-id="function:f"]');
+    await vi.waitFor(() => expect(dom.window.document.querySelector('[data-param="x"]')).not.toBeNull());
+
+    element<HTMLInputElement>('[data-param="x"]').value = "5";
+    click('#call-function');
+
+    await vi.waitFor(() => expect(element('#confirmation').textContent).toContain('"x"'));
+    expect(element('#confirmation').textContent).toContain("5");
+    expect(call).not.toHaveBeenCalled();
+    expect(intents.some(m => m.type === "confirmCall")).toBe(false);
+  });
+
+  it("performs no invocation when the call confirmation is declined", async () => {
+    const { call } = withIntrospectionAndCall([{ name: "x", kind: "POSITIONAL_OR_KEYWORD", annotation: "int", required: true }]);
+    click('[data-node-id="function:f"]');
+    await vi.waitFor(() => expect(dom.window.document.querySelector('[data-param="x"]')).not.toBeNull());
+
+    element<HTMLInputElement>('[data-param="x"]').value = "5";
+    click('#call-function');
+    await vi.waitFor(() => expect(element('#confirmation').textContent).toContain('"x"'));
+    click('#decline-action');
+
+    expect(call).not.toHaveBeenCalled();
+    expect(intents.some(m => m.type === "confirmCall" && (m as { confirmed: boolean }).confirmed)).toBe(false);
+    expect(intents.some(m => m.type === "confirmCall" && (m as { confirmed: boolean }).confirmed === true)).toBe(false);
+  });
+
+  it("renders a successful callResult with the return repr", async () => {
+    const call = vi.fn().mockResolvedValue({ result: { variant: "current", kind: "success", exitCode: 0, stdout: "", stderr: "" }, returnRepr: "5" });
+    withIntrospectionAndCall([{ name: "x", kind: "POSITIONAL_OR_KEYWORD", annotation: "int", required: true }], call);
+    click('[data-node-id="function:f"]');
+    await vi.waitFor(() => expect(dom.window.document.querySelector('[data-param="x"]')).not.toBeNull());
+
+    element<HTMLInputElement>('[data-param="x"]').value = "5";
+    click('#call-function');
+    await vi.waitFor(() => expect(element('#confirmation').textContent).toContain('"x"'));
+    click('#confirm-action');
+
+    await vi.waitFor(() => expect(element('#call-result').textContent).toContain("5"));
+    expect(call).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders a failing callResult with the captured error output", async () => {
+    const call = vi.fn().mockResolvedValue({ result: { variant: "current", kind: "failure", exitCode: 1, stdout: "", stderr: "boom" } });
+    withIntrospectionAndCall([{ name: "x", kind: "POSITIONAL_OR_KEYWORD", annotation: "int", required: true }], call);
+    click('[data-node-id="function:f"]');
+    await vi.waitFor(() => expect(dom.window.document.querySelector('[data-param="x"]')).not.toBeNull());
+
+    element<HTMLInputElement>('[data-param="x"]').value = "5";
+    click('#call-function');
+    await vi.waitFor(() => expect(element('#confirmation').textContent).toContain('"x"'));
+    click('#confirm-action');
+
+    await vi.waitFor(() => expect(element('#call-result').textContent).toContain("boom"));
+  });
+});

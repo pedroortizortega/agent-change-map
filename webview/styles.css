@@ -231,3 +231,13 @@ button:disabled { opacity: 0.5; }
 #signature-form-validity:not(:empty) {
   color: var(--acm-status-removed);
 }
+
+#call-box {
+  border-top: 1px solid var(--vscode-panel-border, #444);
+  margin-top: 8px;
+  padding-top: 8px;
+}
+#call-result {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
