@@ -443,6 +443,44 @@ export async function runIntrospection(source: SnippetSource, options: RunOption
 }
 
 /**
+ * The outcome of a `runCall()` invocation. `result` always carries the full
+ * {@link RunResult} - same shape as an ordinary snippet run, including `success`/
+ * `failure`/`timeout`/`cancelled` - so a raised exception surfaces exactly like a run
+ * failure (captured stderr, non-zero exit). `returnRepr` is present only when the run
+ * succeeded and the `<<ACM>>` sentinel frame parsed as a well-formed call result.
+ */
+export interface CallOutcome {
+  result: RunResult;
+  returnRepr?: string;
+}
+
+function isCallFrame(value: unknown): value is { ok: true; repr: string } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as { ok?: unknown }).ok === true &&
+    typeof (value as { repr?: unknown }).repr === "string"
+  );
+}
+
+/**
+ * Thin wrapper over {@link runSnippet}: same hardened argv, same sandbox flags, same
+ * `assertEligibleForExecution` pre-spawn guard, ordinary {@link DEFAULT_RUN_LIMITS}
+ * timeout (a call may legitimately take longer than a 5s introspection round-trip).
+ * Never throws on a malformed or absent `<<ACM>>` frame; that shape is simply reported
+ * without a `returnRepr`, leaving `result` (success/failure/timeout/cancelled) as the
+ * authoritative outcome - a target that raised inside the driver surfaces as an ordinary
+ * `failure` result with its captured stderr, not a thrown error from this function.
+ */
+export async function runCall(source: SnippetSource, options: RunOptions = {}): Promise<CallOutcome> {
+  const result = await runSnippet(source, options);
+  if (result.kind !== "success") return { result };
+  const frame = parseAcmFrame(result.stdout);
+  if (!isCallFrame(frame)) return { result };
+  return { result, returnRepr: frame.repr };
+}
+
+/**
  * Runs each available variant under equivalent restrictions and labels every result by
  * variant. A variant with no source is reported as `unavailable` rather than being
  * synthesized or silently skipped.

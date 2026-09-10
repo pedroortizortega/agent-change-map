@@ -24,7 +24,13 @@ function makeStore(): SnapshotStore {
 
 function makeDeps(
   store: SnapshotStore,
-  overrides: { requestRefresh?: () => Promise<void>; onIdle?: () => void; runIntrospection?: ReturnType<typeof vi.fn>; draftStore?: DraftStore } = {},
+  overrides: {
+    requestRefresh?: () => Promise<void>;
+    onIdle?: () => void;
+    runIntrospection?: ReturnType<typeof vi.fn>;
+    runCall?: ReturnType<typeof vi.fn>;
+    draftStore?: DraftStore;
+  } = {},
 ) {
   const posted: HostToWebviewMessage[] = [];
   const openSource = vi.fn();
@@ -50,6 +56,10 @@ function entity(id: string, qualifiedName: string): Entity {
 
 function targetEntity(id: string, qualifiedName: string, dottedName = qualifiedName): Entity {
   return { id, kind: "function", qualifiedName, span, target: { module: "m", dottedName, callableKind: "function" } };
+}
+
+function classTargetEntity(id: string, qualifiedName: string, dottedName = qualifiedName): Entity {
+  return { id, kind: "class", qualifiedName, span, target: { module: "m", dottedName, callableKind: "class" } };
 }
 
 describe("mergeGraphsForDisplay", () => {
@@ -463,6 +473,88 @@ describe("ChangeMapSession signature introspection cache", () => {
     await session.handleIntent({ type: "requestSignature", requestId: "s1", sourceId, targetId: "function:f" });
     expect(posted.at(-1)).toMatchObject({ type: "signatureUnavailable", requestId: "s1", targetId: "function:f" });
     expect((posted.at(-1) as { reason: string }).reason).toEqual(expect.any(String));
+  });
+});
+
+describe("ChangeMapSession call function", () => {
+  function loadTargetGraph(session: ChangeMapSession, id = "function:f", dottedName = "f"): void {
+    const right: AnalysisGraph = { snapshot: rightSnapshot, nodes: [targetEntity(id, "f", dottedName)], edges: [], diagnostics: [] };
+    session.loadComparison(undefined, right, []);
+  }
+
+  function loadClassTargetGraph(session: ChangeMapSession, id = "class:Widget", dottedName = "Widget"): void {
+    const right: AnalysisGraph = { snapshot: rightSnapshot, nodes: [classTargetEntity(id, "Widget", dottedName)], edges: [], diagnostics: [] };
+    session.loadComparison(undefined, right, []);
+  }
+
+  function sourceIdFor(): import("../../src/protocol.js").SourceId {
+    return createSourceId(rightSnapshot, "m.py", content, 0, content.length);
+  }
+
+  it("requires an explicit confirmCall before invoking Docker, independent of any confirmRun state", async () => {
+    const store = makeStore();
+    const runCall = vi.fn();
+    const { session, posted } = makeDeps(store, { runCall });
+    loadTargetGraph(session);
+    const sourceId = sourceIdFor();
+    posted.length = 0;
+
+    await session.handleIntent({ type: "requestCall", requestId: "c1", sourceId, targetId: "function:f", args: { x: 1 } });
+
+    expect(posted.map((m) => m.type)).toEqual(["callConfirmationRequired"]);
+    expect(runCall).not.toHaveBeenCalled();
+  });
+
+  it("spawns no container and executes no code when the call confirmation is declined", async () => {
+    const store = makeStore();
+    const runCall = vi.fn();
+    const { session, posted } = makeDeps(store, { runCall });
+    loadTargetGraph(session);
+    const sourceId = sourceIdFor();
+
+    await session.handleIntent({ type: "requestCall", requestId: "c2", sourceId, targetId: "function:f", args: { x: 1 } });
+    await session.handleIntent({ type: "confirmCall", requestId: "c2", confirmed: false });
+
+    expect(runCall).not.toHaveBeenCalled();
+    expect(posted.at(-1)).toEqual({ type: "error", message: "Call declined for request c2" });
+  });
+
+  it("builds the call driver with the decoded args and posts callResult once confirmed", async () => {
+    const store = makeStore();
+    const result: RunResult = { variant: "current", kind: "success", exitCode: 0, stdout: "", stderr: "" };
+    const runCall = vi.fn().mockResolvedValue({ result, returnRepr: "3" });
+    const { session, posted } = makeDeps(store, { runCall });
+    loadTargetGraph(session);
+    const sourceId = sourceIdFor();
+
+    await session.handleIntent({ type: "requestCall", requestId: "c3", sourceId, targetId: "function:f", args: { x: 2 } });
+    await session.handleIntent({ type: "confirmCall", requestId: "c3", confirmed: true });
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 0));
+
+    expect(runCall).toHaveBeenCalledTimes(1);
+    const [source] = runCall.mock.calls[0]!;
+    expect((source as SnippetSource).content).toContain("_t(**_ARGS)");
+    expect(posted.at(-1)).toEqual({ type: "callResult", requestId: "c3", result, returnRepr: "3" });
+  });
+
+  it("constructs a class instance via the __init__ driver path end-to-end through the host", async () => {
+    const store = makeStore();
+    const result: RunResult = { variant: "current", kind: "success", exitCode: 0, stdout: "", stderr: "" };
+    const runCall = vi.fn().mockResolvedValue({ result, returnRepr: "<Widget object>" });
+    const { session, posted } = makeDeps(store, { runCall });
+    loadClassTargetGraph(session);
+    const sourceId = sourceIdFor();
+
+    await session.handleIntent({ type: "requestCall", requestId: "c4", sourceId, targetId: "class:Widget", args: { name: "a" } });
+    expect(posted.at(-1)).toMatchObject({ type: "callConfirmationRequired", dottedName: "Widget" });
+
+    await session.handleIntent({ type: "confirmCall", requestId: "c4", confirmed: true });
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 0));
+
+    expect(runCall).toHaveBeenCalledTimes(1);
+    const [source] = runCall.mock.calls[0]!;
+    expect((source as SnippetSource).content).toContain("_t(**_ARGS)");
+    expect(posted.at(-1)).toEqual({ type: "callResult", requestId: "c4", result, returnRepr: "<Widget object>" });
   });
 });
 

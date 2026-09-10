@@ -76,6 +76,44 @@ describe("webview protocol", () => {
     expect(unavailable.reason).toContain("Docker");
   });
 
+  it("accepts a well-formed requestCall intent", () => {
+    expect(() => webviewToHostMessageSchema.parse({ type: "requestCall", requestId: "r1", sourceId, targetId: "function:a", args: { x: 1 } })).not.toThrow();
+  });
+
+  it("rejects a requestCall intent whose args carries an overlong key", () => {
+    const overlongKey = "k".repeat(257);
+    expect(() =>
+      webviewToHostMessageSchema.parse({ type: "requestCall", requestId: "r1", sourceId, targetId: "function:a", args: { [overlongKey]: 1 } }),
+    ).toThrow();
+  });
+
+  it("accepts a well-formed confirmCall intent", () => {
+    expect(() => webviewToHostMessageSchema.parse({ type: "confirmCall", requestId: "r1", confirmed: true })).not.toThrow();
+  });
+
+  it("requires an explicit confirmed boolean for confirmCall", () => {
+    expect(() => webviewToHostMessageSchema.parse({ type: "confirmCall", requestId: "r1" })).toThrow();
+  });
+
+  it("round-trips callConfirmationRequired and callResult as HostToWebviewMessage variants", () => {
+    const confirmationRequired: Extract<HostToWebviewMessage, { type: "callConfirmationRequired" }> = {
+      type: "callConfirmationRequired",
+      requestId: "r1",
+      dottedName: "Widget",
+      argsPreview: '{\n  "name": "a"\n}',
+    };
+    expect(confirmationRequired.dottedName).toBe("Widget");
+
+    const result: Extract<HostToWebviewMessage, { type: "callResult" }> = {
+      type: "callResult",
+      requestId: "r1",
+      result: { variant: "current", kind: "success", exitCode: 0, stdout: "", stderr: "" },
+      returnRepr: "1",
+    };
+    expect(result.result.kind).toBe("success");
+    expect(result.returnRepr).toBe("1");
+  });
+
   it("carries a shared ops sequence on sourcePair and drops per-source affectedLines", () => {
     const message: Extract<HostToWebviewMessage, { type: "sourcePair" }> = {
       type: "sourcePair",

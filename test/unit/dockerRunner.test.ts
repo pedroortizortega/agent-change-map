@@ -11,6 +11,7 @@ import {
   assertEligibleForExecution,
   resolveIntrospectionLimits,
   runIntrospection,
+  runCall,
   killAndVerifyContainer,
   type ContainerCleanupBudget,
   type ContainerCleanupDeps,
@@ -180,5 +181,79 @@ describe("runIntrospection", () => {
 
   it("still enforces assertEligibleForExecution as the pre-spawn guard (not weakened)", () => {
     expect(() => assertEligibleForExecution({ path: "README.sh" })).toThrow();
+  });
+});
+
+describe("runCall", () => {
+  it("delegates to the same hardened argv builder as runSnippet (no new sandbox invocation path)", async () => {
+    spawn.mockClear();
+    const child = makeChild();
+    spawn.mockReturnValue(child);
+
+    const pending = runCall({ variant: "current", path: "m.py", content: "def f(): pass" });
+    child.emit("close", 0);
+    await pending;
+
+    expect(spawn).toHaveBeenCalledTimes(1);
+    const [command, args, spawnOptions] = spawn.mock.calls[0];
+    expect(command).toBe("docker");
+    expect(args).toEqual(
+      expect.arrayContaining(["run", "--rm", "-i", "--network", "none", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges"]),
+    );
+    expect(args.slice(-3)).toEqual(["python3", "-u", "-"]);
+    expect(spawnOptions).toMatchObject({ shell: false });
+  });
+
+  it("rejects a non-.py target before any container spawn", async () => {
+    spawn.mockClear();
+
+    await expect(runCall({ variant: "current", path: "requirements.txt", content: "flask==1.0" })).rejects.toThrow();
+
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it("parses a successful <<ACM>> call frame into a call result with the return repr", async () => {
+    const child = makeChild();
+    spawn.mockReturnValue(child);
+
+    const pending = runCall({ variant: "current", path: "m.py", content: "def f(): return 1" });
+    child.stdout.emit("data", Buffer.from('<<ACM>>{"ok":true,"repr":"1"}\n'));
+    child.emit("close", 0);
+
+    const outcome = await pending;
+    expect(outcome.result.kind).toBe("success");
+    expect(outcome.returnRepr).toBe("1");
+  });
+
+  it("preserves interleaved runEvent stdout lines around the <<ACM>> frame instead of swallowing them", async () => {
+    const child = makeChild();
+    spawn.mockReturnValue(child);
+    const streamed: string[] = [];
+
+    const pending = runCall(
+      { variant: "current", path: "m.py", content: "def f(): return 1" },
+      { onOutput: (_channel, data) => streamed.push(data) },
+    );
+    child.stdout.emit("data", Buffer.from('before\n<<ACM>>{"ok":true,"repr":"1"}\nafter\n'));
+    child.emit("close", 0);
+
+    await pending;
+    expect(streamed.join("")).toContain("before");
+    expect(streamed.join("")).toContain("after");
+  });
+
+  it("reports a failing call (target raised inside the driver) as a failure result with captured error output", async () => {
+    const child = makeChild();
+    spawn.mockReturnValue(child);
+
+    const pending = runCall({ variant: "current", path: "m.py", content: "def f(): raise ValueError('boom')" });
+    child.stderr.emit("data", Buffer.from("Traceback (most recent call last):\nValueError: boom\n"));
+    child.emit("close", 1);
+
+    const outcome = await pending;
+    expect(outcome.result.kind).toBe("failure");
+    if (outcome.result.kind !== "failure") throw new Error("expected a failure result");
+    expect(outcome.result.stderr).toContain("boom");
+    expect(outcome.returnRepr).toBeUndefined();
   });
 });

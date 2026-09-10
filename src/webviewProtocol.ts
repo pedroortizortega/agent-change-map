@@ -50,6 +50,8 @@ export const webviewToHostMessageSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("cancelRun"), requestId }),
   z.object({ type: z.literal("requestRefresh"), requestId }),
   z.object({ type: z.literal("requestSignature"), requestId, sourceId: sourceIdSchema, targetId: requestId }),
+  z.object({ type: z.literal("requestCall"), requestId, sourceId: sourceIdSchema, targetId: requestId, args: z.record(z.string().max(256), z.unknown()) }),
+  z.object({ type: z.literal("confirmCall"), requestId, confirmed: z.boolean() }),
 ]);
 
 export type WebviewToHostMessage = z.infer<typeof webviewToHostMessageSchema>;
@@ -74,4 +76,6 @@ export type HostToWebviewMessage =
   | { type: "refreshResult"; requestId: string; ok: false; reason: string }
   | { type: "refreshDeferred"; reason: string }
   | { type: "signatureResult"; requestId: string; targetId: string; parameters: IntrospectionParameter[]; cached: boolean }
-  | { type: "signatureUnavailable"; requestId: string; targetId: string; reason: string };
+  | { type: "signatureUnavailable"; requestId: string; targetId: string; reason: string }
+  | { type: "callConfirmationRequired"; requestId: string; dottedName: string; argsPreview: string }
+  | { type: "callResult"; requestId: string; result: RunResult; returnRepr?: string };
