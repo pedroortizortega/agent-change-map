@@ -1,0 +1,17 @@
+{
+  // this is a line comment before a real key
+  "name": "JSONC fixture with comments and trailing commas",
+  /* a block
+     comment */
+  "tokenColors": [
+    {
+      // comment-like sequence inside a string must NOT be stripped below:
+      "scope": "source.python //not-a-comment",
+      "settings": { "foreground": "#ABCDEF" },
+    },
+    {
+      "scope": "string.quoted /* not a real block comment */ end",
+      "settings": { "foreground": "#123456" }
+    },
+  ],
+}

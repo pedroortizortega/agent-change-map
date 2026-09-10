@@ -1,0 +1,4 @@
+{
+  "name": "Nested fixture root, include resolved relative to this file's directory, defines no colors of its own",
+  "include": "./child/child.json"
+}

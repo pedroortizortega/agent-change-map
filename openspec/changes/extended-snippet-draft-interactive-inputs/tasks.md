@@ -269,7 +269,7 @@ machinery, so there is no awkward coupling introduced by splitting here.
 
 ### 3a-i.1 — Fixture set for theme resolution tests
 
-- [ ] Add committed fixtures under a test fixtures directory mirroring real theme shapes:
+- [x] Add committed fixtures under a test fixtures directory mirroring real theme shapes:
       a `dark_modern.json`-style file with `"include": "./dark_plus.json"` and no
       `tokenColors`/`semanticTokenColors`; a `dark_plus.json`-style file with `tokenColors` and a
       `semanticTokenColors` limited to `newOperator`/`stringLiteral`/`customLiteral`/
@@ -285,17 +285,17 @@ machinery, so there is no awkward coupling introduced by splitting here.
 
 ### 3a-i.2 — `id`-not-`label` theme contributor matching
 
-- [ ] **RED**: `test/unit/themeResolver.test.ts` (new) — given the NLS-placeholder-label fixture,
+- [x] **RED**: `test/unit/themeResolver.test.ts` (new) — given the NLS-placeholder-label fixture,
       resolving by the configured theme `id` finds the contributor; matching by `label` alone
       would fail (assert the resolver does not depend on `label` resolution).
       Satisfies: `snippet-semantic-highlighting` spec Requirement "Color draft text using
       AST-derived identifier roles and the active theme" (theme-sourced color values must be
       resolvable to actually apply; design D8 correction).
-- [ ] **GREEN**: `src/theme/themeResolver.ts` (new) — contributor lookup via `id ?? label`.
+- [x] **GREEN**: `src/theme/themeResolver.ts` (new) — contributor lookup via `id ?? label`.
 
 ### 3a-i.3 — `include` chain resolution: mandatory recursive merge, cycle + depth guards
 
-- [ ] **RED**: `test/unit/themeResolver.test.ts` — cases:
+- [x] **RED**: `test/unit/themeResolver.test.ts` — cases:
       - `dark_modern → dark_plus → dark_vs` chain resolves and merges child-wins (a key present
         in both child and ancestor takes the child's value).
       - a fixture with no `tokenColors`/`semanticTokenColors` at its own level still yields
@@ -309,12 +309,12 @@ machinery, so there is no awkward coupling introduced by splitting here.
       AST-derived identifier roles and the active theme" and scenario "Unresolvable identifier
       role falls back gracefully" (theme-resolution failure modes feed the same fallback path);
       design D8 mandatory-`include` correction.
-- [ ] **GREEN**: `src/theme/themeResolver.ts` — recursive `include` resolver with visited-set +
+- [x] **GREEN**: `src/theme/themeResolver.ts` — recursive `include` resolver with visited-set +
       depth cap 5, child-wins merge.
 
 ### 3a-i.4 — JSONC tolerant strip (comments + trailing commas, string/escape-aware)
 
-- [ ] **RED**: `test/unit/themeResolver.test.ts` — cases:
+- [x] **RED**: `test/unit/themeResolver.test.ts` — cases:
       - ordinary `//` line comments and `/* */` block comments outside strings are stripped.
       - trailing commas in objects/arrays are stripped.
       - **adversarial (string/escape-aware)**: a JSON string value containing the literal
@@ -327,7 +327,7 @@ machinery, so there is no awkward coupling introduced by splitting here.
       Satisfies: `snippet-semantic-highlighting` spec (same requirement as 3a.3 — malformed
       theme JSON is a named degrade-path input) and design's explicit adversarial testing
       instruction for the JSONC stripper.
-- [ ] **GREEN**: `src/theme/themeResolver.ts` — JSONC strip helper.
+- [x] **GREEN**: `src/theme/themeResolver.ts` — JSONC strip helper.
 
 **Slice 3a-i exit criteria**: given a configured theme name, the resolver locates the contributing
 extension by `id`, resolves and merges its full `include` chain (cycle/depth-guarded), and yields a
