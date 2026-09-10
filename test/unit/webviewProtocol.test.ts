@@ -114,6 +114,27 @@ describe("webview protocol", () => {
     expect(result.returnRepr).toBe("1");
   });
 
+  it("round-trips themeTokens as a HostToWebviewMessage variant", () => {
+    const message: Extract<HostToWebviewMessage, { type: "themeTokens" }> = {
+      type: "themeTokens",
+      kind: "dark",
+      colors: {
+        self: "#569CD6",
+        parameter: "#9CDCFE",
+        className: "#4EC9B0",
+        functionName: "#DCDCAA",
+        importedName: "#9CDCFE",
+        builtin: "#4EC9B0",
+        keyword: "#C586C0",
+        string: "#CE9178",
+        comment: "#6A9955",
+        number: "#B5CEA8",
+      },
+    };
+    expect(message.kind).toBe("dark");
+    expect(message.colors.functionName).toBe("#DCDCAA");
+  });
+
   it("carries a shared ops sequence on sourcePair and drops per-source affectedLines", () => {
     const message: Extract<HostToWebviewMessage, { type: "sourcePair" }> = {
       type: "sourcePair",

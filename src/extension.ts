@@ -10,6 +10,45 @@ import { runIntrospection, runSnippet } from "./execution/dockerRunner.js";
 import { ChangeMapSession } from "./webviewHost.js";
 import { ComparisonController, type FileWatcherHandle } from "./comparisonController.js";
 import type { SourceId } from "./protocol.js";
+import { resolveThemeTokens, type ExtensionLike, type ThemeTokens } from "./theme/themeResolver.js";
+import { readFile } from "node:fs/promises";
+
+/** Configuration keys watched for theme re-resolution (design D8). */
+const THEME_CONFIG_KEYS = ["workbench.colorTheme", "window.autoDetectColorScheme", "workbench.preferredDarkColorTheme", "workbench.preferredLightColorTheme"];
+
+function mapColorThemeKind(kind: vscode.ColorThemeKind): "light" | "dark" | "highContrast" {
+  switch (kind) {
+    case vscode.ColorThemeKind.Light:
+      return "light";
+    case vscode.ColorThemeKind.Dark:
+      return "dark";
+    default:
+      return "highContrast";
+  }
+}
+
+/** Resolves the current theme tokens from live `vscode` configuration/extension state (design D8). */
+async function resolveActiveThemeTokens(): Promise<ThemeTokens> {
+  const config = vscode.workspace.getConfiguration();
+  const kind = mapColorThemeKind(vscode.window.activeColorTheme.kind);
+  const autoDetect = config.get<boolean>("window.autoDetectColorScheme", false);
+  const themeId = autoDetect
+    ? config.get<string>(kind === "dark" ? "workbench.preferredDarkColorTheme" : "workbench.preferredLightColorTheme", "")
+    : config.get<string>("workbench.colorTheme", "");
+  const colorCustomizations = config.get<{ textMateRules?: unknown }>("workbench.colorCustomizations");
+  return resolveThemeTokens({
+    themeId: themeId ?? "",
+    kind,
+    io: {
+      listExtensions: () => vscode.extensions.all as unknown as ExtensionLike[],
+      readFile: (path) => readFile(path, "utf8"),
+    },
+    overrides: {
+      semanticTokenColorCustomizations: config.get("editor.semanticTokenColorCustomizations"),
+      colorCustomizationsTextMateRules: colorCustomizations?.textMateRules,
+    },
+  });
+}
 
 const AUTO_REFRESH_SETTING = "agentChangeMap.autoRefresh";
 
@@ -218,11 +257,22 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi | undef
         runIntrospection,
         requestRefresh: () => controllerRef.current!.requestRefresh(),
         onIdle: () => controllerRef.current!.onIdle(),
+        resolveTheme: resolveActiveThemeTokens,
+        subscribeThemeChange: (onChange) => {
+          const subscriptions = [
+            vscode.window.onDidChangeActiveColorTheme(() => onChange()),
+            vscode.workspace.onDidChangeConfiguration((event) => {
+              if (THEME_CONFIG_KEYS.some((key) => event.affectsConfiguration(key))) onChange();
+            }),
+          ];
+          return { dispose: () => subscriptions.forEach((subscription) => subscription.dispose()) };
+        },
       });
 
       panel.webview.onDidReceiveMessage(async (raw: unknown) => {
         await session.handleIntent(raw);
       });
+      panel.onDidDispose(() => session.dispose(), null, context.subscriptions);
 
       const controller = new ComparisonController({
         extensionRoot: context.extensionPath,

@@ -9,6 +9,7 @@ import type { DirectWriteRequest, WriteEffectPreview, WriteReceipt } from "./edi
 import { WriteConfirmationDeclinedError, WriteGuardError } from "./editing/writeGuard.js";
 import type { CallOutcome, IntrospectionOutcome, IntrospectionParameter, RunOptions, RunResult, SnippetSource, SnippetVariant } from "./execution/dockerRunner.js";
 import { buildCallDriver, buildIntrospectionDriver } from "./execution/callDriver.js";
+import { DEFAULT_PALETTE, type ThemeTokens } from "./theme/themeResolver.js";
 import type { EntityTarget } from "./protocol.js";
 import { isOversized, webviewToHostMessageSchema } from "./webviewProtocol.js";
 import { filterGraph, suppressAncestorSelfReferences, type GraphFilter } from "../webview/graphView.js";
@@ -152,6 +153,21 @@ export interface SessionDeps {
   requestRefresh?: () => Promise<void>;
   /** Invoked whenever the session transitions from busy to idle, so a queued auto-refresh can re-fire. */
   onIdle?: () => void;
+  /**
+   * Resolves the current theme tokens (design D8): finds the active theme's contributed
+   * colors, layers workspace-configuration overrides on top, and degrades to the default
+   * palette on any failure. Absent in tests/hosts that don't exercise theme wiring — the
+   * session then never resolves or posts `themeTokens`. May reject; `refreshTheme` always
+   * catches and still posts the default palette rather than propagating.
+   */
+  resolveTheme?: () => Promise<ThemeTokens>;
+  /**
+   * Registers a callback fired whenever the active color theme or a watched configuration
+   * key changes (design D8: `onDidChangeActiveColorTheme` plus `onDidChangeConfiguration`
+   * for the four watched keys). The real `vscode` subscription bridging lives in the
+   * extension host; this seam keeps `webviewHost.ts` vscode-free and fixture-testable.
+   */
+  subscribeThemeChange?: (onChange: () => void) => { dispose(): void };
 }
 
 /**
@@ -181,8 +197,37 @@ export class ChangeMapSession {
   private readonly introspectionCache = new Map<string, IntrospectionParameter[]>();
 
   private untrackedPaths: string[] = [];
+  private themeSubscription: { dispose(): void } | undefined;
 
-  constructor(private readonly deps: SessionDeps) {}
+  constructor(private readonly deps: SessionDeps) {
+    if (this.deps.resolveTheme) {
+      void this.refreshTheme();
+      this.themeSubscription = this.deps.subscribeThemeChange?.(() => void this.refreshTheme());
+    }
+  }
+
+  /**
+   * Resolves the current theme tokens via `deps.resolveTheme` and posts `themeTokens`.
+   * Never throws or leaves the panel without a post: a rejecting `resolveTheme` still
+   * results in a `themeTokens` post carrying the dark default palette (design D8's
+   * never-throw degrade contract, defended here in addition to `resolveThemeTokens`'s own
+   * internal catch, since `deps.resolveTheme` is an arbitrary injected function).
+   */
+  async refreshTheme(): Promise<void> {
+    if (!this.deps.resolveTheme) return;
+    let tokens: ThemeTokens;
+    try {
+      tokens = await this.deps.resolveTheme();
+    } catch {
+      tokens = { kind: "dark", colors: { ...DEFAULT_PALETTE.dark } };
+    }
+    this.deps.post({ type: "themeTokens", kind: tokens.kind, colors: tokens.colors });
+  }
+
+  /** Disposes the theme-change subscription, if one was registered. */
+  dispose(): void {
+    this.themeSubscription?.dispose();
+  }
 
   /** True while a write confirmation, a run confirmation, or an active run is outstanding. */
   isBusy(): boolean {

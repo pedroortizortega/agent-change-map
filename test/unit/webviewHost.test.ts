@@ -30,6 +30,8 @@ function makeDeps(
     runIntrospection?: ReturnType<typeof vi.fn>;
     runCall?: ReturnType<typeof vi.fn>;
     draftStore?: DraftStore;
+    resolveTheme?: ReturnType<typeof vi.fn>;
+    subscribeThemeChange?: ReturnType<typeof vi.fn>;
   } = {},
 ) {
   const posted: HostToWebviewMessage[] = [];
@@ -827,5 +829,54 @@ describe("ChangeMapSession refresh", () => {
     await session.handleIntent({ type: "requestRun", requestId: "execRun", variants: ["current"] });
     await session.handleIntent({ type: "confirmRun", requestId: "execRun", confirmed: true });
     await vi.waitFor(() => expect(onIdle).toHaveBeenCalledTimes(1));
+  });
+});
+
+describe("ChangeMapSession theme wiring", () => {
+  const tokens = { kind: "dark" as const, colors: { self: "#1", parameter: "#2", className: "#3", functionName: "#4", importedName: "#5", builtin: "#6", keyword: "#7", string: "#8", comment: "#9", number: "#a" } };
+
+  it("resolves and posts themeTokens on session construction", async () => {
+    const resolveTheme = vi.fn().mockResolvedValue(tokens);
+    const subscribeThemeChange = vi.fn().mockReturnValue({ dispose: vi.fn() });
+    const { posted } = makeDeps(makeStore(), { resolveTheme, subscribeThemeChange });
+
+    await vi.waitFor(() => expect(posted).toContainEqual({ type: "themeTokens", kind: "dark", colors: tokens.colors }));
+    expect(subscribeThemeChange).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-resolves and re-posts themeTokens when the registered change callback fires (theme change or watched config change)", async () => {
+    const secondTokens = { ...tokens, kind: "light" as const };
+    const resolveTheme = vi.fn().mockResolvedValueOnce(tokens).mockResolvedValueOnce(secondTokens);
+    let changeCallback: (() => void) | undefined;
+    const subscribeThemeChange = vi.fn((onChange: () => void) => {
+      changeCallback = onChange;
+      return { dispose: vi.fn() };
+    });
+    const { posted } = makeDeps(makeStore(), { resolveTheme, subscribeThemeChange });
+    await vi.waitFor(() => expect(resolveTheme).toHaveBeenCalledTimes(1));
+
+    changeCallback!();
+
+    await vi.waitFor(() => expect(resolveTheme).toHaveBeenCalledTimes(2));
+    expect(posted).toContainEqual({ type: "themeTokens", kind: "light", colors: secondTokens.colors });
+  });
+
+  it("still posts themeTokens with the dark default palette when resolveTheme rejects, never blocking the panel", async () => {
+    const resolveTheme = vi.fn().mockRejectedValue(new Error("theme resolution boom"));
+    const { posted } = makeDeps(makeStore(), { resolveTheme });
+
+    await vi.waitFor(() => expect(posted.some((message) => message.type === "themeTokens")).toBe(true));
+    const themeMessage = posted.find((message) => message.type === "themeTokens") as Extract<HostToWebviewMessage, { type: "themeTokens" }>;
+    expect(themeMessage.kind).toBe("dark");
+    expect(Object.keys(themeMessage.colors)).toContain("functionName");
+  });
+
+  it("does not resolve or subscribe to theme changes when resolveTheme is absent", async () => {
+    const subscribeThemeChange = vi.fn();
+    const { posted } = makeDeps(makeStore(), { subscribeThemeChange });
+
+    await Promise.resolve();
+    expect(subscribeThemeChange).not.toHaveBeenCalled();
+    expect(posted.some((message) => message.type === "themeTokens")).toBe(false);
   });
 });
