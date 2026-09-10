@@ -862,3 +862,66 @@ describe("call function box", () => {
     await vi.waitFor(() => expect(element('#call-result').textContent).toContain("boom"));
   });
 });
+
+describe("semantic highlighting overlay (D6/D7/D8 — slice 3b)", () => {
+  const highlightedContent = "def go(self):\n    return self.value\n";
+  const secondSelfOffset = highlightedContent.indexOf("self", highlightedContent.indexOf("self") + 1);
+
+  function highlightedGraph(): AnalysisGraph {
+    return {
+      snapshot,
+      nodes: [{
+        id: "function:go",
+        kind: "function",
+        qualifiedName: "go",
+        span: { path: "m.py", startByte: 0, endByte: highlightedContent.length, startLine: 1, startColumn: 0, endLine: 2, endColumn: 0 },
+        identifierRoles: [{ start: secondSelfOffset, end: secondSelfOffset + 4, role: "self" }],
+      }],
+      edges: [],
+      diagnostics: [],
+    };
+  }
+
+  beforeEach(() => {
+    const store = new SnapshotStore();
+    store.store({ snapshot, files: [{ path: "m.py", content: highlightedContent, provenance: "tracked" }] });
+    session = new ChangeMapSession({ repoRoot: "/repo", store, draftStore: new DraftStore(), openSource: vi.fn(), performWrite: vi.fn(), runSnippet: vi.fn(), post: message => dom.window.dispatchEvent(new dom.window.MessageEvent("message", { data: message })) });
+    session.loadComparison(undefined, highlightedGraph(), []);
+  });
+
+  it("never renders the draft as a bare unstyled textarea/pre: the overlay pre's textContent equals the textarea's value", async () => {
+    click('[data-node-id="function:go"]'); click('#source-right');
+    await vi.waitFor(() => expect(element<HTMLTextAreaElement>('#draft-content').value).toBe(highlightedContent));
+    const overlay = element('#draft-overlay');
+    expect(overlay.textContent).toBe(highlightedContent);
+    expect(overlay.innerHTML).toContain("<span");
+  });
+
+  it("re-renders the overlay on edit, keeping the text-equality invariant", async () => {
+    click('[data-node-id="function:go"]'); click('#source-right');
+    await vi.waitFor(() => expect(element<HTMLTextAreaElement>('#draft-content').value).toBe(highlightedContent));
+    const draft = element<HTMLTextAreaElement>('#draft-content');
+    draft.value = "def go(self):\n    return 1 + 2\n";
+    draft.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    expect(element('#draft-overlay').textContent).toBe(draft.value);
+  });
+
+  it("updates token colors on a themeTokens message without requiring reselection", async () => {
+    click('[data-node-id="function:go"]'); click('#source-right');
+    await vi.waitFor(() => expect(element<HTMLTextAreaElement>('#draft-content').value).toBe(highlightedContent));
+    dom.window.dispatchEvent(new dom.window.MessageEvent("message", { data: { type: "themeTokens", kind: "dark", colors: { self: "#123456" } } }));
+    await vi.waitFor(() => expect(element('#draft-overlay').innerHTML).toContain("#123456"));
+  });
+
+  it("renders an identifier with no determinable role as plain unstyled text without breaking overlay/textarea alignment", async () => {
+    const plainContent = "plain_local_variable = 1\n";
+    const store = new SnapshotStore();
+    store.store({ snapshot, files: [{ path: "m.py", content: plainContent, provenance: "tracked" }] });
+    session = new ChangeMapSession({ repoRoot: "/repo", store, draftStore: new DraftStore(), openSource: vi.fn(), performWrite: vi.fn(), runSnippet: vi.fn(), post: message => dom.window.dispatchEvent(new dom.window.MessageEvent("message", { data: message })) });
+    session.loadComparison(undefined, { snapshot, nodes: [{ id: "module:m", kind: "module", qualifiedName: "m", span: { path: "m.py", startByte: 0, endByte: plainContent.length, startLine: 1, startColumn: 0, endLine: 2, endColumn: 0 } }], edges: [], diagnostics: [] }, []);
+    click('[data-node-id="module:m"]'); click('#source-right');
+    await vi.waitFor(() => expect(element<HTMLTextAreaElement>('#draft-content').value).toBe(plainContent));
+    const overlay = element('#draft-overlay');
+    expect(overlay.textContent).toBe(plainContent);
+  });
+});

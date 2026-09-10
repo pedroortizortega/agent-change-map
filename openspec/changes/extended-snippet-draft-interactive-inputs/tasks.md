@@ -414,7 +414,7 @@ additive to the same AST walk). Task-id range: **3b.1–3b.3** (unchanged).
 
 ### 3b.1 — Analyzer emits `identifierRoles` spans
 
-- [ ] **RED**: `test/unit/pythonAnalyzer.test.ts` — add cases: a snippet with `self` inside a
+- [x] **RED**: `test/unit/pythonAnalyzer.test.ts` — add cases: a snippet with `self` inside a
       method, a parameter reference, a class name reference, an imported name reference, and a
       builtin call each produce an `identifierRoles` span with correct byte offsets and role tag;
       an identifier with no determinable role (e.g. a local variable with no special role) is
@@ -423,43 +423,46 @@ additive to the same AST walk). Task-id range: **3b.1–3b.3** (unchanged).
       AST-derived identifier roles and the active theme" (scenario "Draft renders with
       role-colored identifiers") and scenario "Unresolvable identifier role falls back
       gracefully" (analyzer half: simply omit, don't emit garbage).
-- [ ] **GREEN**: `python/analyzer.py` — AST walk emitting `identifierRoles: {start, end, role}[]`
+- [x] **GREEN**: `python/analyzer.py` — AST walk emitting `identifierRoles: {start, end, role}[]`
       for `self`, parameter, class name, imported name, builtin roles (D9 — tested only through
       the existing TS bridge, no new pytest suite).
 
 ### 3b.2 — `webview/highlight.ts` lexer (string/comment/keyword/number spans)
 
-- [ ] **RED**: `test/unit/webviewDom.test.ts` (or a dedicated `highlight.test.ts` if the DOM
-      suite is not the right seam — confirm against existing convention before writing) — cases:
+- [x] **RED**: `test/unit/highlight.test.ts` (new — the DOM suite is a poor seam for pure-function
+      lexer/merge testing; `highlight.ts` exports pure functions directly, mirroring
+      `themeResolver.ts`'s own dedicated test file) — cases:
       - string, comment, keyword, and number literal spans are correctly identified and
         non-overlapping.
       - the lexer output plus the analyzer's `identifierRoles` spans can be composed into a
         single non-overlapping span list (role spans take priority over generic keyword/name
         spans at the same offset, since design D7 treats AST roles as an overlay on top of the
-        minimal lexer).
+        minimal lexer); a partially-overlapping lexer span is clipped, not dropped.
+      - rendered HTML's `textContent` equals the original text exactly, including when no role
+        applies (plain escaped text, no `<span>`).
       Satisfies: `snippet-semantic-highlighting` spec Requirement "Color draft text using
       AST-derived identifier roles and the active theme" (approximate lexer + AST overlay, per
       design D6/D7).
-- [ ] **GREEN**: `webview/highlight.ts` (new) — minimal lexer + role overlay → span HTML.
+- [x] **GREEN**: `webview/highlight.ts` (new) — minimal lexer + role overlay → span HTML.
 
 ### 3b.3 — Overlay DOM: transparent `<textarea>` over synchronized `<pre>`, theme token classes
 
-- [ ] **RED**: `test/unit/webviewDom.test.ts` — cases:
+- [x] **RED**: `test/unit/webviewDom.test.ts` — cases:
       - after rendering, the overlay `<pre>` text content equals the `<textarea>` text content
         (byte-for-byte) — the core D6 synchronization invariant.
       - editing the textarea (simulated input event) re-renders the overlay and the equality
         invariant still holds after the edit.
       - `themeTokens` message received → CSS custom properties/token classes update to the new
         theme's colors without requiring the node to be reselected (this is the DOM half of the
-        "Theme change updates rendered colors" scenario; 3a.6 covers the host-side re-resolve/
-        re-post half).
+        "Theme change updates rendered colors" scenario; 3a-ii.2 covers the host-side
+        re-resolve/re-post half).
       - an identifier with no role renders as plain unstyled text within the same overlay,
         without breaking layout alignment with the textarea underneath.
       Satisfies: `snippet-semantic-highlighting` spec Requirement "Color draft text using
       AST-derived identifier roles and the active theme" (scenario "Draft renders with
       role-colored identifiers", "Theme change updates rendered colors", "Unresolvable identifier
       role falls back gracefully" — DOM half of each).
-- [ ] **GREEN**: `webview/index.ts` — overlay renderer wiring `highlight.ts` output +
+- [x] **GREEN**: `webview/index.ts` — overlay renderer wiring `highlight.ts` output +
       `themeTokens` handling; `webview/styles.css` — token classes bound to CSS vars, overlay/
       textarea alignment rules.
 

@@ -280,6 +280,29 @@ describe("Python AST analyzer", () => {
     expect(inner?.target).toEqual({ module: "pkg.sample", dottedName: "outer.inner", callableKind: "function" });
   });
 
+  it("emits identifierRoles spans for self, parameter, className, functionName, importedName, and builtin", async () => {
+    const content = "from pkg.other import Helper\n\n\nclass Widget:\n    def method(self, amount):\n        helper = Helper()\n        return len(amount) + self.total\n\n\ndef factory():\n    return Widget()\n";
+    const graph = await analyze([{ path: "pkg/sample.py", content }]);
+    const bytes = Buffer.from(content, "utf8");
+    const method = graph.nodes.find((node) => node.qualifiedName === "pkg.sample.Widget.method")!;
+    const textOf = (entity: typeof method, span: { start: number; end: number }) =>
+      bytes.subarray(entity.span.startByte + span.start, entity.span.startByte + span.end).toString("utf8");
+    const rolesByText = (entity: typeof method) =>
+      (entity.identifierRoles ?? []).map((role) => ({ role: role.role, text: textOf(entity, role) }));
+    expect(rolesByText(method)).toEqual(expect.arrayContaining([
+      { role: "self", text: "self" },
+      { role: "parameter", text: "amount" },
+      { role: "importedName", text: "Helper" },
+      { role: "builtin", text: "len" },
+    ]));
+    // `helper` is a plain local variable with no determinable role: it must simply be absent,
+    // never emitted with a null/error role.
+    expect((method.identifierRoles ?? []).some((role) => textOf(method, role) === "helper")).toBe(false);
+
+    const factory = graph.nodes.find((node) => node.qualifiedName === "pkg.sample.factory")!;
+    expect(rolesByText(factory)).toEqual(expect.arrayContaining([{ role: "className", text: "Widget" }]));
+  });
+
   it("times out and bounds child output deterministically", async () => {
     const roots: string[] = [];
     const makeRoot = async (program: string) => {

@@ -100,6 +100,36 @@ describe("analyzer protocol", () => {
     expect(entitySchema.parse(entity)).toEqual(entity);
   });
 
+  it("accepts an entity with identifierRoles spans for AST-derived highlighting", () => {
+    const entity = {
+      id: "function:pkg.sample.run",
+      kind: "function",
+      qualifiedName: "pkg.sample.run",
+      span,
+      identifierRoles: [
+        { start: 4, end: 8, role: "self" },
+        { start: 10, end: 16, role: "parameter" },
+        { start: 20, end: 27, role: "className" },
+        { start: 30, end: 38, role: "functionName" },
+        { start: 40, end: 46, role: "importedName" },
+        { start: 50, end: 53, role: "builtin" },
+      ],
+    };
+    expect(entitySchema.parse(entity)).toEqual(entity);
+  });
+
+  it("rejects a malformed identifierRoles entry", () => {
+    const base = { id: "function:pkg.sample.run", kind: "function", qualifiedName: "pkg.sample.run", span };
+    expect(() => entitySchema.parse({ ...base, identifierRoles: [{ start: 4, end: 8, role: "not-a-role" }] })).toThrow();
+    expect(() => entitySchema.parse({ ...base, identifierRoles: [{ start: 8, end: 4, role: "self" }] })).toThrow();
+    expect(() => entitySchema.parse({ ...base, identifierRoles: [{ start: 4, role: "self" }] })).toThrow();
+  });
+
+  it("still validates an entity with identifierRoles entirely absent (back-compat)", () => {
+    const entity = { id: "module:pkg.sample", kind: "module", qualifiedName: "pkg.sample", span };
+    expect(entitySchema.parse(entity)).toEqual(entity);
+  });
+
   it("enforces response collection and relevant string bounds", () => {
     const base = { snapshot: { repoId: "repo", kind: "worktree", contentDigest: "x" }, nodes: [], edges: [], diagnostics: [] };
     expect(() => analysisGraphSchema.parse({ ...base, nodes: Array.from({ length: DTO_LIMITS.maxNodes + 1 }, () => ({ id: "x", kind: "module", qualifiedName: "x", span })) })).toThrow();

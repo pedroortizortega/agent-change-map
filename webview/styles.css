@@ -150,7 +150,43 @@ body {
   margin: 2px 0;
 }
 #source-actions { margin: 12px 0; }
-#draft-content { display: block; width: calc(100% - 16px); font-family: monospace; }
+/* Design D6: a transparent-text `<textarea>` layered over a synchronized `<pre>` overlay.
+   Both children share identical box metrics (font, size, padding, border, line-height) so the
+   overlay's rendered spans land exactly under the textarea's own glyphs/caret. */
+#draft-overlay-wrap {
+  position: relative;
+  width: calc(100% - 16px);
+}
+#draft-overlay-wrap #draft-content,
+#draft-overlay-wrap #draft-overlay {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  margin: 0;
+  padding: 4px;
+  border: 1px solid var(--vscode-panel-border, #444);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 1em;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+#draft-overlay-wrap #draft-content {
+  position: relative;
+  z-index: 1;
+  color: transparent;
+  background: transparent;
+  caret-color: var(--vscode-editor-foreground, #ccc);
+  resize: vertical;
+}
+#draft-overlay-wrap #draft-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  color: var(--vscode-editor-foreground, #ccc);
+}
 #confirmation pre, #run-output { white-space: pre-wrap; overflow-wrap: anywhere; }
 .node, .edge { cursor: pointer; }
 .node.dragging { cursor: grabbing; }
