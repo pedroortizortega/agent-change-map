@@ -48,6 +48,21 @@ let currentIdentifierRoles: RoleSpan[] = [];
  * `themeTokens` message lands; replaced wholesale once it does. */
 let currentThemeColors: Partial<Record<TokenRole, string>> = { ...DEFAULT_PALETTE.dark };
 
+/**
+ * Pushes each role's resolved color into a `--tok-ROLE` CSS custom property on the document
+ * root via the CSSOM (`element.style.setProperty`), which `webview/styles.css`'s `.tok-ROLE`
+ * classes read from. This is the CSP-safe way to apply per-role color: direct CSSOM writes are
+ * exempt from the webview's `style-src` restriction (no `unsafe-inline`), unlike an HTML-parsed
+ * `style="..."` attribute, which the browser silently drops. A role missing from `colors` falls
+ * back to the dark default palette rather than leaving a custom property unset/stale.
+ */
+function applyThemeColors(colors: Partial<Record<TokenRole, string>>): void {
+  for (const role of Object.keys(DEFAULT_PALETTE.dark) as TokenRole[]) {
+    document.documentElement.style.setProperty(`--tok-${role}`, colors[role] ?? DEFAULT_PALETTE.dark[role]);
+  }
+}
+applyThemeColors(currentThemeColors);
+
 function byId<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
   if (!element) throw new Error(`Missing required webview element: #${id}`);
@@ -905,6 +920,7 @@ function handleHostMessage(message: HostToWebviewMessage): void {
       // Design D8/D6 (spec scenario "Theme change updates rendered colors"): re-renders with
       // the same text/roles and the new palette, without requiring the node to be reselected.
       currentThemeColors = message.colors;
+      applyThemeColors(currentThemeColors);
       renderDraftOverlay();
       break;
   }

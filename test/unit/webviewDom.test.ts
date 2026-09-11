@@ -907,10 +907,15 @@ describe("semantic highlighting overlay (D6/D7/D8 — slice 3b)", () => {
   });
 
   it("updates token colors on a themeTokens message without requiring reselection", async () => {
+    // The CSP forbids inline `style="..."` (see webview/highlight.ts's module doc), so the
+    // overlay's HTML always carries the same `class="tok-self"` regardless of the actual color -
+    // only the `--tok-self` CSS custom property on the document root changes.
     click('[data-node-id="function:go"]'); click('#source-right');
     await vi.waitFor(() => expect(element<HTMLTextAreaElement>('#draft-content').value).toBe(highlightedContent));
+    expect(element('#draft-overlay').innerHTML).toContain('class="tok-self"');
     dom.window.dispatchEvent(new dom.window.MessageEvent("message", { data: { type: "themeTokens", kind: "dark", colors: { self: "#123456" } } }));
-    await vi.waitFor(() => expect(element('#draft-overlay').innerHTML).toContain("#123456"));
+    await vi.waitFor(() => expect(dom.window.document.documentElement.style.getPropertyValue("--tok-self")).toBe("#123456"));
+    expect(element('#draft-overlay').innerHTML).not.toContain("style=");
   });
 
   it("renders an identifier with no determinable role as plain unstyled text without breaking overlay/textarea alignment", async () => {

@@ -79,4 +79,18 @@ describe("webview/highlight.ts lexer (D6/D7 approximate lexer)", () => {
     expect(pre.textContent).toBe(text);
     expect(html).not.toContain("<span");
   });
+
+  it("never emits an inline style attribute (CSP has no 'unsafe-inline' in style-src)", () => {
+    // Regression test: an earlier version wrote `<span style="color:...">`, which the webview's
+    // CSP silently drops (no console error, no thrown exception) - the draft rendered
+    // completely uncolored with no visible failure. Colors must only ever travel as a
+    // `class="tok-ROLE"` attribute; the actual color values are applied via the CSSOM
+    // (`applyThemeColors` in webview/index.ts), which CSP's style-src does not govern.
+    const text = "def go(self):\n    return self.value\n";
+    const selfOffset = text.indexOf("self", text.indexOf("self") + 1);
+    const html = highlight(text, [{ start: selfOffset, end: selfOffset + 4, role: "self" }], { self: "#569CD6", keyword: "#C586C0" });
+    expect(html).not.toContain("style=");
+    expect(html).toContain('class="tok-self"');
+    expect(html).toContain('class="tok-keyword"');
+  });
 });

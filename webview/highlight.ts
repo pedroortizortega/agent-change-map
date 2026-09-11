@@ -80,12 +80,19 @@ function escapeHtml(value: string): string {
 }
 
 /**
- * Renders `text` as HTML with each merged role span wrapped in a `<span style="color:...">`
- * sourced from `colors` (the active theme's per-role palette, design D8). A role absent from
- * `colors`, or an identifier with no role at all, renders as plain escaped text - never blocks
- * rendering the rest of the snippet (spec scenario "Unresolvable identifier role falls back
- * gracefully"). Escaping only affects `&`/`<`/`>`; the rendered element's `textContent` is
- * exactly `text` (the overlay/textarea synchronization invariant, design D6).
+ * Renders `text` as HTML with each merged role span wrapped in a `<span class="tok-ROLE">`.
+ * The actual color per role is never embedded as an inline `style="..."` attribute - the
+ * webview's CSP (`style-src` with no `unsafe-inline`) blocks HTML-parsed inline styles, so a
+ * literal `style="color:..."` string silently renders unstyled instead of throwing. Colors are
+ * applied via CSS custom properties (`--tok-ROLE`, defined in webview/styles.css) that the host
+ * page updates through the CSSOM (`element.style.setProperty`, in `applyThemeColors`) - direct
+ * CSSOM writes are exempt from CSP's style-src restriction, only HTML-parsed style
+ * attributes/`<style>` blocks are governed by it.
+ *
+ * A role absent from `colors`, or an identifier with no role at all, renders as plain escaped
+ * text - never blocks rendering the rest of the snippet (spec scenario "Unresolvable identifier
+ * role falls back gracefully"). Escaping only affects `&`/`<`/`>`; the rendered element's
+ * `textContent` is exactly `text` (the overlay/textarea synchronization invariant, design D6).
  */
 export function highlight(text: string, identifierRoles: readonly RoleSpan[], colors: Partial<Record<TokenRole, string>>): string {
   const lexSpans = lex(text);
@@ -95,9 +102,9 @@ export function highlight(text: string, identifierRoles: readonly RoleSpan[], co
   for (const span of merged) {
     if (span.start < cursor) continue;
     if (span.start > cursor) html += escapeHtml(text.slice(cursor, span.start));
-    const color = colors[span.role];
+    const hasColor = colors[span.role] !== undefined;
     const segment = escapeHtml(text.slice(span.start, span.end));
-    html += color ? `<span style="color:${color}">${segment}</span>` : segment;
+    html += hasColor ? `<span class="tok-${span.role}">${segment}</span>` : segment;
     cursor = span.end;
   }
   if (cursor < text.length) html += escapeHtml(text.slice(cursor));

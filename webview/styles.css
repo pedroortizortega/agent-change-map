@@ -187,6 +187,20 @@ body {
   pointer-events: none;
   color: var(--vscode-editor-foreground, #ccc);
 }
+/* Design D8/D6: per-role token colors. The webview's CSP forbids inline `style="..."`
+   attributes, so `highlight()` only ever emits `class="tok-ROLE"`; the actual color values are
+   pushed into these `--tok-ROLE` custom properties from JS (`applyThemeColors` in
+   webview/index.ts), which the CSP permits since CSSOM writes bypass style-src entirely. */
+.tok-self { color: var(--tok-self); }
+.tok-parameter { color: var(--tok-parameter); }
+.tok-className { color: var(--tok-className); }
+.tok-functionName { color: var(--tok-functionName); }
+.tok-importedName { color: var(--tok-importedName); }
+.tok-builtin { color: var(--tok-builtin); }
+.tok-keyword { color: var(--tok-keyword); }
+.tok-string { color: var(--tok-string); }
+.tok-comment { color: var(--tok-comment); }
+.tok-number { color: var(--tok-number); }
 #confirmation pre, #run-output { white-space: pre-wrap; overflow-wrap: anywhere; }
 .node, .edge { cursor: pointer; }
 .node.dragging { cursor: grabbing; }
