@@ -6,7 +6,7 @@ import type { HostToWebviewMessage, WebviewToHostMessage } from "../src/webviewP
 import type { AnalysisGraph, Entity, SourceId } from "../src/protocol.js";
 import type { IntrospectionParameter, RunResult, SnippetVariant } from "../src/execution/dockerRunner.js";
 import type { DiffOp } from "../src/diff/lineDiff.js";
-import { DEFAULT_PALETTE, type TokenRole } from "../src/theme/themeResolver.js";
+import { DEFAULT_PALETTE, type TokenRole } from "../src/theme/tokenPalette.js";
 import { highlight, type RoleSpan } from "./highlight.js";
 
 /** Consecutive `unchanged` ops at or above this length collapse behind a click-to-expand summary. */

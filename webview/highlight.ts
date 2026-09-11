@@ -1,4 +1,4 @@
-import type { TokenRole } from "../src/theme/themeResolver.js";
+import type { TokenRole } from "../src/theme/tokenPalette.js";
 
 /**
  * A single colorable region of draft text. `start`/`end` are byte-count-agnostic UTF-16 code
