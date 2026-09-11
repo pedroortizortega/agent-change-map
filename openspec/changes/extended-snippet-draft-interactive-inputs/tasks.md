@@ -505,7 +505,12 @@ task-id seams defined above; totals are unchanged, only the partitioning is new.
   once 1a/1b land, split along `buildCallDriver`+`runCall`+protocol-branches (call-path plumbing)
   vs. host `handleRequestCall`/`executeCall`+call-box UI (consumer), mirroring the 1a/1b seam —
   but this is not being pre-decided now.
-- **Slice 3b**: kept as one PR, unchanged, per explicit user instruction (already under budget).
+- **Slice 3b**: kept as one PR (final slice) — no "wired but unused" seam exists between analyzer
+  role emission and the webview overlay that renders it, so splitting would ship a non-functional
+  half. **Correction (post-verify)**: this forecast line was written before implementation and
+  said "already under budget" — actual PR #39 measured 496 changed lines (over the 400-line
+  budget) and was correctly accepted as `size:exception` at commit/PR-body level; this pre-
+  implementation forecast just was never reconciled with that outcome. See "Update 4" below.
 
 ---
 
@@ -527,13 +532,27 @@ splitting further.
 **Update 3**: slice 3a-i (~535 lines) was accepted as `size:exception` in a single PR — new
 isolated module, no clean split available (include-chain resolution needs JSONC-stripping
 already applied). Slice 3a-ii was split into **3a-ii-a**/**3a-ii-b** after implementation
-measured ~553 changed lines: unlike 3a-i, this seam (pure color-precedence logic vs. host wiring)
-splits cleanly with BOTH halves under budget (378 + 175), so no exception was needed here. This
-replaces the single `3a-ii` row below and renumbers the rest of the stack.
+measured ~605 changed lines. **Correction (post-verify)**: this section originally claimed
+3a-ii-a landed at 378 lines with "BOTH halves under budget, no exception needed" — `gh pr view 37`
+shows the actual PR diff is 430 changed lines (+416/-14), over the 400-line budget. The 378
+figure was the production+test-only count from `git diff --stat` on specific files, which
+undercounted relative to the PR's full diff (it also includes doc/task-list lines the local
+measurement excluded). **PR #37 (3a-ii-a) should be treated as an undisclosed `size:exception`**
+— accepted after the fact: the seam (color-precedence logic vs. host wiring) is still the correct
+one, and the overage is concentrated in fixture/test additions for the precedence-chain matrix,
+not runaway production code. 3a-ii-b (#38, 175 lines) remains genuinely under budget.
+
+**Update 4**: slice 3b (final slice, PR #39) measured 496 changed lines per `gh pr view 39`
+(+483/-13) — over the 400-line budget. This matches the `size:exception` rationale actually
+documented in the PR #39 body/commit message at apply time (no clean split seam exists between
+analyzer role emission and webview rendering); the pre-implementation forecast note above this
+table was simply never updated to reflect that outcome.
+
+This replaces the single `3a-ii` row below and renumbers the rest of the stack.
 
 | Order | PR branch | Base branch | Task-id range | Slice |
 |---|---|---|---|---|
-| 1 | `feat/extended-snippet-draft-1a-introspection-core` | `main` | 1a.1–1a.4 | 1a |
+| 1 | `feat/extended-snippet-draft-1a-introspection-core` | `feat/extended-instance-resolution-self-attr` (see note below) | 1a.1–1a.4 | 1a |
 | 2 | `feat/extended-snippet-draft-1b-i-protocol-and-cache` | `feat/extended-snippet-draft-1a-introspection-core` | 1b.1–1b.2 | 1b-i |
 | 3 | `feat/extended-snippet-draft-1b-ii-parameter-form` | `feat/extended-snippet-draft-1b-i-protocol-and-cache` | 1b.3 | 1b-ii |
 | 4 | `feat/extended-snippet-draft-2-i-call-plumbing` | `feat/extended-snippet-draft-1b-ii-parameter-form` | 2.1–2.4 | 2-i |
@@ -542,6 +561,15 @@ replaces the single `3a-ii` row below and renumbers the rest of the stack.
 | 7 | `feat/extended-snippet-draft-3a-ii-a-color-precedence` | `feat/extended-snippet-draft-3a-i-theme-resolver-core` | 3a-ii.1 | 3a-ii-a |
 | 8 | `feat/extended-snippet-draft-3a-ii-b-theme-host-wiring` | `feat/extended-snippet-draft-3a-ii-a-color-precedence` | 3a-ii.2 | 3a-ii-b |
 | 9 | `feat/extended-snippet-draft-3b-semantic-highlighting` | `feat/extended-snippet-draft-3a-ii-b-theme-host-wiring` | 3b.1–3b.3 | 3b |
+
+**Note on PR #31's base branch (post-verify correction)**: this table originally listed PR #31's
+base as `main`. The actual base (confirmed via `gh pr view 31`) is
+`feat/extended-instance-resolution-self-attr` — the tip of a prior, unrelated, still-open change
+(PRs #28-30) at the time this change's implementation began. This was a real sequencing decision
+made at apply time (branching from the actual current state of the codebase rather than a stale
+local `main`), not a documentation error about intent, but the "base: main" claim in this table
+was factually wrong and should be read as: **this entire 9-PR stack has an external merge
+dependency on the `extended-instance-resolution` chain (#28-30) merging to `main` first.**
 
 Notes:
 
