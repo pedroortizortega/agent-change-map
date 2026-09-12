@@ -94,9 +94,14 @@ security invariant and pre-spawn `.py`-only rejection. No cache, no form, no UI 
 Depends on: Slice 1a (`target` field on the wire, `callDriver.ts`/`runIntrospection` shipped).
 Task-id range: **1b.1–1b.3** (was 1.5–1.7).
 
-### 1b.1 — Host-side LRU introspection cache (D4)
+**PR split (review-budget guard, applied after implementation measured ~519 changed lines against
+the 400-line budget)**: task 1b.1–1b.2 ship as **1b-i** (protocol + host-side cache, wired but not
+yet rendered), task 1b.3 ships as **1b-ii** (form rendering that consumes 1b-i's output) — same
+"wired but unused until the next PR" pattern already used for slice 3a-i/3a-ii.
 
-- [ ] **RED**: `test/unit/webviewHost.test.ts` — cases:
+### 1b.1 — Host-side LRU introspection cache (D4) — ships in PR **1b-i**
+
+- [x] **RED**: `test/unit/webviewHost.test.ts` — cases:
       - cache hit: re-selecting the same unchanged target (same `entityId` + same content hash)
         does not invoke `runIntrospection`/`runSnippet` a second time.
       - cache miss: editing the snippet content for a previously-cached target triggers a fresh
@@ -108,22 +113,22 @@ Task-id range: **1b.1–1b.3** (was 1.5–1.7).
       Satisfies: `snippet-signature-introspection` spec Requirement "Cache introspection results
       per target identity and snippet content hash" (both scenarios) and "Docker unavailable
       disables the form without a static fallback" scenario.
-- [ ] **GREEN**: `src/webviewHost.ts` — `handleRequestSignature`, bounded LRU (32) keyed
+- [x] **GREEN**: `src/webviewHost.ts` — `handleRequestSignature`, bounded LRU (32) keyed
       `` `${entityId}|${sha256(content)}` ``.
 
-### 1b.2 — Protocol branches: `requestSignature` / `signatureResult` / `signatureUnavailable`
+### 1b.2 — Protocol branches: `requestSignature` / `signatureResult` / `signatureUnavailable` — ships in PR **1b-i**
 
-- [ ] **RED**: `test/unit/webviewProtocol.test.ts` — round-trip encode/decode for
+- [x] **RED**: `test/unit/webviewProtocol.test.ts` — round-trip encode/decode for
       `requestSignature{requestId,sourceId,targetId}`, `signatureResult{requestId,targetId,
       parameters,cached}`, `signatureUnavailable{requestId,targetId,reason}`; rejection cases for
       malformed payloads (missing `targetId`, wrong `parameters` shape).
       Satisfies: `snippet-signature-introspection` spec (both requirements — wire contract that
       carries introspection results and the disabled state).
-- [ ] **GREEN**: `src/webviewProtocol.ts` — add the three variants/branches.
+- [x] **GREEN**: `src/webviewProtocol.ts` — add the three variants/branches.
 
-### 1b.3 — Parameter form rendering + widget mapping table (webview)
+### 1b.3 — Parameter form rendering + widget mapping table (webview) — ships in PR **1b-ii**
 
-- [ ] **RED**: `test/unit/webviewDom.test.ts` — cases:
+- [x] **RED**: `test/unit/webviewDom.test.ts` — cases:
       - `widgetFor(annotation)` mapping table: `int`/`float` → number input; `bool` → checkbox;
         `str` → text input; `Optional[X]` → toggle + inner widget of `X`; `list[…]`, `dict[…]`,
         unknown/missing annotation, `*args`/`**kwargs` → raw-JSON textarea.
@@ -136,7 +141,7 @@ Task-id range: **1b.1–1b.3** (was 1.5–1.7).
       input form from the introspection result" (both scenarios); `snippet-signature-
       introspection` spec scenario "Docker unavailable disables the form without a static
       fallback".
-- [ ] **GREEN**: `webview/index.ts` — parameter form renderer, `widgetFor` pure function;
+- [x] **GREEN**: `webview/index.ts` — parameter form renderer, `widgetFor` pure function;
       `webview/styles.css` — form styles.
 
 **Slice 1b exit criteria**: `entitySchema.target` consumed end-to-end; selecting a
@@ -479,27 +484,33 @@ task-id seams defined above; totals are unchanged, only the partitioning is new.
 
 ## Delivery Plan (stacked-to-main)
 
-`delivery_strategy=auto-chain`, `chain_strategy=stacked-to-main`: six PRs, each based on the
+`delivery_strategy=auto-chain`, `chain_strategy=stacked-to-main`: seven PRs, each based on the
 previous PR's branch (first PR bases on `main`). Merge/land in this exact order; `sdd-apply`
 should create branches and PRs mechanically from this table.
+
+**Update**: slice 1b was split into **1b-i**/**1b-ii** after implementation measured ~519 changed
+lines against the 400-line review budget (protocol+host-cache vs. form-rendering — the same
+"wired but unused until the next PR" seam already used for 3a-i/3a-ii). This replaces the single
+`1b` row below and renumbers the rest of the stack by one.
 
 | Order | PR branch | Base branch | Task-id range | Slice |
 |---|---|---|---|---|
 | 1 | `feat/extended-snippet-draft-1a-introspection-core` | `main` | 1a.1–1a.4 | 1a |
-| 2 | `feat/extended-snippet-draft-1b-cache-and-form` | `feat/extended-snippet-draft-1a-introspection-core` | 1b.1–1b.3 | 1b |
-| 3 | `feat/extended-snippet-draft-2-call-function-box` | `feat/extended-snippet-draft-1b-cache-and-form` | 2.1–2.5 | 2 |
-| 4 | `feat/extended-snippet-draft-3a-i-theme-resolver-core` | `feat/extended-snippet-draft-2-call-function-box` | 3a-i.1–3a-i.4 | 3a-i |
-| 5 | `feat/extended-snippet-draft-3a-ii-theme-color-mapping` | `feat/extended-snippet-draft-3a-i-theme-resolver-core` | 3a-ii.1–3a-ii.2 | 3a-ii |
-| 6 | `feat/extended-snippet-draft-3b-semantic-highlighting` | `feat/extended-snippet-draft-3a-ii-theme-color-mapping` | 3b.1–3b.3 | 3b |
+| 2 | `feat/extended-snippet-draft-1b-i-protocol-and-cache` | `feat/extended-snippet-draft-1a-introspection-core` | 1b.1–1b.2 | 1b-i |
+| 3 | `feat/extended-snippet-draft-1b-ii-parameter-form` | `feat/extended-snippet-draft-1b-i-protocol-and-cache` | 1b.3 | 1b-ii |
+| 4 | `feat/extended-snippet-draft-2-call-function-box` | `feat/extended-snippet-draft-1b-ii-parameter-form` | 2.1–2.5 | 2 |
+| 5 | `feat/extended-snippet-draft-3a-i-theme-resolver-core` | `feat/extended-snippet-draft-2-call-function-box` | 3a-i.1–3a-i.4 | 3a-i |
+| 6 | `feat/extended-snippet-draft-3a-ii-theme-color-mapping` | `feat/extended-snippet-draft-3a-i-theme-resolver-core` | 3a-ii.1–3a-ii.2 | 3a-ii |
+| 7 | `feat/extended-snippet-draft-3b-semantic-highlighting` | `feat/extended-snippet-draft-3a-ii-theme-color-mapping` | 3b.1–3b.3 | 3b |
 
 Notes:
 
-- Slice 2 is stacked after 1b (not directly after 1a) even though it only needs 1a's shipped
-  symbols, because 1b already merges to main first in this strict linear stack — `stacked-to-main`
-  here means one linear chain, not parallel branches off 1a. If parallel review of 1b and 2 is
-  desired later, that requires reopening the chain-strategy decision; not assumed here.
-- Revert order mirrors the reverse of this table: 3b → 3a-ii → 3a-i → 2 → 1b → 1a. Each revert is
-  clean because protocol branches are additive and no slice references a later slice's symbols
+- Slice 2 is stacked after 1b-ii (not directly after 1a) even though it only needs 1a's shipped
+  symbols, because 1b-i/1b-ii already merge to main first in this strict linear stack —
+  `stacked-to-main` here means one linear chain, not parallel branches off 1a. If parallel review
+  is desired later, that requires reopening the chain-strategy decision; not assumed here.
+- Revert order mirrors the reverse of this table: 3b → 3a-ii → 3a-i → 2 → 1b-ii → 1b-i → 1a. Each
+  revert is clean because protocol branches are additive and no slice references a later slice's symbols
   (per design's Migration/Rollout section).
 - Each PR's diff should be reviewed against the merged tree of its base branch, not against
   `main`, consistent with a stacked-PR workflow.

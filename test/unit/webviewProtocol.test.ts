@@ -46,6 +46,36 @@ describe("webview protocol", () => {
     expect(() => webviewToHostMessageSchema.parse({ ...base, vintages: ["current", "removed", "current"] })).toThrow();
   });
 
+  it("accepts a well-formed requestSignature intent", () => {
+    expect(() => webviewToHostMessageSchema.parse({ type: "requestSignature", requestId: "r1", sourceId, targetId: "function:a" })).not.toThrow();
+  });
+
+  it("rejects a requestSignature intent missing targetId or carrying a malformed sourceId", () => {
+    expect(() => webviewToHostMessageSchema.parse({ type: "requestSignature", requestId: "r1", sourceId })).toThrow();
+    expect(() => webviewToHostMessageSchema.parse({ type: "requestSignature", requestId: "r1", sourceId: { ...sourceId, endByte: -1 }, targetId: "function:a" })).toThrow();
+    expect(() => webviewToHostMessageSchema.parse({ type: "requestSignature", requestId: "r1", sourceId, targetId: "" })).toThrow();
+  });
+
+  it("round-trips signatureResult and signatureUnavailable as HostToWebviewMessage variants", () => {
+    const result: Extract<HostToWebviewMessage, { type: "signatureResult" }> = {
+      type: "signatureResult",
+      requestId: "r1",
+      targetId: "function:a",
+      parameters: [{ name: "x", kind: "POSITIONAL_OR_KEYWORD", annotation: "int", defaultRepr: null, required: true }],
+      cached: false,
+    };
+    expect(result.parameters[0]).toMatchObject({ name: "x", annotation: "int" });
+    expect(result.cached).toBe(false);
+
+    const unavailable: Extract<HostToWebviewMessage, { type: "signatureUnavailable" }> = {
+      type: "signatureUnavailable",
+      requestId: "r1",
+      targetId: "function:a",
+      reason: "Docker is not available.",
+    };
+    expect(unavailable.reason).toContain("Docker");
+  });
+
   it("carries a shared ops sequence on sourcePair and drops per-source affectedLines", () => {
     const message: Extract<HostToWebviewMessage, { type: "sourcePair" }> = {
       type: "sourcePair",

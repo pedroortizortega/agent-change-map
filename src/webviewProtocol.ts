@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { DTO_LIMITS, sourceIdSchema, type AnalysisGraph, type SourceId } from "./protocol.js";
 import type { CorrelatedDiffEntry } from "./navigation/sourceProvider.js";
-import type { RunResult, SnippetVariant } from "./execution/dockerRunner.js";
+import type { IntrospectionParameter, RunResult, SnippetVariant } from "./execution/dockerRunner.js";
 import type { WriteEffectPreview } from "./editing/writeGuard.js";
 import type { DiffOp } from "./diff/lineDiff.js";
 
@@ -49,6 +49,7 @@ export const webviewToHostMessageSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("confirmRun"), requestId, confirmed: z.boolean() }),
   z.object({ type: z.literal("cancelRun"), requestId }),
   z.object({ type: z.literal("requestRefresh"), requestId }),
+  z.object({ type: z.literal("requestSignature"), requestId, sourceId: sourceIdSchema, targetId: requestId }),
 ]);
 
 export type WebviewToHostMessage = z.infer<typeof webviewToHostMessageSchema>;
@@ -71,4 +72,6 @@ export type HostToWebviewMessage =
   | { type: "error"; message: string }
   | { type: "refreshResult"; requestId: string; ok: true }
   | { type: "refreshResult"; requestId: string; ok: false; reason: string }
-  | { type: "refreshDeferred"; reason: string };
+  | { type: "refreshDeferred"; reason: string }
+  | { type: "signatureResult"; requestId: string; targetId: string; parameters: IntrospectionParameter[]; cached: boolean }
+  | { type: "signatureUnavailable"; requestId: string; targetId: string; reason: string };

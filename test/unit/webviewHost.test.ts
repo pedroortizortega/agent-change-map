@@ -22,26 +22,34 @@ function makeStore(): SnapshotStore {
   return store;
 }
 
-function makeDeps(store: SnapshotStore, overrides: { requestRefresh?: () => Promise<void>; onIdle?: () => void } = {}) {
+function makeDeps(
+  store: SnapshotStore,
+  overrides: { requestRefresh?: () => Promise<void>; onIdle?: () => void; runIntrospection?: ReturnType<typeof vi.fn>; draftStore?: DraftStore } = {},
+) {
   const posted: HostToWebviewMessage[] = [];
   const openSource = vi.fn();
   const performWrite = vi.fn();
   const runSnippet = vi.fn();
+  const { draftStore, ...rest } = overrides;
   const session = new ChangeMapSession({
     repoRoot: "/repo",
     store,
-    draftStore: new DraftStore(),
+    draftStore: draftStore ?? new DraftStore(),
     post: (message) => posted.push(message),
     openSource,
     performWrite,
     runSnippet,
-    ...overrides,
+    ...rest,
   });
   return { session, posted, openSource, performWrite, runSnippet };
 }
 
 function entity(id: string, qualifiedName: string): Entity {
   return { id, kind: "function", qualifiedName, span };
+}
+
+function targetEntity(id: string, qualifiedName: string, dottedName = qualifiedName): Entity {
+  return { id, kind: "function", qualifiedName, span, target: { module: "m", dottedName, callableKind: "function" } };
 }
 
 describe("mergeGraphsForDisplay", () => {
@@ -360,6 +368,101 @@ describe("ChangeMapSession execution", () => {
     await Promise.resolve();
     await session.handleIntent({ type: "cancelRun", requestId: "run3" });
     expect(capturedSignal?.aborted).toBe(true);
+  });
+});
+
+describe("ChangeMapSession signature introspection cache", () => {
+  function loadTargetGraph(session: ChangeMapSession, id = "function:f", dottedName = "f"): void {
+    const right: AnalysisGraph = { snapshot: rightSnapshot, nodes: [targetEntity(id, "f", dottedName)], edges: [], diagnostics: [] };
+    session.loadComparison(undefined, right, []);
+  }
+
+  function sourceIdFor(): import("../../src/protocol.js").SourceId {
+    return createSourceId(rightSnapshot, "m.py", content, 0, content.length);
+  }
+
+  it("reuses the cached signature on a second request for the same unchanged target (cache hit)", async () => {
+    const store = makeStore();
+    const runIntrospection = vi.fn().mockResolvedValue({ kind: "signatureResult", parameters: [{ name: "x", kind: "POSITIONAL_OR_KEYWORD", required: true }] });
+    const { session, posted } = makeDeps(store, { runIntrospection });
+    loadTargetGraph(session);
+    const sourceId = sourceIdFor();
+
+    await session.handleIntent({ type: "requestSignature", requestId: "s1", sourceId, targetId: "function:f" });
+    expect(runIntrospection).toHaveBeenCalledTimes(1);
+    expect(posted.at(-1)).toMatchObject({ type: "signatureResult", requestId: "s1", targetId: "function:f", cached: false });
+
+    await session.handleIntent({ type: "requestSignature", requestId: "s2", sourceId, targetId: "function:f" });
+    expect(runIntrospection).toHaveBeenCalledTimes(1);
+    expect(posted.at(-1)).toMatchObject({ type: "signatureResult", requestId: "s2", targetId: "function:f", cached: true, parameters: [{ name: "x" }] });
+  });
+
+  it("triggers a fresh introspection round-trip when the snippet content for that target changes (cache miss)", async () => {
+    const store = makeStore();
+    const runIntrospection = vi
+      .fn()
+      .mockResolvedValueOnce({ kind: "signatureResult", parameters: [{ name: "x", kind: "POSITIONAL_OR_KEYWORD", required: true }] })
+      .mockResolvedValueOnce({ kind: "signatureResult", parameters: [{ name: "y", kind: "POSITIONAL_OR_KEYWORD", required: true }] });
+    const draftStore = new DraftStore();
+    const { session, posted } = makeDeps(store, { runIntrospection, draftStore });
+    loadTargetGraph(session);
+    const sourceId = sourceIdFor();
+
+    await session.handleIntent({ type: "requestSignature", requestId: "s1", sourceId, targetId: "function:f" });
+    expect(runIntrospection).toHaveBeenCalledTimes(1);
+
+    draftStore.save(store, sourceId, "def f(y):\n    return y\n");
+    await session.handleIntent({ type: "requestSignature", requestId: "s2", sourceId, targetId: "function:f" });
+    expect(runIntrospection).toHaveBeenCalledTimes(2);
+    expect(posted.at(-1)).toMatchObject({ type: "signatureResult", requestId: "s2", cached: false, parameters: [{ name: "y" }] });
+  });
+
+  it("evicts the least-recently-used cache entry once a 33rd distinct key is inserted", async () => {
+    const store = makeStore();
+    const runIntrospection = vi.fn().mockImplementation(async (source: SnippetSource) => ({ kind: "signatureResult", parameters: [{ name: source.content, kind: "POSITIONAL_OR_KEYWORD", required: true }] }));
+    const draftStore = new DraftStore();
+    const { session, posted } = makeDeps(store, { runIntrospection, draftStore });
+    loadTargetGraph(session);
+    const sourceId = sourceIdFor();
+
+    for (let i = 0; i < 32; i += 1) {
+      draftStore.save(store, sourceId, `content-${i}\n`);
+      await session.handleIntent({ type: "requestSignature", requestId: `fill-${i}`, sourceId, targetId: "function:f" });
+    }
+    expect(runIntrospection).toHaveBeenCalledTimes(32);
+
+    // Re-request the oldest (content-0) key: still cached (32 entries fit exactly).
+    draftStore.save(store, sourceId, "content-0\n");
+    await session.handleIntent({ type: "requestSignature", requestId: "recheck-0", sourceId, targetId: "function:f" });
+    expect(runIntrospection).toHaveBeenCalledTimes(32);
+    expect(posted.at(-1)).toMatchObject({ cached: true });
+
+    // Insert a 33rd distinct key: evicts content-1 (the least-recently-used, since content-0
+    // was just refreshed to most-recent above).
+    draftStore.save(store, sourceId, "content-32\n");
+    await session.handleIntent({ type: "requestSignature", requestId: "fill-32", sourceId, targetId: "function:f" });
+    expect(runIntrospection).toHaveBeenCalledTimes(33);
+
+    draftStore.save(store, sourceId, "content-1\n");
+    await session.handleIntent({ type: "requestSignature", requestId: "recheck-1", sourceId, targetId: "function:f" });
+    expect(runIntrospection).toHaveBeenCalledTimes(34);
+    expect(posted.at(-1)).toMatchObject({ cached: false });
+
+    draftStore.save(store, sourceId, "content-0\n");
+    await session.handleIntent({ type: "requestSignature", requestId: "recheck-0-again", sourceId, targetId: "function:f" });
+    expect(runIntrospection).toHaveBeenCalledTimes(34);
+    expect(posted.at(-1)).toMatchObject({ cached: true });
+  });
+
+  it("replies signatureUnavailable and never spawns or caches when Docker/introspection is unavailable", async () => {
+    const store = makeStore();
+    const { session, posted } = makeDeps(store);
+    loadTargetGraph(session);
+    const sourceId = sourceIdFor();
+
+    await session.handleIntent({ type: "requestSignature", requestId: "s1", sourceId, targetId: "function:f" });
+    expect(posted.at(-1)).toMatchObject({ type: "signatureUnavailable", requestId: "s1", targetId: "function:f" });
+    expect((posted.at(-1) as { reason: string }).reason).toEqual(expect.any(String));
   });
 });
 
