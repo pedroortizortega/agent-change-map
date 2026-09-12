@@ -1,6 +1,6 @@
 import type { AnalysisGraph, Edge, Entity } from "../src/protocol.js";
 import type { CorrelatedDiffEntry } from "../src/navigation/sourceProvider.js";
-import { edgePathsFor, pathEndpoints, type Point, type Rect } from "./edgeGeometry.js";
+import { edgePathFor, edgePathsFor, pathEndpoints, type Point, type Rect } from "./edgeGeometry.js";
 import { changeStatusFor, NESTED_LAYOUT_LIMITS, type ChangeStatus } from "./graphFilters.js";
 
 export interface Position {
@@ -450,6 +450,69 @@ function buildEdges(edges: readonly Edge[], boxes: Map<string, Rect>, overrides:
     });
   });
   return result;
+}
+
+export interface LiveDragUpdate {
+  nodeId: string;
+  position: Position;
+  edgeOverrides: Map<number, { path: string; startPoint: Point; endPoint: Point }>;
+}
+
+/**
+ * Pure state transition for an in-progress drag (design.md §4, "Live re-routing during a
+ * drag"). This is the fix for a real regression: `<ReactFlow nodes={...}>` was fed straight
+ * from `layoutGraph`'s own absolute-position output (via `useMemo`), which only reflects a
+ * COMMITTED `positionOverrides` entry (written on drop) — never React Flow's own in-progress
+ * drag position. Because the controlled `nodes` prop never changed reference during the drag,
+ * the dragged box visually snapped back to its pre-drag position on every re-render mid-gesture
+ * (looking static), while the previous edge-preview logic re-anchored edges against whatever it
+ * read independently — producing lines detached from both the box and the pointer. The fix:
+ * this function's `position` result must be merged into whatever feeds the `nodes` prop (so the
+ * box itself visually tracks the live position), and its `edgeOverrides` must be applied to the
+ * SAME live position, so the box and its lines move together.
+ *
+ * `layout` is the layout as of the START of this drag gesture (pre-drag `boxes`/`edges`,
+ * unaffected by this drag in progress). `overrides` are any already-committed absolute
+ * positions from earlier drags. `position` is the CURRENT in-progress position React Flow's own
+ * `onNodesChange` just reported for `nodeId`. `movedDescendantIds` mirrors `onNodeDragStop`'s
+ * own D14 cascade (a dragged container also carries its nested descendants).
+ *
+ * Returns `undefined` only when `nodeId` has no box in `layout.boxes` (defensive — should not
+ * happen for a real drag event).
+ */
+export function computeLiveDragUpdate(input: {
+  layout: Pick<LayoutResult, "boxes" | "edges">;
+  overrides: ReadonlyMap<string, Position>;
+  nodeId: string;
+  position: Position;
+  movedDescendantIds: readonly string[];
+}): LiveDragUpdate | undefined {
+  const { layout, overrides, nodeId, position, movedDescendantIds } = input;
+  const before = layout.boxes.get(nodeId);
+  if (!before) return undefined;
+  const dx = position.x - before.x;
+  const dy = position.y - before.y;
+
+  const liveBoxes = new Map(boxesForRouting(layout.boxes, overrides));
+  const draggedBox = liveBoxes.get(nodeId);
+  if (!draggedBox) return undefined;
+  liveBoxes.set(nodeId, { ...draggedBox, x: position.x, y: position.y });
+  const movedIds = new Set<string>([nodeId, ...movedDescendantIds]);
+  for (const descendantId of movedDescendantIds) {
+    const box = liveBoxes.get(descendantId);
+    if (box) liveBoxes.set(descendantId, { ...box, x: box.x + dx, y: box.y + dy });
+  }
+
+  const edgeOverrides = new Map<number, { path: string; startPoint: Point; endPoint: Point }>();
+  for (const edge of layout.edges) {
+    if (!movedIds.has(edge.source) && !movedIds.has(edge.target)) continue;
+    const path = edgePathFor(liveBoxes, edge.source, edge.target);
+    if (!path) continue;
+    const { start, end } = pathEndpoints(path);
+    edgeOverrides.set(edge.data.edgeIndex, { path, startPoint: start, endPoint: end });
+  }
+
+  return { nodeId, position, edgeOverrides };
 }
 
 /** THE entry point index.tsx calls. */

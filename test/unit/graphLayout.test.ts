@@ -3,6 +3,7 @@ import {
   KIND_STYLE,
   clusterConnectedRoots,
   computeChildrenOf,
+  computeLiveDragUpdate,
   isContainerKind,
   layoutGraph,
   measure,
@@ -303,5 +304,103 @@ describe("layoutGraph", () => {
   it("does not degrade to flat at or below NESTED_LAYOUT_LIMITS.nodes", () => {
     const result = layoutGraph({ graph: nestedGraph(), diff: [], untrackedPaths: [], overrides: new Map() });
     expect(result.flat).toBe(false);
+  });
+});
+
+describe("computeLiveDragUpdate", () => {
+  /** Regression coverage for the live-drag visual-freeze bug: `<ReactFlow nodes={...}>` is fed
+   * from `layoutGraph`'s own absolute-position output, which never reflects React Flow's own
+   * in-progress drag position — only the committed `positionOverrides` written on drop. Without
+   * this function's result being merged back into whatever feeds the `nodes` prop, a dragged
+   * box visually snaps back to its pre-drag position on every re-render mid-gesture (looking
+   * static), while any edge-preview logic reading a DIFFERENT position than what's rendered
+   * produces edges detached from both the box and the pointer — exactly the reported symptom. */
+  function twoFunctionGraph(): AnalysisGraph {
+    return {
+      snapshot,
+      nodes: [
+        { id: "function:pkg.f", kind: "function", qualifiedName: "pkg.f", span },
+        { id: "function:pkg.g", kind: "function", qualifiedName: "pkg.g", span },
+      ],
+      edges: [{ kind: "call", source: "function:pkg.f", resolution: { kind: "resolved", target: "function:pkg.g" }, span }],
+      diagnostics: [],
+    };
+  }
+
+  it("reports the dragged node's exact live position, not the stale pre-drag layout position", () => {
+    const layout = layoutGraph({ graph: twoFunctionGraph(), diff: [], untrackedPaths: [], overrides: new Map() });
+    const before = layout.boxes.get("function:pkg.f")!;
+    const livePosition = { x: before.x + 500, y: before.y + 300 };
+
+    const update = computeLiveDragUpdate({
+      layout,
+      overrides: new Map(),
+      nodeId: "function:pkg.f",
+      position: livePosition,
+      movedDescendantIds: [],
+    });
+
+    expect(update).toBeDefined();
+    expect(update!.position).toEqual(livePosition);
+    expect(update!.position).not.toEqual({ x: before.x, y: before.y });
+  });
+
+  it("re-anchors edges touching the dragged node against the LIVE position, not the stale committed box", () => {
+    const layout = layoutGraph({ graph: twoFunctionGraph(), diff: [], untrackedPaths: [], overrides: new Map() });
+    const staleEdge = layout.edges.find((edge) => edge.source === "function:pkg.f")!;
+    const before = layout.boxes.get("function:pkg.f")!;
+    const livePosition = { x: before.x + 500, y: before.y + 300 };
+
+    const update = computeLiveDragUpdate({
+      layout,
+      overrides: new Map(),
+      nodeId: "function:pkg.f",
+      position: livePosition,
+      movedDescendantIds: [],
+    });
+
+    const liveEdge = update!.edgeOverrides.get(staleEdge.data.edgeIndex);
+    expect(liveEdge).toBeDefined();
+    // The re-anchored edge must actually move with the live position — not stay pinned at the
+    // stale, pre-drag anchor (which is exactly the "lines offset from where you're dragging"
+    // symptom the user reported).
+    expect(liveEdge!.startPoint).not.toEqual(staleEdge.data.startPoint);
+  });
+
+  it("leaves edges that do not touch the dragged node (or its cascaded descendants) untouched", () => {
+    const layout = layoutGraph({ graph: twoFunctionGraph(), diff: [], untrackedPaths: [], overrides: new Map() });
+    const before = layout.boxes.get("function:pkg.f")!;
+
+    const update = computeLiveDragUpdate({
+      layout,
+      overrides: new Map(),
+      nodeId: "function:pkg.f",
+      position: { x: before.x + 500, y: before.y + 300 },
+      movedDescendantIds: [],
+    });
+
+    // Only the one edge touching "function:pkg.f" exists in this fixture, and it DOES get an
+    // override; a node with no edges at all produces an empty override map.
+    const isolatedUpdate = computeLiveDragUpdate({
+      layout: { boxes: layout.boxes, edges: [] },
+      overrides: new Map(),
+      nodeId: "function:pkg.g",
+      position: { x: 0, y: 0 },
+      movedDescendantIds: [],
+    });
+    expect(update!.edgeOverrides.size).toBe(1);
+    expect(isolatedUpdate!.edgeOverrides.size).toBe(0);
+  });
+
+  it("returns undefined for a node absent from the layout's boxes", () => {
+    const layout = layoutGraph({ graph: twoFunctionGraph(), diff: [], untrackedPaths: [], overrides: new Map() });
+    const update = computeLiveDragUpdate({
+      layout,
+      overrides: new Map(),
+      nodeId: "function:pkg.does-not-exist",
+      position: { x: 0, y: 0 },
+      movedDescendantIds: [],
+    });
+    expect(update).toBeUndefined();
   });
 });

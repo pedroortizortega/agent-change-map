@@ -11,8 +11,7 @@ import {
   type NodeTypes,
 } from "@xyflow/react";
 import { bindRelationshipDetails } from "./relationshipDetails.js";
-import { boxesForRouting, layoutGraph, type AcmEdge } from "./graphLayout.js";
-import { edgePathFor, pathEndpoints } from "./edgeGeometry.js";
+import { computeLiveDragUpdate, layoutGraph, type AcmEdge, type Position } from "./graphLayout.js";
 import { AcmEntityNode } from "./nodes/AcmEntityNode.js";
 import { AcmKindEdge } from "./edges/AcmKindEdge.js";
 import { PositionOverrides, descendantsOf } from "./positionOverrides.js";
@@ -306,7 +305,21 @@ function App() {
     return layoutGraph({ graph: state.graph, diff: state.diff, untrackedPaths: state.untrackedPaths, overrides: new Map(positionOverrides.entries()) });
     // `overrideSeq` is the drag-commit trigger (see `onNodeDragStop`); `positionOverrides` is a stable ref.
   }, [state.graph, state.diff, state.untrackedPaths, overrideSeq]);
-  const nodes = layout?.nodes ?? [];
+
+  /** Live drag-preview position for the node currently being dragged (regression fix — see
+   * `computeLiveDragUpdate`'s doc comment in `graphLayout.ts` for the full root cause). `nodes`
+   * below is derived from `layout`, which only reflects COMMITTED `positionOverrides` (written
+   * on drop); without merging this live position in, the array passed to
+   * `<ReactFlow nodes={...}>` never changes reference during the gesture, so the box visually
+   * snaps back to its pre-drag spot on every re-render mid-drag. Cleared on `onNodeDragStop`,
+   * once the committed `positionOverrides` + `layoutGraph` re-run takes over as authoritative. */
+  const [liveDrag, setLiveDrag] = useState<{ nodeId: string; position: Position } | undefined>(undefined);
+
+  const nodes = useMemo(() => {
+    const base = layout?.nodes ?? [];
+    if (!liveDrag) return base;
+    return base.map((node) => (node.id === liveDrag.nodeId ? { ...node, position: liveDrag.position } : node));
+  }, [layout, liveDrag]);
 
   /** Live edge-path preview during an in-progress drag (design.md §4, "Live re-routing during a
    * drag" — documented but never actually wired up until now, see `onNodesChange` below). Keyed
@@ -359,34 +372,19 @@ function App() {
           change.type === "position" && change.dragging === true && !!change.position,
       );
       if (!dragChange) return;
-      const nodeId = dragChange.id;
-      const position = dragChange.position!;
-      const before = layout.boxes.get(nodeId); // pre-drag absolute box, mirroring onNodeDragStop's own convention
-      if (!before) return;
-      const dx = position.x - before.x;
-      const dy = position.y - before.y;
-
-      const liveBoxes = new Map(boxesForRouting(layout.boxes, new Map(positionOverrides.entries())));
-      const draggedBox = liveBoxes.get(nodeId);
-      if (!draggedBox) return;
-      liveBoxes.set(nodeId, { ...draggedBox, x: position.x, y: position.y });
-      const movedIds = new Set<string>([nodeId]);
-      for (const descendantId of descendantsOf(nodeId, layout)) {
-        // D14 cascade, mirrored for the live preview.
-        movedIds.add(descendantId);
-        const box = liveBoxes.get(descendantId);
-        if (box) liveBoxes.set(descendantId, { ...box, x: box.x + dx, y: box.y + dy });
-      }
-
-      const overrides = new Map<number, { path: string; startPoint: { x: number; y: number }; endPoint: { x: number; y: number } }>();
-      for (const edge of layout.edges) {
-        if (!movedIds.has(edge.source) && !movedIds.has(edge.target)) continue;
-        const path = edgePathFor(liveBoxes, edge.source, edge.target);
-        if (!path) continue;
-        const { start, end } = pathEndpoints(path);
-        overrides.set(edge.data.edgeIndex, { path, startPoint: start, endPoint: end });
-      }
-      setLiveEdgeOverrides(overrides);
+      const update = computeLiveDragUpdate({
+        layout,
+        overrides: new Map(positionOverrides.entries()),
+        nodeId: dragChange.id,
+        position: dragChange.position!,
+        movedDescendantIds: descendantsOf(dragChange.id, layout), // D14 cascade, mirrored for the live preview
+      });
+      if (!update) return;
+      // Merging BOTH the node's own live position and its edges' re-anchored paths from the
+      // SAME `update` is exactly what keeps the box and its lines moving together in sync with
+      // the pointer — see `computeLiveDragUpdate`'s doc comment for the regression this fixes.
+      setLiveDrag({ nodeId: update.nodeId, position: update.position });
+      setLiveEdgeOverrides(update.edgeOverrides);
     },
     [layout],
   );
@@ -403,6 +401,7 @@ function App() {
         const box = layout.boxes.get(descendantId);
         if (box) positionOverrides.set(descendantId, { x: box.x + dx, y: box.y + dy });
       }
+      setLiveDrag(undefined); // the drop below re-runs the full coordinated layout, which is now authoritative
       setLiveEdgeOverrides(undefined); // the drop below re-runs the full coordinated router
       setOverrideSeq((s) => s + 1); // re-run layoutGraph
     },
