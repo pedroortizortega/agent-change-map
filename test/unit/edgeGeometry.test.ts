@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  CORNER_RADIUS,
   CURVE_MIN_DROP,
   DETOUR_CLEARANCE,
   MAX_DETOURS,
@@ -8,6 +9,8 @@ import {
   STUB_LEN,
   edgePathFor,
   obstaclesFor,
+  pathEndpoints,
+  roundedPolylinePath,
   routeWaypoints,
   segmentIntersectsRect,
   sourceAnchor,
@@ -555,6 +558,67 @@ describe("edgePathFor — an edge whose target is nested inside its own source",
     for (const p of points) {
       expect(p.y).toBeLessThan(initBox.y);
     }
+  });
+});
+
+describe("roundedPolylinePath — corner-rounding (visual redesign, post-PR4)", () => {
+  it("keeps a 2-point (no-corner) polyline byte-identical to the plain polyline shape", () => {
+    const points: Point[] = [{ x: 0, y: 0 }, { x: 0, y: 100 }];
+    expect(roundedPolylinePath(points)).toBe("M0,0 L0,100");
+  });
+
+  it("preserves the exact start and end point of a polyline with an interior corner", () => {
+    const points: Point[] = [{ x: 0, y: 0 }, { x: 40, y: 0 }, { x: 40, y: 100 }];
+    const d = roundedPolylinePath(points);
+    const { start, end } = pathEndpoints(d);
+    expect(start).toEqual(points[0]);
+    expect(end).toEqual(points[2]);
+  });
+
+  it("inserts one Q command per interior corner, never touching the topology (waypoint count/order)", () => {
+    const points: Point[] = [{ x: 0, y: 0 }, { x: 40, y: 0 }, { x: 40, y: 100 }, { x: 80, y: 100 }];
+    const d = roundedPolylinePath(points);
+    expect(d.match(/Q/g)?.length).toBe(2); // two interior corners
+    expect(d).toMatch(/^M0,0 L[\d.]+,0 Q40,0 40,[\d.]+ L40,[\d.]+ Q40,100 [\d.]+,100 L80,100$/);
+  });
+
+  it("clamps the rounding radius to half the shorter adjacent segment so it never overshoots a short leg", () => {
+    // The segment from (0,0) to (2,0) is only 2px long; an 8px default radius would overshoot
+    // past its own start point (and past the corner on the other side) if not clamped to half
+    // of the SHORTER adjacent segment (1px here).
+    const points: Point[] = [{ x: 0, y: 0 }, { x: 2, y: 0 }, { x: 2, y: 100 }];
+    const d = roundedPolylinePath(points);
+    const match = /^M0,0 L([\d.]+),0 Q2,0 2,([\d.]+) L2,100$/.exec(d);
+    expect(match).not.toBeNull();
+    expect(Number(match![1])).toBeGreaterThanOrEqual(0);
+    expect(Number(match![1])).toBeLessThanOrEqual(2);
+    expect(Number(match![2])).toBeLessThanOrEqual(1); // clamped to half of the 2px leg
+  });
+
+  it("respects a custom radius argument", () => {
+    const points: Point[] = [{ x: 0, y: 0 }, { x: 40, y: 0 }, { x: 40, y: 100 }];
+    const d = roundedPolylinePath(points, 20);
+    expect(d).toContain("L20,0");
+  });
+
+  it(`defaults to CORNER_RADIUS (${CORNER_RADIUS}px)`, () => {
+    const points: Point[] = [{ x: 0, y: 0 }, { x: 40, y: 0 }, { x: 40, y: 100 }];
+    expect(roundedPolylinePath(points)).toBe(roundedPolylinePath(points, CORNER_RADIUS));
+  });
+});
+
+describe("pathEndpoints", () => {
+  it("reads the start point from a plain M/L path and the end point from its final destination", () => {
+    expect(pathEndpoints("M10,20 L10,50 L30,50")).toEqual({ start: { x: 10, y: 20 }, end: { x: 30, y: 50 } });
+  });
+
+  it("reads the correct end point past a Bezier tail's control points", () => {
+    expect(pathEndpoints("M10,20 C10,30 30,40 30,50")).toEqual({ start: { x: 10, y: 20 }, end: { x: 30, y: 50 } });
+  });
+
+  it("reads the correct end point past a rounded corner's Q command", () => {
+    const d = roundedPolylinePath([{ x: 0, y: 0 }, { x: 40, y: 0 }, { x: 40, y: 100 }]);
+    expect(pathEndpoints(d)).toEqual({ start: { x: 0, y: 0 }, end: { x: 40, y: 100 } });
   });
 });
 

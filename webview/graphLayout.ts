@@ -1,6 +1,6 @@
 import type { AnalysisGraph, Edge, Entity } from "../src/protocol.js";
 import type { CorrelatedDiffEntry } from "../src/navigation/sourceProvider.js";
-import { edgePathsFor, type Rect } from "./edgeGeometry.js";
+import { edgePathsFor, pathEndpoints, type Point, type Rect } from "./edgeGeometry.js";
 import { changeStatusFor, NESTED_LAYOUT_LIMITS, type ChangeStatus } from "./graphFilters.js";
 
 export interface Position {
@@ -326,6 +326,13 @@ export type AcmEdge = {
     path: string;
     pathId: string;
     title: string;
+    /** The path's own rendered start/end coordinates (visual redesign, post-PR4): where the
+     * edge visually attaches to its source/target box, used to draw the small port-dot circles
+     * in `AcmKindEdge.tsx`. Read off the router's own final `d` string via `pathEndpoints`
+     * (see its doc comment) rather than recomputed independently, so a port dot can never
+     * disagree with where the edge itself actually starts/ends. */
+    startPoint: Point;
+    endPoint: Point;
   };
 };
 
@@ -402,7 +409,7 @@ function buildNodes(
  * `positionOverrides.pruneTo` key off) intentionally stays the raw, un-overridden layout — only
  * the boxes fed into routing are merged, here, at the call site.
  */
-function boxesForRouting(boxes: Map<string, Rect>, overrides: ReadonlyMap<string, Position>): Map<string, Rect> {
+export function boxesForRouting(boxes: Map<string, Rect>, overrides: ReadonlyMap<string, Position>): Map<string, Rect> {
   if (overrides.size === 0) return boxes;
   const merged = new Map(boxes);
   for (const [id, box] of boxes) {
@@ -423,6 +430,7 @@ function buildEdges(edges: readonly Edge[], boxes: Map<string, Rect>, overrides:
     const path = paths.get(index);
     if (path === undefined) return;
     const pathId = `acm-edge-path-${index}`;
+    const { start, end } = pathEndpoints(path);
     result.push({
       id: `e${index}`,
       source: edge.source,
@@ -436,6 +444,8 @@ function buildEdges(edges: readonly Edge[], boxes: Map<string, Rect>, overrides:
         path,
         pathId,
         title: `resolved -> ${targetId}`,
+        startPoint: start,
+        endPoint: end,
       },
     });
   });

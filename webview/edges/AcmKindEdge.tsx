@@ -49,6 +49,13 @@ export function AcmKindEdge({ data }: EdgeProps<AcmEdge>) {
           <mpath href={`#${data.pathId}`} />
         </animateMotion>
       </circle>
+      {/* Port dots (visual redesign, post-PR4): a small neutral connector dot at the edge's own
+       * rendered start/end - layout chrome shared by every edge kind, not part of the per-kind
+       * palette, so it is styled uniformly via CSS (`.acm-edge-port`) rather than through
+       * `edgeStyleConfig.ts`. Coordinates come straight from `data.startPoint`/`data.endPoint`
+       * (graphLayout.ts's `pathEndpoints`), never re-derived from `data.path` here. */}
+      <circle className="acm-edge-port" cx={data.startPoint.x} cy={data.startPoint.y} />
+      <circle className="acm-edge-port" cx={data.endPoint.x} cy={data.endPoint.y} />
     </g>
   );
 }
