@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { AnalysisGraph, Edge, Entity, SourceId } from "./protocol.js";
-import type { EdgeVintage } from "../webview/graphView.js";
+import type { EdgeVintage } from "../webview/graphFilters.js";
 import type { SnapshotStore } from "./snapshots/snapshotStore.js";
 import type { CorrelatedDiffEntry } from "./navigation/sourceProvider.js";
 import { computeContentHash, createSourceId, gatherImportBundle, resolveModuleSource, resolveSource, StaleSourceError } from "./navigation/sourceProvider.js";
@@ -13,7 +13,7 @@ import { buildCallDriver, buildIntrospectionDriver } from "./execution/callDrive
 import { DEFAULT_PALETTE, type ThemeTokens } from "./theme/themeResolver.js";
 import type { EntityTarget } from "./protocol.js";
 import { isOversized, webviewToHostMessageSchema } from "./webviewProtocol.js";
-import { filterGraph, suppressAncestorSelfReferences, type GraphFilter } from "../webview/graphView.js";
+import { filterGraph, suppressAncestorSelfReferences, type GraphFilter } from "../webview/graphFilters.js";
 import type { HostToWebviewMessage } from "./webviewProtocol.js";
 import { diffLines } from "./diff/lineDiff.js";
 

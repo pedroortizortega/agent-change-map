@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { randomBytes } from "node:crypto";
 import { resolve } from "node:path";
-import { buildCspMetaTag } from "../webview/graphView.js";
+import { buildCspMetaTag } from "../webview/graphFilters.js";
 import { resolveRepoRoot, type GitSelection } from "./git/gitService.js";
 import { SnapshotStore } from "./snapshots/snapshotStore.js";
 import { DraftStore } from "./editing/draftStore.js";
