@@ -870,3 +870,78 @@ Extension Development Host.
 6/6 visual-redesign tasks complete (`[x]` in tasks.md), plus the folded-in live-drag bug fix.
 Full gate green. Section 5 (PR5, hover highlight) remains open and unaffected — no files in its
 future scope (`hoverId` state, `.acm-dim`/`.acm-hot`) were touched.
+
+## Post-visual-redesign regression: live-drag box froze while its edges moved (mis-anchored)
+
+**Reported (screenshot, user's own words, translated)**: dragging the "route2" node, the box
+stayed visually static (didn't move with the mouse), but the connecting lines DID move — except
+detached from where the user was actually dragging, tracking neither the mouse nor the
+(non-moving) box.
+
+### Root cause
+
+`webview/index.tsx`'s `nodes` array fed to `<ReactFlow nodes={...}>` was derived purely via
+`useMemo(() => layoutGraph(...), [state.graph, state.diff, state.untrackedPaths, overrideSeq])`.
+`layoutGraph`'s absolute node positions only reflect COMMITTED `positionOverrides` — written by
+`onNodeDragStop` on drop, via `overrideSeq`'s bump. The `onNodesChange` handler wired up in the
+prior commits (1784f0e/f9ba140/006e900/ed7eb50) computed a live-edge-preview (`liveEdgeOverrides`)
+but never wrote the in-progress drag position anywhere the `nodes` prop could see: the array
+passed to `<ReactFlow>` kept the exact same (pre-drag) position for that node on every re-render
+triggered mid-gesture by `setLiveEdgeOverrides` itself. React Flow's own internal drag-preview
+rendering was being effectively overridden back to the stale controlled position on each of those
+re-renders — the box never visually moved. Meanwhile the edge-preview logic WAS computing fresh
+paths against the live pointer position, so the lines moved — but toward a target the box itself
+was never actually rendered at, producing exactly the reported "lines offset from where they're
+moving the point" / "confusing to see where the box will end up" symptom.
+
+This is a canonical controlled-component bug: React Flow expects the `nodes` array itself to be
+the single source of truth reflecting `onNodesChange`'s reported live position, not just the
+final committed one.
+
+### Fix
+
+- Extracted the drag→state transition into a **pure, unit-tested** function,
+  `computeLiveDragUpdate` (`webview/graphLayout.ts`): given the pre-drag layout, any already-
+  committed `positionOverrides`, and the live `NodeChange.position`, it returns (a) the dragged
+  node's own live position verbatim, and (b) re-anchored `path`/`startPoint`/`endPoint` for every
+  edge touching that node or its dragged container's descendants (D14 cascade), all computed
+  against ONE locally patched `boxes` clone — so the box and its lines are guaranteed to agree.
+- `webview/index.tsx`'s `onNodesChange` now calls `computeLiveDragUpdate` and applies its result
+  to TWO pieces of state: the existing `liveEdgeOverrides` (edges) and a new `liveDrag` (the
+  node's own live position). A new `nodes` `useMemo` merges `liveDrag.position` into the
+  `layoutGraph`-derived node array for that one node id, so `<ReactFlow nodes={...}>` actually
+  reflects the in-progress drag. `onNodeDragStop` clears `liveDrag` (alongside the existing
+  `liveEdgeOverrides` clear) once the committed `positionOverrides` + `layoutGraph` re-run takes
+  over as authoritative — this drop-time path was already correct/tested from PR3 and is
+  unchanged.
+
+### TDD Cycle Evidence
+
+| Task | RED | GREEN | REFACTOR |
+|---|---|---|---|
+| `computeLiveDragUpdate` (live position pass-through, edge re-anchoring, untouched-edge/absent-node cases) | `test/unit/graphLayout.test.ts` `describe("computeLiveDragUpdate", ...)` — 4 new cases, all failing with `TypeError: computeLiveDragUpdate is not a function` before implementation | Implemented in `webview/graphLayout.ts`; all 4 new cases pass, full suite 27/27 in that file | Wired into `webview/index.tsx` (`onNodesChange`/`onNodeDragStop`/new `nodes` `useMemo`) without changing the pure function; no further logic change needed |
+
+### Work Unit Evidence
+
+| Evidence | Value |
+|---|---|
+| Focused test command and result | `npx vitest run test/unit/graphLayout.test.ts` → 27/27 passed (4 new `computeLiveDragUpdate` cases) |
+| Runtime harness command/scenario and result | `npm run test:e2e` → all scenarios passed, exit code 0 (no dedicated drag-gesture scenario exists — jsdom/the VS Code test harness cannot simulate a real pointer-drag gesture; the state-logic layer (`computeLiveDragUpdate`) is the testable substitute per the task's own instruction. Full visual confirmation of smooth box+edge tracking during an actual mouse drag remains a MANUAL/visual check, explicitly noted as untestable by automation here.) |
+| Rollback boundary | Single commit `9db8eba` on `feat/react-flow-diagram-migration`, touching only `webview/graphLayout.ts`, `webview/index.tsx`, `test/unit/graphLayout.test.ts` — revertable independently of PR1-PR4 and the visual-redesign commits above it |
+
+### Full gate results (this fix)
+
+- `npm run typecheck` → clean
+- `npm run lint` → clean (`--max-warnings=0`)
+- `npm run test` → 538/538 passed (34 files)
+- `npm run test:e2e` → all scenarios passed, exit code 0
+- `npm run build:webview` → succeeds (`out/webview/webview/index.js` 1.1mb, expected/pre-existing size warning)
+
+### Status
+
+Regression fixed and committed (`9db8eba`). Full gate green. This was a real functional bug that
+prior automated tests (green) did not catch, because the previous test suite (`webviewDom.test.ts`
+per its own header comment) explicitly defers pan/zoom/drag/hover to "React Flow's own" behavior
+and never asserted anything about the app's OWN state-merge logic during a drag. The new
+`computeLiveDragUpdate` unit tests close that specific gap for the state-logic layer; the actual
+pixel-tracking smoothness during a live pointer drag still requires manual/visual confirmation.
