@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { DTO_LIMITS, sourceIdSchema, type AnalysisGraph, type SourceId } from "./protocol.js";
+import type { TokenRole } from "./theme/themeResolver.js";
 import type { CorrelatedDiffEntry } from "./navigation/sourceProvider.js";
 import type { IntrospectionParameter, RunResult, SnippetVariant } from "./execution/dockerRunner.js";
 import type { WriteEffectPreview } from "./editing/writeGuard.js";
@@ -78,4 +79,7 @@ export type HostToWebviewMessage =
   | { type: "signatureResult"; requestId: string; targetId: string; parameters: IntrospectionParameter[]; cached: boolean }
   | { type: "signatureUnavailable"; requestId: string; targetId: string; reason: string }
   | { type: "callConfirmationRequired"; requestId: string; dottedName: string; argsPreview: string }
-  | { type: "callResult"; requestId: string; result: RunResult; returnRepr?: string };
+  | { type: "callResult"; requestId: string; result: RunResult; returnRepr?: string }
+  /** Design D8 (slice 3a-ii). Posted on activation and re-posted on theme/config change;
+   * the webview does not consume it yet (slice 3b renders with it). */
+  | { type: "themeTokens"; kind: "light" | "dark" | "highContrast"; colors: Record<TokenRole, string> };

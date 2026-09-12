@@ -5,8 +5,12 @@ import {
   findThemeContributor,
   resolveIncludeChain,
   resolveThemeDocument,
+  resolveThemeTokens,
+  resolveTokenColors,
   stripJsonc,
+  DEFAULT_PALETTE,
   type ExtensionLike,
+  type ThemeResolverIO,
 } from "../../src/theme/themeResolver.js";
 
 const FIXTURES_DIR = join(__dirname, "..", "fixtures", "themes");
@@ -185,5 +189,126 @@ describe("resolveThemeDocument (impure seam wired to the pure resolver)", () => 
     });
 
     expect(doc).toBeUndefined();
+  });
+});
+
+describe("resolveTokenColors", () => {
+  it("resolves parameter/class/function roles via the tokenColors scope map when semanticTokenColors covers none of them (dark_plus-style shape)", () => {
+    const document = {
+      tokenColors: [
+        { scope: ["entity.name.type.class", "entity.name.type"], settings: { foreground: "#4EC9B0" } },
+        { scope: ["entity.name.function", "support.function"], settings: { foreground: "#DCDCAA" } },
+        { scope: ["variable.parameter", "variable"], settings: { foreground: "#9CDCFE" } },
+      ],
+      semanticTokenColors: {
+        newOperator: { foreground: "#C586C0" },
+        stringLiteral: { foreground: "#CE9178" },
+        customLiteral: { foreground: "#4EC9B0" },
+        numberLiteral: { foreground: "#B5CEA8" },
+      },
+    };
+
+    const { colors } = resolveTokenColors(document, "dark");
+
+    expect(colors.className).toBe("#4EC9B0");
+    expect(colors.functionName).toBe("#DCDCAA");
+    expect(colors.parameter).toBe("#9CDCFE");
+  });
+
+  it("applies longest-prefix, last-matching-rule-wins scope matching for tokenColors", () => {
+    const document = {
+      tokenColors: [
+        { scope: "entity.name.function", settings: { foreground: "#111111" } },
+        { scope: "entity.name.function", settings: { foreground: "#222222" } },
+        { scope: "support.function", settings: { foreground: "#333333" } },
+      ],
+    };
+
+    const { colors } = resolveTokenColors(document, "dark");
+
+    // Same specificity for the two "entity.name.function" rules -> last one wins.
+    expect(colors.functionName).toBe("#222222");
+  });
+
+  it("degrades a plist-path tokenColors value (not an array) to the default palette instead of throwing or plist-parsing", () => {
+    const document = { tokenColors: "./some-theme.tmTheme" };
+
+    const { colors } = resolveTokenColors(document, "dark");
+
+    expect(colors.className).toBe(DEFAULT_PALETTE.dark.className);
+    expect(colors.functionName).toBe(DEFAULT_PALETTE.dark.functionName);
+  });
+
+  it("falls back to the default palette entirely when no theme document is available", () => {
+    const { colors } = resolveTokenColors(undefined, "light");
+
+    expect(colors).toEqual(DEFAULT_PALETTE.light);
+  });
+
+  it("applies the full override precedence chain: semantic customization > textMate customization > theme semanticTokenColors > theme tokenColors > default palette", () => {
+    const document = {
+      tokenColors: [{ scope: "entity.name.function", settings: { foreground: "#FROM-THEME-TOKENCOLORS" } }],
+      semanticTokenColors: { function: { foreground: "#FROM-THEME-SEMANTIC" } },
+    };
+
+    const overrides = {
+      semanticTokenColorCustomizations: { rules: { function: "#FROM-SEMANTIC-OVERRIDE" } },
+      colorCustomizationsTextMateRules: [{ scope: "entity.name.function", settings: { foreground: "#FROM-TEXTMATE-OVERRIDE" } }],
+    };
+
+    expect(resolveTokenColors(document, "dark", overrides).colors.functionName).toBe("#FROM-SEMANTIC-OVERRIDE");
+    expect(resolveTokenColors(document, "dark", { colorCustomizationsTextMateRules: overrides.colorCustomizationsTextMateRules }).colors.functionName).toBe("#FROM-TEXTMATE-OVERRIDE");
+    expect(resolveTokenColors(document, "dark").colors.functionName).toBe("#FROM-THEME-SEMANTIC");
+    expect(resolveTokenColors({ tokenColors: document.tokenColors }, "dark").colors.functionName).toBe("#FROM-THEME-TOKENCOLORS");
+    expect(resolveTokenColors(undefined, "dark").colors.functionName).toBe(DEFAULT_PALETTE.dark.functionName);
+  });
+});
+
+describe("resolveThemeTokens (never-throw entry point)", () => {
+  const failingIo: ThemeResolverIO = {
+    listExtensions: () => [],
+    readFile: async () => {
+      throw new Error("should never be reached - no contributor found");
+    },
+  };
+
+  it("returns the default palette, never throwing, for every 3a-i failure mode", async () => {
+    const missingTheme = await resolveThemeTokens({ themeId: "Nonexistent Theme", kind: "dark", io: failingIo });
+    expect(missingTheme.colors).toEqual(DEFAULT_PALETTE.dark);
+
+    const cycleExtension: ExtensionLike = {
+      extensionPath: FIXTURES_DIR,
+      packageJSON: { contributes: { themes: [{ id: "Cycle Theme", path: "./cycle-a.json" }] } },
+    };
+    const cycleResult = await resolveThemeTokens({
+      themeId: "Cycle Theme",
+      kind: "light",
+      io: { listExtensions: () => [cycleExtension], readFile: readFixtureFile },
+    });
+    expect(cycleResult.colors).toEqual(DEFAULT_PALETTE.light);
+
+    const plistExtension: ExtensionLike = {
+      extensionPath: FIXTURES_DIR,
+      packageJSON: { contributes: { themes: [{ id: "Plist Theme", path: "./tmtheme-path.json" }] } },
+    };
+    const plistResult = await resolveThemeTokens({
+      themeId: "Plist Theme",
+      kind: "highContrast",
+      io: { listExtensions: () => [plistExtension], readFile: readFixtureFile },
+    });
+    expect(plistResult.colors).toEqual(DEFAULT_PALETTE.highContrast);
+  });
+
+  it("degrades to the default palette when the resolver seam itself throws", async () => {
+    const throwingIo: ThemeResolverIO = {
+      listExtensions: () => {
+        throw new Error("boom");
+      },
+      readFile: readFixtureFile,
+    };
+
+    const result = await resolveThemeTokens({ themeId: "Anything", kind: "dark", io: throwingIo });
+
+    expect(result.colors).toEqual(DEFAULT_PALETTE.dark);
   });
 });

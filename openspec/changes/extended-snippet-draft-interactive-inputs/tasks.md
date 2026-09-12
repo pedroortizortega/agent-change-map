@@ -4,10 +4,11 @@ Strict TDD: every implementation task is preceded by its RED test task (test wri
 observed failing before the corresponding production code is written). Tasks are grouped by
 slice per design.md's "Migration / Rollout" section, further split for review-budget compliance
 per the user's delivery decision (`delivery_strategy=auto-chain`, `chain_strategy=stacked-to-main`):
-**1a**, **1b-i**, **1b-ii**, **2-i**, **2-ii**, **3a-i**, **3a-ii**, **3b** — eight review-sized
-PRs (1b and 2 were each split in two after implementation measured over the 400-line budget). No
-slice references a later slice's symbols. Revert order is 3b → 3a-ii → 3a-i → 2-ii → 2-i → 1b-ii
-→ 1b-i → 1a. See "Delivery Plan" at the end of this document for the exact branch stacking order.
+**1a**, **1b-i**, **1b-ii**, **2-i**, **2-ii**, **3a-i**, **3a-ii-a**, **3a-ii-b**, **3b** — nine
+review-sized PRs (1b, 2, and 3a-ii were each split in two after implementation measured over the
+400-line budget; 3a-i was kept as one PR with a documented `size:exception`). No slice references
+a later slice's symbols. Revert order is 3b → 3a-ii-b → 3a-ii-a → 3a-i → 2-ii → 2-i → 1b-ii →
+1b-i → 1a. See "Delivery Plan" at the end of this document for the exact branch stacking order.
 
 ---
 
@@ -341,9 +342,15 @@ logic yet (Slice 3a-ii).
 Depends on: Slice 3a-i (consumes its merged theme document). Task-id range: **3a-ii.1–3a-ii.2**
 (was 3a.5–3a.6).
 
-### 3a-ii.1 — Role→color mapping, override precedence, and `tokenColors`-as-plist-path fallback
+**PR split (review-budget guard, applied after implementation measured ~553 changed lines against
+the 400-line budget)**: task 3a-ii.1 ships as **3a-ii-a** (pure color-extraction/precedence/
+degrade logic — 378 lines), task 3a-ii.2 ships as **3a-ii-b** (host wiring that consumes it — 175
+lines). Unlike 3a-i, this seam splits cleanly with BOTH halves under budget, so no `size:exception`
+was needed — same pattern as 1b-i/1b-ii.
 
-- [ ] **RED**: `test/unit/themeResolver.test.ts` — cases:
+### 3a-ii.1 — Role→color mapping, override precedence, and `tokenColors`-as-plist-path fallback — ships in PR **3a-ii-a**
+
+- [x] **RED**: `test/unit/themeResolver.test.ts` — cases:
       - `semanticTokenColorCustomizations` (user override) wins over `workbench.
         colorCustomizations.textMateRules` wins over theme `semanticTokenColors` wins over theme
         `tokenColors` fallback scope map wins over the kind-based default palette — assert the
@@ -364,13 +371,13 @@ Depends on: Slice 3a-i (consumes its merged theme document). Task-id range: **3a
       Satisfies: `snippet-semantic-highlighting` spec scenario "Unresolvable identifier role
       falls back gracefully"; design D8 degradation contract ("total and silent-to-the-user-but-
       logged").
-- [ ] **GREEN**: `src/theme/themeResolver.ts` — scope→role mapping, override layering, default
+- [x] **GREEN**: `src/theme/themeResolver.ts` — scope→role mapping, override layering, default
       palette fallback.
 
 ### 3a-ii.2 — Host wiring: resolve on activation, re-resolve on theme/config change, post
-      (unconsumed)
+      (unconsumed) — ships in PR **3a-ii-b**
 
-- [ ] **RED**: `test/unit/webviewHost.test.ts` — add cases:
+- [x] **RED**: `test/unit/webviewHost.test.ts` — add cases:
       - on panel creation, `themeResolver` is invoked and a `themeTokens` message is posted.
       - `onDidChangeActiveColorTheme` triggers a re-resolve and a new `themeTokens` post.
       - `onDidChangeConfiguration` for each of the four watched keys (`workbench.colorTheme`,
@@ -380,9 +387,18 @@ Depends on: Slice 3a-i (consumes its merged theme document). Task-id range: **3a
         `themeTokens` post with the default palette — panel rendering is never blocked.
       Satisfies: `snippet-semantic-highlighting` spec scenario "Theme change updates rendered
       colors" (wiring half; rendering consumption is 3b).
-- [ ] **GREEN**: `src/webviewHost.ts` — theme forwarding on activation + the two watched-event
+
+      Note: the RED cases for `onDidChangeActiveColorTheme`/`onDidChangeConfiguration` and the
+      four watched keys are exercised through the vscode-free `subscribeThemeChange` seam (one
+      generic re-resolve trigger, mirroring the existing `onAutoRefreshConfigChange` convention);
+      the real `vscode` event filtering for the four keys lives in `src/extension.ts` and is
+      wired but not covered by a dedicated unit test in this slice (no `vscode` mock harness
+      exists for `extension.ts` yet).
+- [x] **GREEN**: `src/webviewHost.ts` — theme forwarding on activation + the two watched-event
       listeners; `src/webviewProtocol.ts` — `themeTokens` branch (RED for this branch belongs in
-      `webviewProtocol.test.ts`, round-trip only, alongside the above).
+      `webviewProtocol.test.ts`, round-trip only, alongside the above); `src/extension.ts` —
+      real `vscode` wiring (`resolveActiveThemeTokens`, `onDidChangeActiveColorTheme`/
+      `onDidChangeConfiguration` subscriptions for the four watched keys).
 
 **Slice 3a-ii exit criteria**: `themeResolver.ts` fully covered by fixture tests including all
 adversarial/degrade paths; host posts `themeTokens` on activation and on both change events; no
@@ -503,7 +519,14 @@ lines against the 400-line review budget (protocol+host-cache vs. form-rendering
 **Update 2**: slice 2 was split into **2-i**/**2-ii** after implementation measured ~642 changed
 lines (call-path plumbing vs. call-box UI). 2-i (~424 lines) was accepted as `size:exception` —
 6% over budget on one tightly-coupled plumbing chain (driver, runner, protocol, host) rather than
-splitting further. This replaces the single `2` row below and renumbers the rest of the stack.
+splitting further.
+
+**Update 3**: slice 3a-i (~535 lines) was accepted as `size:exception` in a single PR — new
+isolated module, no clean split available (include-chain resolution needs JSONC-stripping
+already applied). Slice 3a-ii was split into **3a-ii-a**/**3a-ii-b** after implementation
+measured ~553 changed lines: unlike 3a-i, this seam (pure color-precedence logic vs. host wiring)
+splits cleanly with BOTH halves under budget (378 + 175), so no exception was needed here. This
+replaces the single `3a-ii` row below and renumbers the rest of the stack.
 
 | Order | PR branch | Base branch | Task-id range | Slice |
 |---|---|---|---|---|
@@ -513,8 +536,9 @@ splitting further. This replaces the single `2` row below and renumbers the rest
 | 4 | `feat/extended-snippet-draft-2-i-call-plumbing` | `feat/extended-snippet-draft-1b-ii-parameter-form` | 2.1–2.4 | 2-i |
 | 5 | `feat/extended-snippet-draft-2-ii-call-box-ui` | `feat/extended-snippet-draft-2-i-call-plumbing` | 2.5 | 2-ii |
 | 6 | `feat/extended-snippet-draft-3a-i-theme-resolver-core` | `feat/extended-snippet-draft-2-ii-call-box-ui` | 3a-i.1–3a-i.4 | 3a-i |
-| 7 | `feat/extended-snippet-draft-3a-ii-theme-color-mapping` | `feat/extended-snippet-draft-3a-i-theme-resolver-core` | 3a-ii.1–3a-ii.2 | 3a-ii |
-| 8 | `feat/extended-snippet-draft-3b-semantic-highlighting` | `feat/extended-snippet-draft-3a-ii-theme-color-mapping` | 3b.1–3b.3 | 3b |
+| 7 | `feat/extended-snippet-draft-3a-ii-a-color-precedence` | `feat/extended-snippet-draft-3a-i-theme-resolver-core` | 3a-ii.1 | 3a-ii-a |
+| 8 | `feat/extended-snippet-draft-3a-ii-b-theme-host-wiring` | `feat/extended-snippet-draft-3a-ii-a-color-precedence` | 3a-ii.2 | 3a-ii-b |
+| 9 | `feat/extended-snippet-draft-3b-semantic-highlighting` | `feat/extended-snippet-draft-3a-ii-b-theme-host-wiring` | 3b.1–3b.3 | 3b |
 
 Notes:
 
