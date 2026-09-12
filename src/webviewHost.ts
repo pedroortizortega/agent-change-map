@@ -7,8 +7,9 @@ import { computeContentHash, createSourceId, resolveSource, StaleSourceError } f
 import type { DraftStore } from "./editing/draftStore.js";
 import type { DirectWriteRequest, WriteEffectPreview, WriteReceipt } from "./editing/writeGuard.js";
 import { WriteConfirmationDeclinedError, WriteGuardError } from "./editing/writeGuard.js";
-import type { IntrospectionOutcome, IntrospectionParameter, RunOptions, RunResult, SnippetSource, SnippetVariant } from "./execution/dockerRunner.js";
-import { buildIntrospectionDriver } from "./execution/callDriver.js";
+import type { CallOutcome, IntrospectionOutcome, IntrospectionParameter, RunOptions, RunResult, SnippetSource, SnippetVariant } from "./execution/dockerRunner.js";
+import { buildCallDriver, buildIntrospectionDriver } from "./execution/callDriver.js";
+import type { EntityTarget } from "./protocol.js";
 import { isOversized, webviewToHostMessageSchema } from "./webviewProtocol.js";
 import { filterGraph, suppressAncestorSelfReferences, type GraphFilter } from "../webview/graphView.js";
 import type { HostToWebviewMessage } from "./webviewProtocol.js";
@@ -137,6 +138,12 @@ export interface SessionDeps {
    */
   runIntrospection?: (source: SnippetSource, options?: RunOptions) => Promise<IntrospectionOutcome>;
   /**
+   * Runs a synthesized call driver program inside the sandbox (design D2/D3), invoking
+   * the target with the confirmed args. Absent when Docker is unavailable to this host —
+   * `executeCall` then always posts an `error` rather than attempting a spawn.
+   */
+  runCall?: (source: SnippetSource, options?: RunOptions) => Promise<CallOutcome>;
+  /**
    * Re-runs capture/diff/analysis for the panel's original selection and re-loads the
    * result. Absent when the session is constructed without refresh support (e.g. a stale
    * test double); the `requestRefresh` intent then always refuses rather than fabricating
@@ -164,6 +171,10 @@ export class ChangeMapSession {
   private readonly usedRequestIds = new Set<string>();
   private readonly pendingWriteConfirmations = new Map<string, (confirmed: boolean) => void>();
   private readonly pendingRunConfirmations = new Map<string, (confirmed: boolean) => void>();
+  /** Own confirm step for invocation, mirroring `pendingRunConfirmations` but tracked
+   * independently (design D5) — a run confirmation never satisfies a call confirmation
+   * and vice versa. */
+  private readonly pendingCallConfirmations = new Map<string, (confirmed: boolean) => void>();
   private readonly activeRuns = new Map<string, AbortController>();
   /** Bounded LRU (design D4), insertion order used as recency order: a hit is moved to the
    * end via delete+re-insert; the oldest (front) entry is evicted once size exceeds the cap. */
@@ -175,7 +186,12 @@ export class ChangeMapSession {
 
   /** True while a write confirmation, a run confirmation, or an active run is outstanding. */
   isBusy(): boolean {
-    return this.pendingWriteConfirmations.size > 0 || this.pendingRunConfirmations.size > 0 || this.activeRuns.size > 0;
+    return (
+      this.pendingWriteConfirmations.size > 0 ||
+      this.pendingRunConfirmations.size > 0 ||
+      this.pendingCallConfirmations.size > 0 ||
+      this.activeRuns.size > 0
+    );
   }
 
   /** Posts a `refreshDeferred` notification (auto-refresh queued rather than dropped while busy). */
@@ -315,6 +331,14 @@ export class ChangeMapSession {
       case "requestSignature":
         await this.handleRequestSignature(message.requestId, message.sourceId, message.targetId);
         return;
+      case "requestCall":
+        this.handleRequestCall(message.requestId, message.sourceId, message.targetId, message.args);
+        return;
+      case "confirmCall":
+        this.pendingCallConfirmations.get(message.requestId)?.(message.confirmed);
+        this.pendingCallConfirmations.delete(message.requestId);
+        this.notifyIfIdle();
+        return;
     }
   }
 
@@ -396,6 +420,63 @@ export class ChangeMapSession {
     }
   }
 
+  /**
+   * Requires its own explicit `confirmCall` before any container spawns (design D5,
+   * independent of any `confirmRun`/introspection confirmation). Resolves the target's
+   * `dottedName`/`callableKind` and the current snippet content up front, shows the exact
+   * args JSON preview, and only builds/executes the call driver once confirmed.
+   */
+  private handleRequestCall(requestId: string, sourceId: SourceId, targetId: string, args: Record<string, unknown>): void {
+    if (!this.claimRequest(requestId)) return;
+    const target = this.findEntityById(targetId)?.target;
+    if (!target) {
+      this.deps.post({ type: "error", message: "This selection has no callable target." });
+      return;
+    }
+    let content: string;
+    try {
+      content = this.deps.draftStore.get(sourceId)?.content ?? resolveSource(this.deps.store, sourceId);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.deps.post({ type: "error", message: reason });
+      return;
+    }
+    const argsPreview = JSON.stringify(args, null, 2);
+    const confirmed = new Promise<boolean>((resolveConfirm) => {
+      this.pendingCallConfirmations.set(requestId, resolveConfirm);
+      this.deps.post({ type: "callConfirmationRequired", requestId, dottedName: target.dottedName, argsPreview });
+    });
+    // Fire-and-forget: same convention as `handleRequestRun` — the caller learns the
+    // outcome exclusively through posted messages (`runEvent`/`callResult`/`error`).
+    void confirmed.then(async (isConfirmed) => {
+      if (!isConfirmed) {
+        this.deps.post({ type: "error", message: `Call declined for request ${requestId}` });
+        this.notifyIfIdle();
+        return;
+      }
+      await this.executeCall(requestId, sourceId, content, target, args);
+    });
+  }
+
+  private async executeCall(requestId: string, sourceId: SourceId, content: string, target: EntityTarget, args: Record<string, unknown>): Promise<void> {
+    if (!this.deps.runCall) {
+      this.deps.post({ type: "error", message: "Docker is not available; the call cannot run." });
+      this.notifyIfIdle();
+      return;
+    }
+    const driver = buildCallDriver(content, target.dottedName, target.callableKind, JSON.stringify(args));
+    let seq = 0;
+    const emit = (channel: "stdout" | "stderr", data: string): void => {
+      this.deps.post({ type: "runEvent", requestId, variant: "current", seq: seq++, channel, data });
+    };
+    try {
+      const outcome = await this.deps.runCall({ variant: "current", path: sourceId.posixPath, content: driver }, { onOutput: emit });
+      this.deps.post({ type: "callResult", requestId, result: outcome.result, returnRepr: outcome.returnRepr });
+    } finally {
+      this.notifyIfIdle();
+    }
+  }
+
   private findEntityById(id: string): Entity | undefined {
     return this.right?.nodes.find((node) => node.id === id) ?? this.left?.nodes.find((node) => node.id === id);
   }
@@ -403,6 +484,7 @@ export class ChangeMapSession {
   private describeBusy(): string {
     if (this.pendingWriteConfirmations.size > 0) return "A write confirmation is pending.";
     if (this.pendingRunConfirmations.size > 0) return "A run confirmation is pending.";
+    if (this.pendingCallConfirmations.size > 0) return "A call confirmation is pending.";
     return "A Docker run is active.";
   }
 

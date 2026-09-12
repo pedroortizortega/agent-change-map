@@ -4,9 +4,10 @@ Strict TDD: every implementation task is preceded by its RED test task (test wri
 observed failing before the corresponding production code is written). Tasks are grouped by
 slice per design.md's "Migration / Rollout" section, further split for review-budget compliance
 per the user's delivery decision (`delivery_strategy=auto-chain`, `chain_strategy=stacked-to-main`):
-**1a**, **1b**, **2**, **3a-i**, **3a-ii**, **3b** — six review-sized PRs. No slice references a
-later slice's symbols. Revert order is 3b → 3a-ii → 3a-i → 2 → 1b → 1a. See "Delivery Plan" at
-the end of this document for the exact branch stacking order.
+**1a**, **1b-i**, **1b-ii**, **2-i**, **2-ii**, **3a-i**, **3a-ii**, **3b** — eight review-sized
+PRs (1b and 2 were each split in two after implementation measured over the 400-line budget). No
+slice references a later slice's symbols. Revert order is 3b → 3a-ii → 3a-i → 2-ii → 2-i → 1b-ii
+→ 1b-i → 1a. See "Delivery Plan" at the end of this document for the exact branch stacking order.
 
 ---
 
@@ -156,9 +157,16 @@ Depends on: Slice 1a (`target` field, `callDriver.ts` module, `runIntrospection`
 for `runCall`). Can start once 1a.1–1a.4 land; does not need Slice 1b to begin its own RED tests.
 Task-id range: **2.1–2.5** (unchanged).
 
-### 2.1 — `buildCallDriver` — class `__init__` construction + function invocation shapes (D3)
+**PR split (review-budget guard, applied after implementation measured ~642 changed lines against
+the 400-line budget)**: tasks 2.1–2.4 ship as **2-i** (call-path plumbing: driver, runner,
+protocol, host — wired but not yet exposed in the UI; measured ~424 lines, accepted as
+`size:exception` — 6% over budget on one tightly-coupled plumbing chain), task 2.5 ships as
+**2-ii** (call-box UI + result area, measured ~218 lines) — same split seam already used for
+1b-i/1b-ii.
 
-- [ ] **RED**: `test/unit/callDriver.test.ts` — add cases:
+### 2.1 — `buildCallDriver` — class `__init__` construction + function invocation shapes (D3) — ships in PR **2-i**
+
+- [x] **RED**: `test/unit/callDriver.test.ts` — add cases:
       - function target: driver embeds `_t(**_ARGS)` call shape.
       - class target: driver constructs an instance (`_t(**_ARGS)` where `_t` resolves to the
         class, invoking `__init__` implicitly through construction).
@@ -172,12 +180,12 @@ Task-id range: **2.1–2.5** (unchanged).
       JSON payload, never interpolated into source" (scenario "An adversarial value must not
       execute as code"); Requirement "Construct a class instance via `__init__` for a class
       target" (scenario "Calling a class target constructs an instance").
-- [ ] **GREEN**: `src/execution/callDriver.ts` — `buildCallDriver(content, dottedName,
+- [x] **GREEN**: `src/execution/callDriver.ts` — `buildCallDriver(content, dottedName,
       callableKind, argsJson)`.
 
-### 2.2 — `runCall()` wrapper + `<<ACM>>` result frame handling for calls
+### 2.2 — `runCall()` wrapper + `<<ACM>>` result frame handling for calls — ships in PR **2-i**
 
-- [ ] **RED**: `test/unit/dockerRunner.test.ts` — add cases:
+- [x] **RED**: `test/unit/dockerRunner.test.ts` — add cases:
       - `runCall()` delegates to the same hardened argv builder (no new spawn path).
       - non-`.py` target rejected pre-spawn (same assertion pattern as 1.4, for the call path).
       - successful call: `<<ACM>>` frame with `{ok: true, repr}` parsed into a call result;
@@ -189,12 +197,12 @@ Task-id range: **2.1–2.5** (unchanged).
       Satisfies: `snippet-function-invocation` spec Requirement "Reuse the existing confirm → run
       → stream → cleanup pipeline" (both scenarios); `sandboxed-snippet-execution` spec scenario
       "Invocation run is cleaned up like an ordinary run".
-- [ ] **GREEN**: `src/execution/dockerRunner.ts` — `runCall()` wrapper.
+- [x] **GREEN**: `src/execution/dockerRunner.ts` — `runCall()` wrapper.
 
 ### 2.3 — Protocol branches: `requestCall` / `callConfirmationRequired` / `confirmCall` /
-      `callResult`
+      `callResult` — ships in PR **2-i**
 
-- [ ] **RED**: `test/unit/webviewProtocol.test.ts` — round-trip + rejection for
+- [x] **RED**: `test/unit/webviewProtocol.test.ts` — round-trip + rejection for
       `requestCall{requestId,sourceId,targetId,args}` (assert `args` is a `z.record(z.string()
       .max(256), z.unknown())` bound — an overlong key is rejected), `callConfirmationRequired
       {requestId,dottedName,argsPreview}`, `confirmCall{requestId,confirmed}`,
@@ -202,11 +210,11 @@ Task-id range: **2.1–2.5** (unchanged).
       Satisfies: `snippet-function-invocation` spec wire contract for confirm-before-invoke and
       result reporting (Requirements "Require an explicit confirm step..." and "Reuse the
       existing confirm → run → stream → cleanup pipeline").
-- [ ] **GREEN**: `src/webviewProtocol.ts` — add the four variants/branches.
+- [x] **GREEN**: `src/webviewProtocol.ts` — add the four variants/branches.
 
-### 2.4 — Host: `handleRequestCall`, `callConfirmationRequired`/`confirmCall`, `executeCall`
+### 2.4 — Host: `handleRequestCall`, `callConfirmationRequired`/`confirmCall`, `executeCall` — ships in PR **2-i**
 
-- [ ] **RED**: `test/unit/webviewHost.test.ts` — add cases:
+- [x] **RED**: `test/unit/webviewHost.test.ts` — add cases:
       - a `requestCall` triggers `callConfirmationRequired` and does **not** spawn a container
         yet, mirroring `pendingRunConfirmations` (D5) — assert it is tracked independently of any
         `confirmRun` state.
@@ -220,12 +228,12 @@ Task-id range: **2.1–2.5** (unchanged).
       before invoking, independent of introspection" (both scenarios); Requirement "Construct a
       class instance via `__init__` for a class target"; Requirement "Reuse the existing confirm
       → run → stream → cleanup pipeline" (both scenarios).
-- [ ] **GREEN**: `src/webviewHost.ts` — `handleRequestCall`, `callConfirmationRequired`
+- [x] **GREEN**: `src/webviewHost.ts` — `handleRequestCall`, `callConfirmationRequired`
       /`confirmCall` tracking, `executeCall`.
 
-### 2.5 — Call box UI + result area (webview)
+### 2.5 — Call box UI + result area (webview) — ships in PR **2-ii**
 
-- [ ] **RED**: `test/unit/webviewDom.test.ts` — add cases:
+- [x] **RED**: `test/unit/webviewDom.test.ts` — add cases:
       - "Call function" box renders a confirm step before any `requestCall` triggers a spawn
         (UI-level assertion that the confirm screen shows the exact args JSON preview, per D5's
         rationale that the run-preview format cannot express it).
@@ -235,7 +243,7 @@ Task-id range: **2.1–2.5** (unchanged).
       Satisfies: `snippet-function-invocation` spec Requirement "Require an explicit confirm step
       before invoking, independent of introspection" (scenario "Confirm before invocation",
       "Declining the call confirmation performs no invocation").
-- [ ] **GREEN**: `webview/index.ts` — call box + result area; `webview/styles.css` — call-box
+- [x] **GREEN**: `webview/index.ts` — call box + result area; `webview/styles.css` — call-box
       styles.
 
 **Slice 2 exit criteria**: selecting a function/class, filling the form, confirming, and calling
@@ -488,29 +496,34 @@ task-id seams defined above; totals are unchanged, only the partitioning is new.
 previous PR's branch (first PR bases on `main`). Merge/land in this exact order; `sdd-apply`
 should create branches and PRs mechanically from this table.
 
-**Update**: slice 1b was split into **1b-i**/**1b-ii** after implementation measured ~519 changed
+**Update 1**: slice 1b was split into **1b-i**/**1b-ii** after implementation measured ~519 changed
 lines against the 400-line review budget (protocol+host-cache vs. form-rendering — the same
-"wired but unused until the next PR" seam already used for 3a-i/3a-ii). This replaces the single
-`1b` row below and renumbers the rest of the stack by one.
+"wired but unused until the next PR" seam already used for 3a-i/3a-ii).
+
+**Update 2**: slice 2 was split into **2-i**/**2-ii** after implementation measured ~642 changed
+lines (call-path plumbing vs. call-box UI). 2-i (~424 lines) was accepted as `size:exception` —
+6% over budget on one tightly-coupled plumbing chain (driver, runner, protocol, host) rather than
+splitting further. This replaces the single `2` row below and renumbers the rest of the stack.
 
 | Order | PR branch | Base branch | Task-id range | Slice |
 |---|---|---|---|---|
 | 1 | `feat/extended-snippet-draft-1a-introspection-core` | `main` | 1a.1–1a.4 | 1a |
 | 2 | `feat/extended-snippet-draft-1b-i-protocol-and-cache` | `feat/extended-snippet-draft-1a-introspection-core` | 1b.1–1b.2 | 1b-i |
 | 3 | `feat/extended-snippet-draft-1b-ii-parameter-form` | `feat/extended-snippet-draft-1b-i-protocol-and-cache` | 1b.3 | 1b-ii |
-| 4 | `feat/extended-snippet-draft-2-call-function-box` | `feat/extended-snippet-draft-1b-ii-parameter-form` | 2.1–2.5 | 2 |
-| 5 | `feat/extended-snippet-draft-3a-i-theme-resolver-core` | `feat/extended-snippet-draft-2-call-function-box` | 3a-i.1–3a-i.4 | 3a-i |
-| 6 | `feat/extended-snippet-draft-3a-ii-theme-color-mapping` | `feat/extended-snippet-draft-3a-i-theme-resolver-core` | 3a-ii.1–3a-ii.2 | 3a-ii |
-| 7 | `feat/extended-snippet-draft-3b-semantic-highlighting` | `feat/extended-snippet-draft-3a-ii-theme-color-mapping` | 3b.1–3b.3 | 3b |
+| 4 | `feat/extended-snippet-draft-2-i-call-plumbing` | `feat/extended-snippet-draft-1b-ii-parameter-form` | 2.1–2.4 | 2-i |
+| 5 | `feat/extended-snippet-draft-2-ii-call-box-ui` | `feat/extended-snippet-draft-2-i-call-plumbing` | 2.5 | 2-ii |
+| 6 | `feat/extended-snippet-draft-3a-i-theme-resolver-core` | `feat/extended-snippet-draft-2-ii-call-box-ui` | 3a-i.1–3a-i.4 | 3a-i |
+| 7 | `feat/extended-snippet-draft-3a-ii-theme-color-mapping` | `feat/extended-snippet-draft-3a-i-theme-resolver-core` | 3a-ii.1–3a-ii.2 | 3a-ii |
+| 8 | `feat/extended-snippet-draft-3b-semantic-highlighting` | `feat/extended-snippet-draft-3a-ii-theme-color-mapping` | 3b.1–3b.3 | 3b |
 
 Notes:
 
-- Slice 2 is stacked after 1b-ii (not directly after 1a) even though it only needs 1a's shipped
+- Slice 2-i is stacked after 1b-ii (not directly after 1a) even though it only needs 1a's shipped
   symbols, because 1b-i/1b-ii already merge to main first in this strict linear stack —
   `stacked-to-main` here means one linear chain, not parallel branches off 1a. If parallel review
   is desired later, that requires reopening the chain-strategy decision; not assumed here.
-- Revert order mirrors the reverse of this table: 3b → 3a-ii → 3a-i → 2 → 1b-ii → 1b-i → 1a. Each
-  revert is clean because protocol branches are additive and no slice references a later slice's symbols
-  (per design's Migration/Rollout section).
+- Revert order mirrors the reverse of this table: 3b → 3a-ii → 3a-i → 2-ii → 2-i → 1b-ii → 1b-i →
+  1a. Each revert is clean because protocol branches are additive and no slice references a later
+  slice's symbols (per design's Migration/Rollout section).
 - Each PR's diff should be reviewed against the merged tree of its base branch, not against
   `main`, consistent with a stacked-PR workflow.
