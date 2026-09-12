@@ -1112,3 +1112,353 @@ Fixed and verified. Dragging a container will now visually carry its children al
 DURING the drag gesture itself (not just after releasing the mouse) — the same `dx`/`dy` offset
 `onNodeDragStop` already applied on drop is now also computed and applied live, per descendant, on
 every pointer-move frame. Base commit for this fix: `1df5201`.
+
+## Investigation: "route" container renders as empty box, `route.ruta1/2/3` detach as separate cluster (DIAGNOSIS ONLY, no code change)
+
+Orchestrator hypothesis was that this is a data-association bug upstream of the layout math
+(`computeChildrenOf` in `webview/graphLayout.ts` mis-grouping `Entity[]` by `containerId`), possibly
+introduced by this migration. Investigated with real production code paths; **no code was changed**
+in this task — the finding is that this is a genuine, pre-existing, out-of-migration-scope bug, not
+something PR1–PR5 introduced.
+
+### Ground truth attempted, and what's missing
+
+No fixture, e2e scenario, or sample data anywhere in the repo matches a "route/route2/.../app/config"
+module shape. `test/fixtures/` only contains `simple.py` and unrelated theme JSON fixtures;
+`test/e2e/scenarios.ts` has no "route" reference. There is no way to reproduce this with an existing
+repo fixture. **What would make progress possible**: the user's actual raw `AnalysisGraph` JSON for
+both `left` and `right` sides of the diff (or their real Python project source), so the exact
+`id`/`containerId`/`qualifiedName` values for the "route" node and its three children can be
+inspected directly instead of reasoned about. Absent that, I built a minimal synthetic repro using
+the unmodified, real production functions to test the hypothesis mechanically (script kept at
+`/tmp/claude-*/scratchpad/repro.mjs`, not committed — inline below).
+
+### What I found: `computeChildrenOf` itself is not the bug
+
+`webview/graphLayout.ts:55-85` (`computeChildrenOf`) is a byte-for-byte port of the pre-migration
+`webview/graphView.ts`'s function of the same name — confirmed identical back to commit `92b798c`
+("rewrite the change-map graph as a nested, kind-encoded diagram"), which predates PR1's split by
+many commits. Its logic (`byId.has(containerId)` else treat as an untethered root) is correct GIVEN
+correct input: if a child's `containerId` genuinely matches its container's `id` in the same `nodes`
+array, it nests correctly (already proven algebraically in the base commit `1df5201` investigation
+for the layout math, and now also proven for the grouping step with a synthetic array of 4 entities
+where `containerId` was set consistently — nests as expected, not the bug path).
+
+### Where the real problem is: `mergeGraphsForDisplay` (`src/webviewHost.ts:27-41`), combined with `python/analyzer.py`'s id scheme
+
+The diagram is a **diff view**: `ComparisonController.buildGraphForSelection`
+(`src/comparisonController.ts:91-95`) runs `python/analyzer.py` **twice, independently** — once
+against the `left` (original) git ref's files, once against the `right` (worktree/current) files —
+producing two separate `AnalysisGraph`s that are then merged for display by
+`mergeGraphsForDisplay`:
+
+```ts
+// src/webviewHost.ts:27-41
+export function mergeGraphsForDisplay(left, right): AnalysisGraph {
+  const byQualifiedName = new Map<string, Entity>();
+  for (const node of left?.nodes ?? []) byQualifiedName.set(node.qualifiedName, node);
+  for (const node of right?.nodes ?? []) byQualifiedName.set(node.qualifiedName, node);
+  ...
+  return { nodes: [...byQualifiedName.values()], ... };
+}
+```
+
+This dedups **independently per entity, keyed only by `qualifiedName`**, with "last write wins"
+(right overwrites left when both exist). Crucially, it does **not** guarantee that a chosen node and
+its chosen container come from the *same* analyzer pass — each qualifiedName's winner is picked in
+isolation.
+
+That's only safe if `id`/`containerId` are pure functions of `qualifiedName` (stable and identical
+across both independent passes). They are **not**, for every entity kind. From
+`python/analyzer.py`:
+
+- `entity_id(kind, qualified_name, start_byte=None)` (line 16): `f"{kind}:{qualified_name}"`, or
+  `f"{kind}:{qualified_name}@{start_byte}"` when a `start_byte` is supplied.
+- Package/module root ids (lines 277, 285) are built **without** `start_byte` → stable,
+  content-position-independent, identical across both analyzer passes for the same qualifiedName.
+- Class/function/method ids (`add_definition`, line 142): `entity_id(actual_kind, qualified_name,
+  span["startByte"])` — **includes `span["startByte"]`**, i.e. the definition's absolute byte offset
+  in its file. `containerId` for these (line 158) is `self.current_id` — the *id string* of
+  whatever enclosing scope was on the traversal stack at definition time, captured per-pass.
+
+Consequence: for any class/function/method whose enclosing container is itself a class or function
+(not the qualifiedName-stable package/module root), if an **unrelated edit anywhere earlier in the
+same file** shifts byte offsets between the `left` and `right` passes — or if the container itself
+was edited — the container's `id` differs between the two passes even when the container's
+qualifiedName is identical. If a child entity survives on only one side (e.g. deleted/moved on the
+other), `mergeGraphsForDisplay` picks that child's sole surviving version, carrying a `containerId`
+computed during a pass whose corresponding container `id` has since been overwritten by the other
+side's differently-offset version. The merged array now has a child whose `containerId` doesn't
+match any `id` in `byId` — `computeChildrenOf` (correctly, per its own contract) treats it as a
+detached root. Do this for a container's only 3 children simultaneously (e.g. all three
+deleted/moved on one side of the diff) and the container renders with **zero children** (an empty
+box) while all three appear as **separate root-level entities** elsewhere — exactly the reported
+symptom.
+
+I reproduced this mechanically end-to-end using the real, unmodified `mergeGraphsForDisplay` and
+`computeChildrenOf` implementations (only the Entity shape was synthesized, mirroring
+`python/analyzer.py`'s exact id scheme):
+
+```
+LEFT:  route@100 (root), route.ruta1@110→route@100, route.ruta2@120→route@100, route.ruta3@130→route@100
+RIGHT: route@140 (root; unrelated earlier edit shifted its startByte); ruta1/2/3 deleted on this side
+
+merged nodes: route(id=route@140), route.ruta1(containerId=route@100), route.ruta2(containerId=route@100), route.ruta3(containerId=route@100)
+computeChildrenOf output: container=undefined -> [route, route.ruta1, route.ruta2, route.ruta3]   ← all 4 as ROOTS
+```
+
+`route` ends up with zero children (empty box); `route.ruta1/2/3` end up as detached root siblings —
+this matches all three reported screenshots.
+
+**Caveat on the exact variant**: the user described "route" specifically as an *empty dashed box*.
+Per `webview/graphLayout.ts:32-38` (`KIND_STYLE`)/`isContainerKind`, the dashed stroke is reserved for
+`package`/`module` kinds only — and package/module root ids in `analyzer.py` are qualifiedName-only
+(no `startByte`), i.e. stable across passes on their own. So the exact reproduction above (a
+class/function-kind container with a shifting id) is the *mechanism*, proven to work through the real
+merge+grouping code, but if "route" is literally a `package`/`module` node, the more likely concrete
+trigger is a second, related gap in the same file: `package_sources`
+(`python/analyzer.py:274`, `{module_name(source.path): source for source in files if
+source.path.endswith("/__init__.py")}`) is recomputed **independently per analyzer invocation** from
+that invocation's own file list, and a package/module's `containerId` to its *parent* package is only
+set `if parent in package_sources` (line 279) / `if package in package_sources` (line 290) — gated,
+not unconditional. If the two independent analyzer passes ever see different file sets for the
+package's `__init__.py` (e.g. one side's snapshot omits it), a module's `containerId` can be entirely
+**unset** on one side while the module itself is otherwise identical, producing the same
+merge-picks-the-wrong-provenance detachment without needing any byte-offset shift at all. I could not
+mechanically confirm this second variant without the user's real left/right file lists — both
+variants funnel through the exact same `mergeGraphsForDisplay` dedup weakness.
+
+### Is this in scope for the React Flow migration? No — confirmed pre-existing, untouched by PR1-PR5
+
+- `mergeGraphsForDisplay`'s `byQualifiedName` last-write-wins dedup: unchanged since it was introduced
+  in the very first webview commit, `0d5057d` ("implement webview panel, change-map graph, and
+  Docker run UI") — `git log --oneline -S "byQualifiedName" -- src/webviewHost.ts` shows exactly one
+  hit, `0d5057d`. None of the migration commits (`2e45bd5`, `3f01e0d`, `656c444`, or PR1-PR4's commits)
+  touch `src/webviewHost.ts`'s merge logic.
+- `computeChildrenOf`'s containerId-matching logic: identical since `92b798c`, ported verbatim into
+  `webview/graphLayout.ts` by this migration's own PR1 (task 1.4), not altered in the port.
+- `python/analyzer.py`'s `entity_id`/`add_definition`/`package_sources` id scheme: entirely outside
+  `webview/`/`src/webviewHost.ts`, not part of this migration's scope at all.
+
+All three layers responsible predate and are untouched by this migration. **No code was changed for
+this investigation.**
+
+### Verification (baseline, confirming the investigation made no changes and nothing is broken)
+
+- `npm run typecheck` → clean
+- `npm run lint` → clean (`--max-warnings=0`)
+- `npm run test` → 540/540 passed (34 files)
+- `npm run test:e2e` → all scenarios passed, exit code 0
+
+### Recommendation to relay to the user
+
+This is a real bug, but it is an **analyzer/merge data-association bug**, separate from and
+predating the React Flow rendering migration — not something PR1-PR5 introduced or is scoped to fix.
+Fixing it properly needs a design decision in `mergeGraphsForDisplay` (e.g. merge per logical
+container tree instead of per independent qualifiedName, or have the analyzer emit fully
+content-independent/stable ids for every entity kind, not just package/module) and possibly in
+`python/analyzer.py`'s `entity_id`/`package_sources`. Recommend opening this as its own change/issue
+rather than folding it into this migration. To confirm the exact trigger (byte-offset shift vs.
+package-file-list gating) and design the right fix, the user's real left/right `AnalysisGraph` JSON
+(or the actual Python source before/after) for the "route" scenario is needed.
+
+## Section 5 (PR5, base: PR4) — Hover highlight + measurement — COMPLETE
+
+**This closes out the originally-planned PR chain.** PR1-PR5 (as re-scoped/split during apply: PR1,
+PR2a, PR2b-i, PR2b-ii, PR3, PR4, PR5 — 7 slices total, all stacked-to-main) implement the entire
+`react-flow-diagram-migration` proposal: rendering-engine swap to `@xyflow/react`, per-kind edge
+styling with a theme-native palette, an always-on directional particle per drawn edge, absolute-
+position drag with container-descendant cascade, and now hover highlight — plus several unplanned
+bugfix/visual-polish passes that landed on this branch between PR4 and PR5 (full list below).
+
+### TDD Cycle Evidence
+
+| Task | RED | GREEN | REFACTOR |
+|---|---|---|---|
+| 5.1-5.2 hover highlight | Added 3 cases to `webviewDom.test.ts` (node hover, edge hover, hover-leave); confirmed failing (`expected false to be true` on `.acm-hot`/`.acm-dim` presence) against the pre-existing codebase (no `hoverId`/handlers existed) | Implemented `hoverId` state, `useMemo(highlightNodes/highlightEdges)` via `getIncomers`/`getOutgoers`/`getConnectedEdges`, `onNode/EdgeMouseEnter/Leave` handlers, `.acm-dim`/`.acm-hot` CSS (did not previously exist in `styles.css` — verified by reading the file before assuming, per instructions); all 3 pass | Ran full `npm test` — no regressions |
+| 5.3 D9 regression guard | Added a 4th case asserting `<animateMotion>` DOM-node identity (`isSameNode`, not just presence) stays stable across a hover-enter/leave cycle on an edge. First run: genuinely RED — not because hover changed `data`, but because of the adjacent node-remeasurement bug described below (discovered BY this test, not anticipated) | Fixed by stamping `measured: {width, height}` onto every node object passed to `<ReactFlow>` (see below); confirmed GREEN, including the DOM-identity assertion | Ran full `npm test` (545/545) + `npm run lint` + `npm run typecheck` — all green |
+
+### Real bug found and fixed: hover was silently unmounting/remounting every edge in the graph
+
+The D9 regression test (5.3) initially failed with a genuine DOM-identity mismatch — hovering ANY
+node or edge caused **every** `AcmKindEdge` in the graph to unmount and immediately remount (verified
+by instrumenting `AcmKindEdge` with a mount/unmount `useEffect` logger: both edges in a 2-edge fixture
+unmounted then remounted on a single hover). Root cause, traced into `@xyflow/system`'s
+`adoptUserNodes`/`parseHandles`:
+
+- `adoptUserNodes` only reuses a node's already-computed internal state (critically,
+  `handleBounds`, which every edge touching that node needs to resolve a real connection point)
+  when the incoming node object is **either** the exact same reference as before, **or** already
+  carries a `measured` field.
+- `parseHandles`'s fallback for a node with no `handles` array (our `AcmEntityNode` case — it uses
+  real `<Handle>` components, not declarative `node.handles` data) is: `!userNode.measured ?
+  undefined : internalNode?.internals.handleBounds`. Our `AcmNode` type never sets `measured` (it
+  has direct `width`/`height` instead, per design's exact node shape) — so replacing a node's
+  object reference for ANY reason (adding a `className`, in this case) resets `handleBounds` to
+  `undefined` unconditionally.
+- Every edge touching a node with `handleBounds: undefined` computes a null connection point for one
+  tick and returns `null` from `EdgeWrapper` — an actual React unmount, not just a re-render — until
+  the (synchronous, in our jsdom-stubbed test environment; async via `ResizeObserver` in a real
+  browser) re-measurement pass repopulates it and remounts.
+- Because my first implementation replaced **every** node's object reference on every hover (to add
+  `.acm-dim`/`.acm-hot` uniformly, matching design.md §7's own described approach literally), this
+  reset happened for the ENTIRE node set — and therefore every edge in the graph — on every single
+  hover-enter and hover-leave. In a real browser this would have been a visible full-graph flicker
+  on every mouse movement into/out of any node or edge, not merely a test artifact.
+
+**Fix**: every node object passed to `<ReactFlow>` now unconditionally carries `measured: {width:
+n.width, height: n.height}` (values `layoutGraph` already computes deterministically — never derived
+from actual DOM measurement), applied identically whether or not that node is part of the current
+hover highlight. This keeps `parseHandles` on its "preserve existing `handleBounds`" branch
+regardless of node-object-reference churn, so a `className`-only change (or any other future
+reference-changing node update) never disturbs edge rendering. This is a real, generally-applicable
+correctness fix — not narrowly scoped to hover — though hover is what exposed it, since it is the
+first feature in this migration to replace every node's reference on a UI-only, non-layout-affecting
+interaction.
+
+**Design deviation note**: design.md §7/D8 anticipated and explicitly guarded against the *edge*
+data-vs-className remount risk (that's exactly what D8/D9 are about), but did not anticipate this
+*node*-side `handleBounds`-reset mechanism, since D8's own code sketch shows the same
+`{...node, className}` pattern this bug traces to. This is a gap in the design surfaced by TDD, not
+a deviation from a documented decision — noting it explicitly per the "if you discover the design is
+wrong or incomplete, note it" instruction.
+
+### `.vsix` size measurement (task 5.4)
+
+No `.vscodeignore` or `"files"` field exists in this repo on either branch, so `vsce package`
+includes `src/`, `test/`, and `openspec/` on both sides — not a realistic publish artifact, but a
+consistent, apples-to-apples proxy for measuring the migration's OWN size delta (that packaging
+noise is identical on both measurements).
+
+Measured via `npx @vscode/vsce package --no-dependencies --allow-missing-repository` against a
+freshly-`rm -rf out`'d build on each side, in a disposable `git worktree` for `main` to avoid
+disturbing this branch's own build:
+
+| Branch | `out/` size | `.vsix` size |
+|---|---|---|
+| `main` (pre-migration) | 488 KB | 725,879 bytes (~709 KB) |
+| `feat/react-flow-diagram-migration` (this branch, post-PR5) | 1.4 MB | 989,279 bytes (~966 KB) |
+| **Delta** | **+~940 KB** | **+263,400 bytes (~+257 KB, +36%)** |
+
+The dominant cost is the new bundled `out/webview/webview/index.js` (1.1 MB unminified), which now
+includes React, ReactDOM, and `@xyflow/react` at runtime. `minify: false` in
+`scripts/build-webview.mjs` was a deliberate, already-documented design choice (design.md §1: "keep
+the bundle reviewable/diffable in the `.vsix`"), not an oversight — enabling minification would
+shrink this substantially (a rough, unverified guess: 300-500 KB typical for this dependency set) at
+the cost of that reviewability property. Recording this delta as the honest current number, per the
+proposal's own success criterion, without silently minifying to make the number look better.
+
+### Performance probe at `{nodes:300, edges:600}` (task 5.5) — severe pre-existing risk found, NOT fixed here
+
+A genuine rendered-frame-paint measurement needs a real browser or the VS Code Extension Development
+Host, neither scriptable from this test runner. What IS measurable: `layoutGraph`'s own synchronous
+compute cost (dominated by `edgeGeometry.ts`'s coordinated multi-edge router, `edgePathsFor`) for a
+same-sized synthetic flat graph (flat because `NESTED_LAYOUT_LIMITS` — 60 nodes/120 edges — is far
+below 300/600, so a real oversized session always hits the flat-fallback layout path).
+
+Measured with `npx tsx` against a standalone script importing `webview/graphLayout.ts` directly (not
+part of the committed test suite — see why below):
+
+| Graph size | `layoutGraph` wall-clock time |
+|---|---|
+| `{60, 120}` (= `NESTED_LAYOUT_LIMITS` exactly) | ~0.9s |
+| `{100, 200}` | ~8.8s |
+| `{150, 300}` | ~28.8s |
+| `{300, 600}` (= `OVERSIZED_THRESHOLDS`, extrapolated — not directly measured, see below) | **on the order of minutes** |
+
+The growth is far worse than linear (roughly an 8-10x jump per ~1.5-1.7x size increase), consistent
+with the coordinated router's crossing-penalty computation being quadratic-or-worse in edge count.
+**This is a genuine, severe, previously-unmeasured algorithmic risk in code this PR does not touch**
+(`edgeGeometry.ts`'s `edgePathsFor` — unchanged since before the migration) — confirmed exactly at
+the size design.md flagged as an open, unmeasured question, and far more severe than "SMIL particle
+count" alone would suggest: the webview's main thread would freeze for potentially minutes computing
+node/edge positions, long before rendering (or a single particle) ever becomes the bottleneck.
+
+I did NOT attempt an actual `{300,600}` run inside the committed test suite: an initial attempt
+(before capping the scope) hung `npm test` for multiple minutes on a single test before it was
+manually killed, which is disproportionate CI cost for one probe. The committed
+`test/unit/graphLayout.test.ts` addition stays at the fast, safe `{60,120}` size (~0.9s, asserted
+`<10s` as a catastrophic-regression guard, not a tight budget) with a doc comment recording the
+`{300,600}` finding for future readers. The `{300,600}`/`{150,300}`/`{100,200}` numbers above were
+obtained once, out-of-band, via a disposable `tsx` script (not committed to the repo).
+
+**Recommended follow-up (explicitly NOT done in this PR, per the task's own scope boundary — "no
+code change in this PR, record as a follow-up")**: cap or short-circuit the coordinated
+crossing-penalty pass above a size threshold, falling back to the cheap per-edge `edgePathFor`
+already used for the live-drag preview (`webview/index.tsx`'s `onNodesChange`), or reduce the
+router's own algorithmic complexity. Given the severity (minutes, not milliseconds), this should
+likely be prioritized ahead of, or alongside, the design's own suggested "cap particles to the
+hovered subgraph" lever — the particle count was never actually the bottleneck at this size.
+
+### Work Unit Evidence
+
+| Evidence | Value |
+|---|---|
+| Focused test command and exact result | `npm run test -- webviewDom -t "hover"` → 4/4 passed; `npm run test -- graphLayout -t "performance probe"` → 1/1 passed (~0.9s) |
+| Runtime harness command/scenario and exact result | `npm run test:e2e` → exit code 0, all 9 scenarios completed (click-to-navigate and every other pre-existing scenario stayed green, confirming hover-highlight is additive) |
+| Rollback boundary | Revert `webview/index.tsx`'s hover-related additions (`hoverId` state, the two `useMemo`s, the four `on*MouseEnter/Leave` handlers, the `measured` stamping), `webview/styles.css`'s `.acm-dim`/`.acm-hot` block, and the two test-file additions (`webviewDom.test.ts`'s hover describe block + helpers, `graphLayout.test.ts`'s perf-probe describe block) — nothing else in the migration depends on hover; drag, particle animation, edge styling, filtering, and the oversized gate are all untouched |
+
+### Final gate (task 5.6) — all run for real
+
+- `npm run typecheck` → exit 0, clean
+- `npm run lint` (`eslint src test webview --max-warnings=0`) → exit 0, clean
+- `npm run test` (`vitest run`) → **34 test files passed, 545 tests passed** (541 baseline + 4 new
+  hover-highlight cases in `webviewDom.test.ts` + 1 new perf-probe case in `graphLayout.test.ts`, net
+  +5; some pre-existing React `act(...)` console warnings appear in output for unrelated,
+  pre-existing async effects — not new, not failures)
+- `npm run test:e2e` → exit code 0, all 9 scenarios completed for real (VS Code Extension
+  Development Host, not skipped/stubbed)
+- `npm run build:webview` → exit 0, clean (`out/webview/webview/index.js` emitted, 1.1 MB, matches
+  the `.vsix` measurement above)
+- `npm run build` → exit 0, clean
+
+### Deviations from design
+
+- Design gap found and fixed (documented above, not a deviation from a stated decision): the
+  `measured` stamping on every node, needed to avoid the `handleBounds`-reset/edge-remount bug.
+- Otherwise implementation matches design.md §7 exactly: `hoverId` state in the root component,
+  `getIncomers`/`getOutgoers`/`getConnectedEdges` for connected-subgraph membership,
+  `className`-only mutation (never `data`) for both nodes and edges, opacity-based de-emphasis via
+  CSS rather than color/hide.
+
+### Full list of unplanned fixes/passes that landed on this branch (PR4 → PR5, for a complete picture)
+
+Beyond the 7 originally-scoped PR slices, the following landed on `feat/react-flow-diagram-migration`
+as separate, user-driven or user-reported work between PR4 and PR5 (each already documented in its
+own section above in this file, listed here only as an index):
+
+1. **Visual redesign — reference-image alignment** (dotted-grid background, card-style nodes with
+   header/body divider, visible port dots, rounded/curved edge corners) — cosmetic, reference-image
+   driven, landed as its own commits before PR5 began.
+2. **Bug fix: live edge re-routing during an in-progress drag** — `onNodesChange` was entirely
+   missing before this pass; edges only snapped to correct routing on drop, never tracked visually
+   mid-drag. Found and fixed as part of the visual-redesign pass (item 5 in that section).
+3. **Bug fix: container frame legibility regression** — the visual redesign's initial container
+   frame opacity (0.55) combined with thin dash patterns made container boundaries hard to trace;
+   fixed to 0.85 without changing any box coordinate.
+4. **Bug fix: live-drag position not fed into controlled `<ReactFlow>` nodes** — dragged
+   node/descendants visually snapped back mid-drag because the `nodes` prop only reflected committed
+   overrides, not the live pointer position; fixed via the `liveDrag` state now visible in
+   `webview/index.tsx`.
+5. **Bug fix: live-drag freeze regression + root cause** — a follow-up investigation and fix for a
+   regression introduced by item 4's own fix.
+6. **Bug fix: cascade live-drag positions to container descendants** — the D14 cascade
+   (`onNodeDragStop`) worked correctly on drop, but the LIVE preview during the drag itself
+   (`onNodesChange`) did not mirror it for a dragged container's descendants; fixed to keep both
+   paths consistent.
+7. **Investigation (no code change): merge-time detachment bug report** (`route`/`route.ruta1-3`
+   losing their containment relationship) — traced to a pre-existing, out-of-scope
+   `mergeGraphsForDisplay`/analyzer id-stability issue, confirmed unrelated to and untouched by any
+   migration PR; recommended as its own follow-up change, not folded into this migration.
+
+None of items 1-7 are part of the original `react-flow-diagram-migration` proposal scope, but all are
+now part of the shipped state of this branch and are listed here for complete traceability alongside
+the 7 planned PR slices (PR1, PR2a, PR2b-i, PR2b-ii, PR3, PR4, PR5).
+
+### Status
+
+**7/7 planned PR slices complete (35/35 numbered tasks across Sections 0-5, plus 6 unplanned
+visual-redesign/bugfix tasks and 1 unplanned investigation, all documented above). The
+`react-flow-diagram-migration` change is functionally complete.** Recommended next step:
+`sdd-verify`, followed by delivery of the final PR5 slice (stacked on PR4's branch tip) and, once
+all slices are merged, `sdd-archive` for the whole change.
