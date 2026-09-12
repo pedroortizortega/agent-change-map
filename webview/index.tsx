@@ -1,8 +1,18 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ReactFlow, ReactFlowProvider, type EdgeTypes, type Node, type NodeTypes } from "@xyflow/react";
+import {
+  ReactFlow,
+  ReactFlowProvider,
+  Background,
+  BackgroundVariant,
+  type EdgeTypes,
+  type Node,
+  type NodeChange,
+  type NodeTypes,
+} from "@xyflow/react";
 import { bindRelationshipDetails } from "./relationshipDetails.js";
-import { layoutGraph, type AcmEdge } from "./graphLayout.js";
+import { boxesForRouting, layoutGraph, type AcmEdge } from "./graphLayout.js";
+import { edgePathFor, pathEndpoints } from "./edgeGeometry.js";
 import { AcmEntityNode } from "./nodes/AcmEntityNode.js";
 import { AcmKindEdge } from "./edges/AcmKindEdge.js";
 import { PositionOverrides, descendantsOf } from "./positionOverrides.js";
@@ -297,7 +307,25 @@ function App() {
     // `overrideSeq` is the drag-commit trigger (see `onNodeDragStop`); `positionOverrides` is a stable ref.
   }, [state.graph, state.diff, state.untrackedPaths, overrideSeq]);
   const nodes = layout?.nodes ?? [];
-  const edges = layout?.edges ?? [];
+
+  /** Live edge-path preview during an in-progress drag (design.md §4, "Live re-routing during a
+   * drag" — documented but never actually wired up until now, see `onNodesChange` below). Keyed
+   * by `AcmEdge.data.edgeIndex`; cleared once the drag ends (`onNodeDragStop`), at which point
+   * the full coordinated `layoutGraph`/`overrideSeq` re-run supersedes it with the authoritative
+   * routed paths. */
+  const [liveEdgeOverrides, setLiveEdgeOverrides] = useState<
+    Map<number, { path: string; startPoint: { x: number; y: number }; endPoint: { x: number; y: number } }> | undefined
+  >(undefined);
+
+  const edges = useMemo(() => {
+    const base = layout?.edges ?? [];
+    if (!liveEdgeOverrides || liveEdgeOverrides.size === 0) return base;
+    return base.map((edge) => {
+      const override = liveEdgeOverrides.get(edge.data.edgeIndex);
+      if (!override) return edge;
+      return { ...edge, data: { ...edge.data, ...override } };
+    });
+  }, [layout, liveEdgeOverrides]);
 
   // `layoutGraph` applies overrides after `probeBoxes`; pruning here on every layout run drops
   // any retained override for a node no longer present (design.md §4's `applyPositionOverrides()`
@@ -305,6 +333,63 @@ function App() {
   useEffect(() => {
     if (layout) positionOverrides.pruneTo(layout.boxes.keys());
   }, [layout]);
+
+  /**
+   * Live re-routing during a drag (design.md §4 — previously documented but never implemented:
+   * `<ReactFlow>` had no `onNodesChange` handler at all, so edges only snapped to their correct
+   * routing on drop, never tracking the node visually mid-drag). React Flow itself already moves
+   * the dragged node's own on-screen position during the gesture independent of the controlled
+   * `nodes` prop (only committed via `onNodeDragStop`, unchanged) — this handler exists solely to
+   * keep the EDGES touching that node visually in sync in the meantime.
+   *
+   * Performance/fidelity tradeoff (explicitly chosen over re-running the full coordinated
+   * `edgePathsFor` on every pointermove): only the edges whose source or target is the dragged
+   * node (or one of its cascaded container descendants, mirroring `onNodeDragStop`'s own D14
+   * cascade) are re-anchored, each via the cheap single-edge `edgePathFor` against a locally
+   * patched `boxes` clone. Every other edge keeps its last fully-coordinated path unchanged. This
+   * is an O(edges touching this node) preview, not an O(all edges²) full re-route, so it stays
+   * cheap regardless of overall graph size; the full coordinated re-route (with its crossing-
+   * penalty cost function over every edge) still runs exactly once per drag, on drop.
+   */
+  const onNodesChange = useCallback(
+    (changes: NodeChange[]) => {
+      if (!layout) return;
+      const dragChange = changes.find(
+        (change): change is Extract<NodeChange, { type: "position" }> =>
+          change.type === "position" && change.dragging === true && !!change.position,
+      );
+      if (!dragChange) return;
+      const nodeId = dragChange.id;
+      const position = dragChange.position!;
+      const before = layout.boxes.get(nodeId); // pre-drag absolute box, mirroring onNodeDragStop's own convention
+      if (!before) return;
+      const dx = position.x - before.x;
+      const dy = position.y - before.y;
+
+      const liveBoxes = new Map(boxesForRouting(layout.boxes, new Map(positionOverrides.entries())));
+      const draggedBox = liveBoxes.get(nodeId);
+      if (!draggedBox) return;
+      liveBoxes.set(nodeId, { ...draggedBox, x: position.x, y: position.y });
+      const movedIds = new Set<string>([nodeId]);
+      for (const descendantId of descendantsOf(nodeId, layout)) {
+        // D14 cascade, mirrored for the live preview.
+        movedIds.add(descendantId);
+        const box = liveBoxes.get(descendantId);
+        if (box) liveBoxes.set(descendantId, { ...box, x: box.x + dx, y: box.y + dy });
+      }
+
+      const overrides = new Map<number, { path: string; startPoint: { x: number; y: number }; endPoint: { x: number; y: number } }>();
+      for (const edge of layout.edges) {
+        if (!movedIds.has(edge.source) && !movedIds.has(edge.target)) continue;
+        const path = edgePathFor(liveBoxes, edge.source, edge.target);
+        if (!path) continue;
+        const { start, end } = pathEndpoints(path);
+        overrides.set(edge.data.edgeIndex, { path, startPoint: start, endPoint: end });
+      }
+      setLiveEdgeOverrides(overrides);
+    },
+    [layout],
+  );
 
   const onNodeDragStop = useCallback(
     (_: unknown, node: Node) => {
@@ -318,6 +403,7 @@ function App() {
         const box = layout.boxes.get(descendantId);
         if (box) positionOverrides.set(descendantId, { x: box.x + dx, y: box.y + dy });
       }
+      setLiveEdgeOverrides(undefined); // the drop below re-runs the full coordinated router
       setOverrideSeq((s) => s + 1); // re-run layoutGraph
     },
     [layout],
@@ -502,6 +588,7 @@ function App() {
             edgeTypes={EDGE_TYPES}
             onNodeClick={(_, n) => choosePair(n.id)}
             onEdgeClick={(_, e) => navigateEdge((e.data as AcmEdge["data"]).edgeIndex)}
+            onNodesChange={onNodesChange}
             onNodeDragStop={onNodeDragStop}
             fitView
             fitViewOptions={{ padding: 0.1 }}
@@ -515,6 +602,16 @@ function App() {
             proOptions={{ hideAttribution: false }}
             aria-label="Change map"
           >
+            {/* Dotted-grid background (visual redesign, post-PR4): React Flow v12's built-in
+                `<Background variant="dots">`, styled through the theme's own low-emphasis
+                foreground token rather than a hardcoded color, and kept sparse/subtle
+                (`gap`/`size`) to match the reference image rather than a loud, busy grid. */}
+            <Background
+              variant={BackgroundVariant.Dots}
+              gap={24}
+              size={1}
+              color="var(--vscode-editorWhitespace-foreground, rgba(128, 128, 128, 0.25))"
+            />
             {/* Single `<defs>` shared by every `AcmKindEdge` (design.md §6): keeps today's
                 `acm-arrow-import`/`acm-arrow-call` marker ids and `orient="auto-start-reverse"`
                 ported verbatim from `graphView.ts`'s `renderEdge`. Rendered once here rather
