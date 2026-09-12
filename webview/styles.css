@@ -54,9 +54,33 @@ body {
    `node-box` name — these selectors were dead against the React-rendered DOM (the box rendered
    with the SVG default black fill and no status stroke) until this fix. Container fill is set
    inline (`fill={data.container ? "none" : undefined}`), so a leaf box needs an explicit fill
-   here too, since an unset SVG `fill` defaults to black, not transparent. */
+   here too, since an unset SVG `fill` defaults to black, not transparent.
+
+   Visual redesign (post-PR4): a leaf card's fill uses `--vscode-editorWidget-background` rather
+   than `--vscode-editor-background` — the same token the relationship popup already uses (see
+   `.relationship-popup` below) — so a card reads as a raised surface sitting slightly above the
+   page background, matching the reference image's node-editor "card" look. */
 .acm-node-box {
-  fill: var(--vscode-editor-background, #1e1e1e);
+  fill: var(--vscode-editorWidget-background, #252526);
+}
+
+/* Containers keep NO card background (see AcmEntityNode.tsx's doc comment on this decision):
+   just a subtle, low-opacity dashed frame that reads as "grouping" around their children's own
+   cards, rather than competing with them as another raised surface. */
+.acm-node-container .acm-node-box {
+  opacity: 0.55;
+}
+
+.acm-node-divider {
+  stroke: var(--vscode-editorWidget-border, var(--vscode-panel-border, #454545));
+  stroke-width: 1;
+}
+
+/* A container's divider is part of its own already-subtle low-opacity frame (see
+   `.acm-node-container .acm-node-box` above); a leaf card's divider stays full-strength so its
+   header row reads as clearly separated from its (small) body. */
+.acm-node-container .acm-node-divider {
+  opacity: 0.55;
 }
 
 .acm-node-status-added .acm-node-box {
@@ -90,6 +114,20 @@ body {
    edgeStyleConfig.ts); this rule only keeps it non-interactive/non-hit-testable so it never
    steals a click from the edge's own `interactionWidth` hit area. */
 .acm-particle {
+  pointer-events: none;
+}
+
+/* Port dots (visual redesign, post-PR4): a small neutral connector dot at each edge's own
+   start/end point (`AcmKindEdge.tsx`'s `.acm-edge-port` circles). Deliberately uniform/neutral
+   rather than per-kind colored (unlike the stroke/particle above) — this is layout chrome
+   showing WHERE a line attaches to a card, not WHAT kind of relationship it is, matching the
+   reference image's uniform grey connector dots. Non-interactive so it never steals a click from
+   the edge's own `interactionWidth` hit area. */
+.acm-edge-port {
+  r: 2.5px;
+  fill: var(--vscode-editorWidget-background, #252526);
+  stroke: var(--vscode-descriptionForeground, #9d9d9d);
+  stroke-width: 1.25;
   pointer-events: none;
 }
 
