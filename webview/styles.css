@@ -259,6 +259,28 @@ body {
 .tok-number { color: var(--tok-number); }
 #confirmation pre, #run-output { white-space: pre-wrap; overflow-wrap: anywhere; }
 .acm-node, .acm-edge { cursor: pointer; }
+/* Hover highlight (design.md §7, D8/D9): `className` on the node/edge object (never `data`) is
+   applied by React Flow as a plain attribute update on its own `.react-flow__node`/
+   `.react-flow__edge` wrapper — the existing DOM element, never remounted — so the particle's
+   `<animateMotion>` inside `AcmKindEdge` is never re-created and its timeline never restarts
+   (D9). `.acm-dim` de-emphasizes everything NOT in the hovered connected subgraph; `.acm-hot`
+   emphasizes everything IN it. Opacity (not color/hide) per design: reversible, purely visual,
+   and never reflows the layout (hiding would trigger a `fitView` re-fit; recoloring would
+   destroy the kind-encoding exactly when the user is reading relationships). */
+.react-flow__node.acm-dim,
+.react-flow__edge.acm-dim {
+  opacity: 0.18;
+  transition: opacity 120ms;
+}
+.react-flow__node.acm-hot {
+  transition: opacity 120ms;
+}
+.react-flow__edge.acm-hot .acm-edge path {
+  stroke-width: 4;
+}
+.react-flow__edge.acm-hot .acm-particle {
+  r: 4;
+}
 /* React Flow adds `.dragging` to its own node wrapper (`.react-flow__node`), which contains
    `AcmEntityNode`'s root `.acm-node` div — not to `.acm-node` itself. */
 .react-flow__node.dragging { cursor: grabbing; }

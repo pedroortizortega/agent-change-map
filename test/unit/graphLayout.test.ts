@@ -495,3 +495,70 @@ describe("computeLiveDragUpdate", () => {
     expect(update!.positions.size).toBe(1 + descendantIds.length);
   });
 });
+
+/**
+ * Performance probe at design.md's flagged-as-unmeasured boundary (PR5 task 5.5): the host's own
+ * `OVERSIZED_THRESHOLDS` gate (`src/webviewProtocol.ts`) sits at `{nodes: 300, edges: 600}` — the
+ * size at which a user has explicitly clicked "render full map anyway" past the size warning, and
+ * therefore the size React Flow + up to 600 concurrent SMIL `<animateMotion>` particles must not
+ * choke on. A genuine rendered-frame-timing measurement needs a real browser paint loop (or the
+ * VS Code Extension Development Host), neither of which is scriptable from this test runner —
+ * what IS measurable here, cheaply and deterministically, is `layoutGraph`'s own synchronous
+ * compute cost (containment placement + the coordinated multi-edge router), which is the
+ * dominant CPU-bound step before any pixel is ever painted.
+ *
+ * FINDING (manually measured with `tsx`, NOT run as part of this committed suite — see below for
+ * why): `layoutGraph`'s flat-fallback coordinated router scales far worse than linearly with edge
+ * count for a densely cross-connected flat graph — `{60,120}`: ~0.9s, `{100,200}`: ~8.8s,
+ * `{150,300}`: ~28.8s (measured on this machine). Extrapolating, `{300,600}` — the exact
+ * `OVERSIZED_THRESHOLDS` boundary a user can explicitly opt into — is on the order of MINUTES of
+ * synchronous, main-thread compute, which would freeze the webview's UI thread long before a
+ * single SMIL particle even has a chance to matter. This is a genuine, severe, previously
+ * unmeasured algorithmic risk in the coordinated multi-edge router's crossing-penalty computation
+ * (`webview/edgeGeometry.ts`'s `edgePathsFor`, unchanged by this PR) — NOT something introduced by
+ * this PR's hover-highlight work, and NOT something this PR fixes (explicitly out of scope per the
+ * task brief: "no code change in this PR, record as a follow-up"). Flagging concretely for a
+ * follow-up: either cap/short-circuit the coordinated crossing-penalty pass above a size
+ * threshold (falling back to the cheap per-edge `edgePathFor`, already used for live-drag preview
+ * — see `onNodesChange` in `index.tsx`), or reduce it algorithmically.
+ *
+ * The committed test below intentionally stays at `{60,120}` (`NESTED_LAYOUT_LIMITS`'s own
+ * boundary, ~0.9s measured) rather than `{300,600}`: a `{300,600}` case would make `npm test`
+ * itself hang for minutes on every run, which is disproportionate to what one probe test should
+ * cost future contributors — the `{300,600}` numbers above were obtained once, out-of-band, and
+ * are recorded here and in apply-progress.md instead of being re-measured on every CI run.
+ */
+describe("performance probe near the OVERSIZED_THRESHOLDS boundary (design.md, unmeasured risk)", () => {
+  /** Flat function nodes (no containment nesting — the router's worst case per-edge, since every
+   * edge in a flat layout is a direct sibling-to-sibling route rather than a short parent/child
+   * hop) plus resolved `call` edges chained/fanned across them. */
+  function flatGraph(nodeCount: number, edgeCount: number): AnalysisGraph {
+    const nodes: Entity[] = Array.from({ length: nodeCount }, (_, i) => ({
+      id: `function:f${i}`,
+      kind: "function" as const,
+      qualifiedName: `f${i}`,
+      span,
+    }));
+    const edges: Edge[] = Array.from({ length: edgeCount }, (_, i) => {
+      const source = nodes[i % nodeCount]!.id;
+      const target = nodes[(i * 7 + 3) % nodeCount]!.id; // spread targets to avoid a trivial ring
+      return { kind: "call" as const, source, resolution: { kind: "resolved" as const, target }, span };
+    });
+    return { snapshot, nodes, edges, diagnostics: [] };
+  }
+
+  it("computes layoutGraph at {nodes:60, edges:120} (NESTED_LAYOUT_LIMITS' own boundary) without hanging, and reports its wall-clock cost", () => {
+    const graph = flatGraph(60, 120);
+    const start = performance.now();
+    const result = layoutGraph({ graph, diff: [], untrackedPaths: [], overrides: new Map() });
+    const elapsedMs = performance.now() - start;
+
+    expect(result.nodes).toHaveLength(60);
+
+    console.log(`[perf-probe] layoutGraph({nodes:60, edges:120}) took ${elapsedMs.toFixed(2)}ms`);
+    // Generous upper bound (measured ~0.9s on this machine) — catches a catastrophic regression
+    // without making this an exact, environment-sensitive timing assertion. See the doc comment
+    // above for the far more severe {300,600} finding, deliberately NOT run here.
+    expect(elapsedMs).toBeLessThan(10_000);
+  });
+});

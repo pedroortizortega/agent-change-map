@@ -56,6 +56,23 @@ const typeInto = (selector: string, value: string) => {
   Object.getOwnPropertyDescriptor(proto, "value")!.set!.call(el, value);
   act(() => { el.dispatchEvent(new dom.window.Event("input", { bubbles: true })); });
 };
+/**
+ * React 19 still synthesizes `onMouseEnter`/`onMouseLeave` (which React Flow wires to
+ * `onNodeMouseEnter`/`onEdgeMouseEnter`/etc.) from the native, bubbling `mouseover`/`mouseout`
+ * events (`registerDirectEvent("onMouseEnter", ["mouseout", "mouseover"])` in react-dom).
+ * Crucially, its enter/leave synthesis SKIPS entirely when `relatedTarget` resolves to an
+ * element React itself manages (`getClosestInstanceFromNode`) — using `document.body` (the
+ * `createRoot` container itself) as `relatedTarget`, as an initial attempt did, hits exactly that
+ * bail-out and silently no-ops. Leaving `relatedTarget` unset (`null`, matching a real pointer
+ * arriving from outside any React-rendered element, e.g. from the OS chrome) avoids the bail-out
+ * and reproduces a genuine hover.
+ */
+const hoverEnter = (selector: string) => act(() => {
+  element<HTMLElement>(selector).dispatchEvent(new dom.window.MouseEvent("mouseover", { bubbles: true }));
+});
+const hoverLeave = (selector: string) => act(() => {
+  element<HTMLElement>(selector).dispatchEvent(new dom.window.MouseEvent("mouseout", { bubbles: true }));
+});
 
 beforeEach(async () => {
   vi.resetModules();
@@ -161,6 +178,98 @@ describe("node/edge data-* contract", () => {
     expect(dom.window.document.querySelector(".acm-edge")).toBeNull();
     expect(dom.window.document.querySelector(".acm-particle")).toBeNull();
     expect(dom.window.document.querySelector("animateMotion")).toBeNull();
+  });
+});
+
+describe("hover highlight (PR5, design.md §7)", () => {
+  function threeNodeGraph(): { importTarget: typeof node; callTarget: typeof node } {
+    const edgeSpan = { ...node.span, startByte: 6, endByte: 13, startColumn: 6, endColumn: 13 };
+    const importTarget = { ...node, id: "module:importTarget", qualifiedName: "importTarget" };
+    const callTarget = { ...node, id: "module:callTarget", qualifiedName: "callTarget" };
+    session.loadComparison({ ...graph, snapshot: leftSnapshot }, {
+      ...graph,
+      nodes: [node, importTarget, callTarget],
+      edges: [
+        { kind: "import", importedName: "pkg", source: node.id, resolution: { kind: "resolved", target: importTarget.id }, span: edgeSpan },
+        { kind: "call", source: callTarget.id, resolution: { kind: "resolved", target: node.id }, span: edgeSpan },
+      ],
+    }, []);
+    return { importTarget, callTarget };
+  }
+
+  const reactFlowNode = (nodeId: string) => element<HTMLElement>(`[data-node-id="${nodeId}"]`).closest(".react-flow__node")!;
+  const reactFlowEdge = (edgeIndex: number) => element<HTMLElement>(`[data-edge-index="${edgeIndex}"]`).closest(".react-flow__edge")!;
+
+  it("hovering a node hot-highlights it, its connected edges, and their endpoint nodes, dimming everything else", async () => {
+    const { callTarget } = threeNodeGraph();
+    await vi.waitFor(() => expect(dom.window.document.querySelector('[data-edge-index="1"]')).not.toBeNull());
+
+    hoverEnter('[data-node-id="module:m"]');
+
+    // Hovered node itself: hot.
+    expect(reactFlowNode("module:m").classList.contains("acm-hot")).toBe(true);
+    expect(reactFlowNode("module:m").classList.contains("acm-dim")).toBe(false);
+    // Both connected edges (import out to importTarget, call in from callTarget): hot.
+    expect(reactFlowEdge(0).classList.contains("acm-hot")).toBe(true);
+    expect(reactFlowEdge(1).classList.contains("acm-hot")).toBe(true);
+    // Both endpoint nodes reachable via those edges: hot, not dim.
+    expect(reactFlowNode("module:importTarget").classList.contains("acm-hot")).toBe(true);
+    expect(reactFlowNode("module:importTarget").classList.contains("acm-dim")).toBe(false);
+    expect(reactFlowNode(callTarget.id).classList.contains("acm-hot")).toBe(true);
+    expect(reactFlowNode(callTarget.id).classList.contains("acm-dim")).toBe(false);
+  });
+
+  it("hovering an edge hot-highlights only that edge and its two endpoint nodes, dimming everything else (including unrelated edges/nodes)", async () => {
+    threeNodeGraph();
+    await vi.waitFor(() => expect(dom.window.document.querySelector('[data-edge-index="1"]')).not.toBeNull());
+
+    hoverEnter('[data-edge-index="0"]');
+
+    expect(reactFlowEdge(0).classList.contains("acm-hot")).toBe(true);
+    expect(reactFlowEdge(0).classList.contains("acm-dim")).toBe(false);
+    expect(reactFlowNode("module:m").classList.contains("acm-hot")).toBe(true);
+    expect(reactFlowNode("module:importTarget").classList.contains("acm-hot")).toBe(true);
+    // Unrelated edge/node: dimmed.
+    expect(reactFlowEdge(1).classList.contains("acm-dim")).toBe(true);
+    expect(reactFlowEdge(1).classList.contains("acm-hot")).toBe(false);
+    expect(reactFlowNode("module:callTarget").classList.contains("acm-dim")).toBe(true);
+  });
+
+  it("mouse-leave (hover end) restores every node/edge to neither acm-dim nor acm-hot", async () => {
+    threeNodeGraph();
+    await vi.waitFor(() => expect(dom.window.document.querySelector('[data-edge-index="1"]')).not.toBeNull());
+
+    hoverEnter('[data-node-id="module:m"]');
+    expect(reactFlowNode("module:m").classList.contains("acm-hot")).toBe(true);
+
+    hoverLeave('[data-node-id="module:m"]');
+
+    for (const id of ["module:m", "module:importTarget", "module:callTarget"]) {
+      expect(reactFlowNode(id).classList.contains("acm-hot")).toBe(false);
+      expect(reactFlowNode(id).classList.contains("acm-dim")).toBe(false);
+    }
+    for (const index of [0, 1]) {
+      expect(reactFlowEdge(index).classList.contains("acm-hot")).toBe(false);
+      expect(reactFlowEdge(index).classList.contains("acm-dim")).toBe(false);
+    }
+  });
+
+  it("D9 regression guard: hovering an edge never restarts/remounts its particle's <animateMotion> (dur and DOM node identity stay stable)", async () => {
+    threeNodeGraph();
+    await vi.waitFor(() => expect(dom.window.document.querySelector('[data-edge-index="1"]')).not.toBeNull());
+
+    const before = element('[data-edge-index="0"]').querySelector("animateMotion")!;
+    const durBefore = before.getAttribute("dur");
+
+    hoverEnter('[data-edge-index="0"]');
+    const duringHover = element('[data-edge-index="0"]').querySelector("animateMotion")!;
+    expect(duringHover.isSameNode(before)).toBe(true); // same DOM node — never remounted
+    expect(duringHover.getAttribute("dur")).toBe(durBefore);
+
+    hoverLeave('[data-edge-index="0"]');
+    const afterHover = element('[data-edge-index="0"]').querySelector("animateMotion")!;
+    expect(afterHover.isSameNode(before)).toBe(true);
+    expect(afterHover.getAttribute("dur")).toBe(durBefore);
   });
 });
 

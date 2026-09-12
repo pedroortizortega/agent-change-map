@@ -5,6 +5,10 @@ import {
   ReactFlowProvider,
   Background,
   BackgroundVariant,
+  getConnectedEdges,
+  getIncomers,
+  getOutgoers,
+  type Edge as RFEdge,
   type EdgeTypes,
   type Node,
   type NodeChange,
@@ -347,6 +351,66 @@ function App() {
     });
   }, [layout, liveEdgeOverrides]);
 
+  /**
+   * Hover highlight (design.md §7, D8/D9). `hoverId` is a node id or an edge id — the two
+   * namespaces are disjoint because edge ids are `e${edgeIndex}` (graphLayout.ts), never a
+   * qualified entity id. Connected-subgraph membership is derived via xyflow's own
+   * `getIncomers`/`getOutgoers`/`getConnectedEdges` against the CURRENT `nodes`/`edges` arrays
+   * (already merged with live-drag state above, for consistency, though hover and drag do not
+   * realistically overlap in practice).
+   */
+  const [hoverId, setHoverId] = useState<string | undefined>(undefined);
+
+  const { highlightNodes, highlightEdges } = useMemo(() => {
+    if (!hoverId) return { highlightNodes: undefined, highlightEdges: undefined };
+    const hoveredNode = nodes.find((n) => n.id === hoverId);
+    if (hoveredNode) {
+      const neighbours = [...getIncomers(hoveredNode, nodes, edges as RFEdge[]), ...getOutgoers(hoveredNode, nodes, edges as RFEdge[])];
+      return {
+        highlightNodes: new Set([hoveredNode.id, ...neighbours.map((n) => n.id)]),
+        highlightEdges: new Set(getConnectedEdges([hoveredNode], edges as RFEdge[]).map((e) => e.id)),
+      };
+    }
+    const hoveredEdge = edges.find((e) => e.id === hoverId);
+    if (!hoveredEdge) return { highlightNodes: undefined, highlightEdges: undefined };
+    return {
+      highlightNodes: new Set([hoveredEdge.source, hoveredEdge.target]),
+      highlightEdges: new Set([hoveredEdge.id]),
+    };
+  }, [hoverId, nodes, edges]);
+
+  /** Every node passed to `<ReactFlow>` always carries `measured` (design does not mention this;
+   * discovered empirically via the D9 regression test below). React Flow's `adoptUserNodes`
+   * only preserves a node's already-computed `handleBounds` — which every edge touching that
+   * node needs to resolve a real, non-null connection point — when EITHER the node object
+   * reference is unchanged, OR `measured` is already present on the incoming node object (see
+   * `@xyflow/system`'s `parseHandles`: `!userNode.measured ? undefined :
+   * internalNode?.internals.handleBounds`). A brand-new node object with no `measured` field —
+   * exactly what a naive `{...n, className}` spread produces — resets `handleBounds` to
+   * `undefined`, which makes every edge touching that node briefly report a null connection
+   * point and UNMOUNT (verified empirically: this was a real remount, catchable only by a
+   * DOM-identity assertion, not a mere presence assertion). Re-stating the ALREADY-KNOWN,
+   * unchanged `width`/`height` (from `layoutGraph`, never from DOM measurement) as `measured`
+   * keeps `parseHandles` on the "preserve" branch. This has to be applied consistently on BOTH
+   * the neutral (`!hoverId`) and highlighted array, or the two shapes' round-trip (hover-enter
+   * then hover-leave) still swaps a `measured`-less object back in on leave and re-triggers the
+   * exact same bug in the other direction. */
+  const measuredNodes = useMemo(() => nodes.map((n) => ({ ...n, measured: { width: n.width, height: n.height } })), [nodes]);
+
+  /** Final className pass (D8): `.acm-dim` on everything NOT in the highlight set, `.acm-hot` on
+   * everything IN it. Only a `className` string changes — never `data` — so React Flow updates
+   * an attribute on the EXISTING node/edge element rather than remounting `AcmKindEdge`, which
+   * would restart its `<animateMotion>` (D9). No-op (identity arrays) when nothing is hovered. */
+  const highlightedNodes = useMemo(() => {
+    if (!highlightNodes) return measuredNodes;
+    return measuredNodes.map((n) => ({ ...n, className: highlightNodes.has(n.id) ? "acm-hot" : "acm-dim" }));
+  }, [measuredNodes, highlightNodes]);
+
+  const highlightedEdges = useMemo(() => {
+    if (!highlightEdges) return edges;
+    return edges.map((e) => ({ ...e, className: highlightEdges.has(e.id) ? "acm-hot" : "acm-dim" }));
+  }, [edges, highlightEdges]);
+
   // `layoutGraph` applies overrides after `probeBoxes`; pruning here on every layout run drops
   // any retained override for a node no longer present (design.md §4's `applyPositionOverrides()`
   // contract, minus the DOM) so a stale position for a removed node no-ops rather than resurfacing.
@@ -590,14 +654,18 @@ function App() {
       <div id="graph" ref={graphRef} style={{ width: "100%", height: 600 }}>
         <ReactFlowProvider>
           <ReactFlow
-            nodes={nodes}
-            edges={edges}
+            nodes={highlightedNodes}
+            edges={highlightedEdges}
             nodeTypes={NODE_TYPES}
             edgeTypes={EDGE_TYPES}
             onNodeClick={(_, n) => choosePair(n.id)}
             onEdgeClick={(_, e) => navigateEdge((e.data as AcmEdge["data"]).edgeIndex)}
             onNodesChange={onNodesChange}
             onNodeDragStop={onNodeDragStop}
+            onNodeMouseEnter={(_, n) => setHoverId(n.id)}
+            onNodeMouseLeave={() => setHoverId(undefined)}
+            onEdgeMouseEnter={(_, e) => setHoverId(e.id)}
+            onEdgeMouseLeave={() => setHoverId(undefined)}
             fitView
             fitViewOptions={{ padding: 0.1 }}
             minZoom={0.2}
