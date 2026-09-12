@@ -7,7 +7,6 @@ import {
   layoutGraph,
   measure,
   orderSiblings,
-  routedPaths,
 } from "../../webview/graphLayout.js";
 import type { AnalysisGraph, Edge, Entity } from "../../src/protocol.js";
 
