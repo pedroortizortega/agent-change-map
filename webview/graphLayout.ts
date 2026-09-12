@@ -391,8 +391,29 @@ function buildNodes(
   });
 }
 
-function buildEdges(edges: readonly Edge[], boxes: Map<string, Rect>): AcmEdge[] {
-  const paths = routedPaths(edges, boxes);
+/**
+ * Merges any absolute position `overrides` on top of the computed layout `boxes`, producing the
+ * box set edge routing must use so it never disagrees with what `buildNodes` actually renders a
+ * node at. Without this, a dragged (or refresh-hydrated, see `positionOverrides.ts`) node's
+ * `AcmNode.position` moves via its override while `routedPaths`/`edgePathsFor` kept routing
+ * against the pre-drag `boxes` entry — every edge touching that node (or a container's dragged
+ * descendant) then anchors at the node's OLD location, visibly disconnected from its new one.
+ * `result.boxes` itself (the `LayoutResult` field `onNodeDragStop`'s cascade math and
+ * `positionOverrides.pruneTo` key off) intentionally stays the raw, un-overridden layout — only
+ * the boxes fed into routing are merged, here, at the call site.
+ */
+function boxesForRouting(boxes: Map<string, Rect>, overrides: ReadonlyMap<string, Position>): Map<string, Rect> {
+  if (overrides.size === 0) return boxes;
+  const merged = new Map(boxes);
+  for (const [id, box] of boxes) {
+    const override = overrides.get(id);
+    if (override) merged.set(id, { ...box, x: override.x, y: override.y });
+  }
+  return merged;
+}
+
+function buildEdges(edges: readonly Edge[], boxes: Map<string, Rect>, overrides: ReadonlyMap<string, Position>): AcmEdge[] {
+  const paths = routedPaths(edges, boxesForRouting(boxes, overrides));
   const result: AcmEdge[] = [];
   edges.forEach((edge, index) => {
     if (edge.kind === "contains") return;
@@ -439,7 +460,7 @@ export function layoutGraph(input: LayoutInput): LayoutResult {
     const relationshipCounts = relationshipCountsFor(graph, boxes);
     const childrenOf = new Map<string | undefined, Entity[]>([[undefined, graph.nodes]]);
     const nodes = buildNodes(graph.nodes, childrenOf, boxes, depths, diff, untrackedPaths, relationshipCounts, overrides);
-    const edges = buildEdges(graph.edges, boxes);
+    const edges = buildEdges(graph.edges, boxes, overrides);
     return { nodes, edges, boxes, relationshipCounts, flat };
   }
 
@@ -452,6 +473,6 @@ export function layoutGraph(input: LayoutInput): LayoutResult {
   }
   const relationshipCounts = relationshipCountsFor(graph, boxes);
   const nodes = buildNodes(graph.nodes, childrenOf, boxes, depths, diff, untrackedPaths, relationshipCounts, overrides);
-  const edges = buildEdges(graph.edges, boxes);
+  const edges = buildEdges(graph.edges, boxes, overrides);
   return { nodes, edges, boxes, relationshipCounts, flat };
 }

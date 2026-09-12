@@ -261,6 +261,24 @@ describe("layoutGraph", () => {
     expect(result.boxes.get("function:pkg.b.g")).not.toEqual({ x: 999, y: 111, w: 200, h: 32 });
   });
 
+  it("routes edges against the OVERRIDDEN position, not the stale pre-drag box (regression: edges disconnected from a dragged/refresh-hydrated node)", () => {
+    const overrides = new Map([["function:pkg.b.g", { x: 999, y: 111 }]]);
+    const result = layoutGraph({ graph: nestedGraph(), diff: [], untrackedPaths: [], overrides });
+    const importEdge = result.edges.find((e) => e.data.kind === "import")!;
+    // The import edge's target is the overridden node ("function:pkg.b.g"), a 200x32 box whose
+    // absolute top-left the override moves to (999, 111). Wherever exactly on that box's border
+    // the router anchors (top-center, a side lane, ...), the path's terminal point must land
+    // somewhere on/around THAT box — not near the node's stale, pre-override computed box (which
+    // sits close to the small nested-graph origin, far outside this range either way).
+    const numbers = importEdge.data.path.match(/-?\d+(\.\d+)?/g)!.map(Number);
+    const lastX = numbers[numbers.length - 2];
+    const lastY = numbers[numbers.length - 1];
+    expect(lastX).toBeGreaterThanOrEqual(999 - 1);
+    expect(lastX).toBeLessThanOrEqual(999 + 200 + 1);
+    expect(lastY).toBeGreaterThanOrEqual(111 - 1);
+    expect(lastY).toBeLessThanOrEqual(111 + 32 + 1);
+  });
+
   it("marks untracked nodes via data.provenance from untrackedPaths", () => {
     const result = layoutGraph({ graph: nestedGraph(), diff: [], untrackedPaths: ["pkg/a.py"], overrides: new Map() });
     for (const node of result.nodes) expect(node.data.provenance).toBe("untracked");

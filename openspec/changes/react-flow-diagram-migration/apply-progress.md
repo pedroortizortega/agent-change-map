@@ -713,3 +713,89 @@ tip (`337e08c`), stacked-to-main.
 
 Sections 0-4 all complete (Section 4/PR4: 9/9 tasks). Section 5 (PR5, hover highlight +
 measurement) remains. Ready for verify / PR4 open.
+
+---
+
+## Bugfix (post-PR4, base: `4410fdd`): edges disconnected from node boxes
+
+**User-reported symptom (screenshot)**: after loading the rebuilt React Flow webview, node boxes
+render correctly (colors/borders fixed by `4410fdd`) but edges (import/call relationship lines) are
+visually disconnected from the boxes they connect — arrowheads point into empty space, elbow-routed
+lines don't touch any box, large unexplained gaps between a line's end and the nearest node.
+
+### Root cause
+
+`webview/graphLayout.ts`'s `layoutGraph()` computes one `boxes: Map<string, Rect>` (absolute
+top-left `{x,y,w,h}` per node) from the containment layout pass, then calls two builders:
+
+- `buildNodes(...)` sets each `AcmNode.position` to `override ?? {x: box.x, y: box.y}` — i.e. it
+  DOES apply any stored absolute position override (from a drag, or from a hydrated-on-refresh
+  prior session per `positionOverrides.ts` / "Dragged positions persist across a panel refresh").
+- `buildEdges(...)` called `routedPaths(edges, boxes)` with the RAW, un-overridden `boxes` map —
+  it never applied overrides.
+
+Net effect: the moment ANY node has a stored override (which happens on the very first drag,
+`onNodeDragStop` sets one, or is hydrated at load time from a previous session's persisted drag
+positions), that node's visual `position` moves, but every edge whose path anchors to that node
+(or to a dragged container's cascaded descendants) is still routed against the box's OLD,
+pre-override coordinates. The `data.path` SVG string `AcmKindEdge`/`BaseEdge` draws verbatim then
+terminates at the node's stale location — exactly the "line doesn't touch the box, arrowhead in
+empty space, large gap" symptom in the screenshot. This is not a `nodeOrigin`/coordinate-space
+mismatch between React Flow and the router (both use the same absolute top-left convention,
+verified against the pre-migration `graphView.ts` renderer, which used the identical `boxes` map
+for both compounded SVG `<g transform>` node placement and edge path routing) — it is specifically
+the override asymmetry between `buildNodes` and `buildEdges`.
+
+### Fix
+
+`webview/graphLayout.ts`: added `boxesForRouting(boxes, overrides)`, a small helper that returns
+`boxes` unchanged when there are no overrides, or a shallow-merged copy with each overridden node's
+`x`/`y` replaced (width/height untouched) otherwise. `buildEdges` now takes `overrides` and routes
+against `boxesForRouting(boxes, overrides)` instead of the raw `boxes`. Both `layoutGraph` call
+sites (flat-degraded path and the normal nested-containment path) were updated to pass `overrides`
+through to `buildEdges`. `LayoutResult.boxes` (the field `onNodeDragStop`'s cascade math and
+`positionOverrides.pruneTo` key off) intentionally stays the raw, un-overridden layout — only the
+boxes fed into routing are merged, at the `buildEdges` call site.
+
+### TDD Cycle Evidence
+
+| Step | Evidence |
+|---|---|
+| RED | Added `test/unit/graphLayout.test.ts` case "routes edges against the OVERRIDDEN position, not the stale pre-drag box". Confirmed RED by stashing the `graphLayout.ts` fix (`git stash push -- webview/graphLayout.ts`) and running `npx vitest run test/unit/graphLayout.test.ts -t "routes edges against the OVERRIDDEN position"`: failed, path's terminal point was `(16, ...)` (the stale pre-override box), nowhere near the override box `(999,111)-(1199,143)`. |
+| GREEN | Restored the fix (`git stash pop`); re-ran the same focused test: passed, path terminal point `(999, 123)`, inside the overridden box's bounds. Full `npx vitest run test/unit/graphLayout.test.ts`: 23/23 passed. |
+| REFACTOR | `npm run typecheck`, `npm run lint`, `npm test` (525/525), `npm run build:webview`, `npm run test:e2e` all run for real — all green. |
+
+### Work Unit Evidence
+
+| Evidence | Value |
+|---|---|
+| Focused test command and exact result | `npx vitest run test/unit/graphLayout.test.ts` → 23/23 passed (22 pre-existing + 1 new regression case) |
+| Runtime harness command/scenario and exact result | `npm run test:e2e` → exit 0, all 9 scenarios completed for real in this environment; `npm run build:webview` → exit 0, `out/webview/webview/index.js` (1.1mb) + styles emitted |
+| Rollback boundary | Revert this commit only; it touches exactly `webview/graphLayout.ts` (the `boxesForRouting` helper + two `buildEdges` call sites) and `test/unit/graphLayout.test.ts` (one new test case). No other file changed. |
+
+### Files Changed
+
+| File | Action | What Was Done |
+|------|--------|---------------|
+| `webview/graphLayout.ts` | Modified | Added `boxesForRouting()`; `buildEdges` now takes `overrides` and routes against the merged boxes; both `layoutGraph` call sites updated |
+| `test/unit/graphLayout.test.ts` | Modified | Added one regression case proving an edge to an overridden node routes against the override, not the stale box |
+
+### Deviations from Design
+
+None — this restores the invariant `buildNodes`/`buildEdges` were always meant to share (both
+consume the same layout `boxes` plus the same `overrides`); no design.md text is contradicted.
+
+### Issues Found
+
+The asymmetry was real and reachable in practice on first load whenever a prior session's dragged
+positions are hydrated, not only after an in-session drag — matches the user's screenshot report of
+a freshly-loaded, already-populated graph. No other coordinate-space mismatch was found between
+React Flow's node placement and `edgePathsFor`'s absolute-box convention (both use `nodeOrigin`
+`[0,0]`/top-left, verified against the pre-migration `graphView.ts`'s use of the identical `boxes`
+map for compounded `<g transform>` node placement).
+
+### Status
+
+Bugfix complete: RED → GREEN → REFACTOR done, all verification green (typecheck, lint, 525/525
+unit tests, `build:webview`, `test:e2e`). Committed on `feat/react-flow-diagram-migration` on top
+of `4410fdd`. Section 5 (PR5, hover highlight) remains open and unaffected.
