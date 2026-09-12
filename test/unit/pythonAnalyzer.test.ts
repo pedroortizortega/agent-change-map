@@ -139,7 +139,7 @@ describe("Python AST analyzer", () => {
   it("leaves unsupported instance-binding shapes unresolved", async () => {
     const graph = await analyze([{ path: "local.py", content: "class Route:\n    def get_info(self): pass\n\ndef factory():\n    return Route()\n\nclass Holder:\n    def __init__(self):\n        self.route = Route()\n    def run(self):\n        return self.route.get_info()\n\ndef chained():\n    return factory().get_info()\n\ndef tupled():\n    a, b = Route(), Route()\n    return a.get_info()\n\ndef rebound():\n    r = Route()\n    s = r\n    return s.get_info()\n\ndef chain_assigned():\n    p = q = Route()\n    return p.get_info()\n" }]);
     const callAt = (line: number) => graph.edges.find((edge) => edge.kind === "call" && edge.span.startLine === line);
-    for (const line of [11, 14, 18, 23, 27]) {
+    for (const line of [14, 18, 23, 27]) {
       expect(callAt(line)?.resolution).toEqual({ kind: "unresolved" });
     }
   });
@@ -201,6 +201,55 @@ describe("Python AST analyzer", () => {
     for (const line of [5, 6]) {
       expect(callAt(line)?.resolution).toEqual({ kind: "unresolved" });
     }
+  });
+
+  it("resolves a self-attribute call assigned in another method of the same class", async () => {
+    const graph = await analyze([{ path: "local.py", content: "class Route:\n    def go(self): pass\n\nclass Holder:\n    def __init__(self):\n        self.route = Route()\n    def run(self):\n        return self.route.go()\n" }]);
+    const callAt = (line: number) => graph.edges.find((edge) => edge.kind === "call" && edge.span.startLine === line);
+    const method = graph.nodes.find((node) => node.qualifiedName === "local.Route.go");
+    expect(callAt(8)?.resolution).toEqual({ kind: "resolved", target: method?.id });
+  });
+
+  it("resolves a self-attribute call bound by an attribute annotation", async () => {
+    const graph = await analyze([{ path: "local.py", content: "class Route:\n    def go(self): pass\n\nclass Holder:\n    def __init__(self):\n        self.route: Route\n    def run(self):\n        return self.route.go()\n" }]);
+    const callAt = (line: number) => graph.edges.find((edge) => edge.kind === "call" && edge.span.startLine === line);
+    const method = graph.nodes.find((node) => node.qualifiedName === "local.Route.go");
+    expect(callAt(8)?.resolution).toEqual({ kind: "resolved", target: method?.id });
+  });
+
+  it("reports ambiguous candidates for a self-attribute bound to different classes", async () => {
+    const graph = await analyze([{ path: "local.py", content: "class A:\n    def go(self): pass\n\nclass B:\n    def go(self): pass\n\nclass Holder:\n    def set_a(self):\n        self.attr = A()\n    def set_b(self):\n        self.attr = B()\n    def run(self):\n        return self.attr.go()\n" }]);
+    const callAt = (line: number) => graph.edges.find((edge) => edge.kind === "call" && edge.span.startLine === line);
+    const goA = graph.nodes.find((node) => node.qualifiedName === "local.A.go");
+    const goB = graph.nodes.find((node) => node.qualifiedName === "local.B.go");
+    expect(callAt(13)?.resolution).toEqual({ kind: "ambiguous", candidates: [goA?.id, goB?.id].sort() });
+  });
+
+  it("keeps a self-attribute assigned the same class in two methods resolved", async () => {
+    const graph = await analyze([{ path: "local.py", content: "class Route4:\n    def go(self): pass\n\nclass Holder:\n    def __init__(self):\n        self.route = Route4()\n    def reset(self):\n        self.route = Route4()\n    def run(self):\n        return self.route.go()\n" }]);
+    const callAt = (line: number) => graph.edges.find((edge) => edge.kind === "call" && edge.span.startLine === line);
+    const method = graph.nodes.find((node) => node.qualifiedName === "local.Route4.go");
+    expect(callAt(10)?.resolution).toEqual({ kind: "resolved", target: method?.id });
+  });
+
+  it("leaves attribute calls unresolved for a receiver not named self", async () => {
+    const graph = await analyze([{ path: "local.py", content: "class Route:\n    def go(self): pass\n\nclass Holder:\n    def m(this):\n        this.attr = Route()\n        return this.attr.go()\n" }]);
+    const callAt = (line: number) => graph.edges.find((edge) => edge.kind === "call" && edge.span.startLine === line);
+    expect(callAt(7)?.resolution).toEqual({ kind: "unresolved" });
+  });
+
+  it("leaves self-attribute calls unresolved in staticmethods and nested functions", async () => {
+    const graph = await analyze([{ path: "local.py", content: "class Route:\n    def go(self): pass\n\nclass Holder:\n    @staticmethod\n    def m(self):\n        self.a = Route()\n        return self.a.go()\n    def outer(self):\n        def inner(self):\n            self.b = Route()\n            return self.b.go()\n        return inner\n" }]);
+    const callAt = (line: number) => graph.edges.find((edge) => edge.kind === "call" && edge.span.startLine === line);
+    expect(callAt(8)?.resolution).toEqual({ kind: "unresolved" });
+    expect(callAt(12)?.resolution).toEqual({ kind: "unresolved" });
+  });
+
+  it("does not merge a class-body variable with a same-named self attribute", async () => {
+    const graph = await analyze([{ path: "local.py", content: "class Route:\n    def go(self): pass\n\nclass Other:\n    def go(self): pass\n\nclass A:\n    x = Route()\n    def m(self):\n        self.x = Other()\n    def run(self):\n        return self.x.go()\n" }]);
+    const callAt = (line: number) => graph.edges.find((edge) => edge.kind === "call" && edge.span.startLine === line);
+    const method = graph.nodes.find((node) => node.qualifiedName === "local.Other.go");
+    expect(callAt(12)?.resolution).toEqual({ kind: "resolved", target: method?.id });
   });
 
   it("times out and bounds child output deterministically", async () => {
