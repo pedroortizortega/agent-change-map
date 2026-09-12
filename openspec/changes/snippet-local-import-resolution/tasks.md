@@ -58,7 +58,7 @@ Depends on: Slice 1 (`mapPathsToModules` shipped and imported by the gatherer).
 
 ### 2.1 — `gatherImportBundle`
 
-- [ ] **RED**: `test/unit/sourceProvider.test.ts` (modify) — add cases:
+- [x] **RED**: `test/unit/sourceProvider.test.ts` (modify) — add cases:
       - target excluded by path: given a snapshot whose `files` include the target's own
         `posixPath`, `gatherImportBundle(store, snapshot, excludePosixPath)` never returns an
         entry for that exact `posixPath` (exact-equality exclusion, applied AFTER mapping so
@@ -84,7 +84,7 @@ Depends on: Slice 1 (`mapPathsToModules` shipped and imported by the gatherer).
       transitive resolution downstream), "The target's own file is never double-embedded via the
       bundle", and "Genuinely uncaptured local import fails as an ordinary missing module"
       (unknown snapshot / missing `__init__.py` degrade path).
-- [ ] **GREEN**: `src/navigation/sourceProvider.ts` (modify) — `BundledModule` interface,
+- [x] **GREEN**: `src/navigation/sourceProvider.ts` (modify) — `BundledModule` interface,
       `gatherImportBundle(store, snapshot, excludePosixPath)`: `store.get(snapshot)` (missing ⇒
       `[]`), map the full `files` list's `.path` values through `mapPathsToModules`, attach each
       mapped entry's source content, drop the entry whose `posixPath === excludePosixPath` after
