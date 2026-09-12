@@ -945,3 +945,99 @@ per its own header comment) explicitly defers pan/zoom/drag/hover to "React Flow
 and never asserted anything about the app's OWN state-merge logic during a drag. The new
 `computeLiveDragUpdate` unit tests close that specific gap for the state-logic layer; the actual
 pixel-tracking smoothness during a live pointer drag still requires manual/visual confirmation.
+
+## Regression: container appears too narrow for its children (post-redesign screenshot report)
+
+User reported, via a screenshot with two red-circled spots, that after the visual-redesign pass
+(`1784f0e`/`f9ba140`/`006e900`/`ed7eb50`): (1) a "route" module's dashed container frame renders
+too narrow — its three children (`route.ruta1/2/3`) appear to render wider than the container and
+stick out past its right edge — and (2) a small disconnected arrowhead floats near the "route"
+header/label with no visible connection to any node or edge.
+
+### Investigation (root cause, symptom 1 — container width)
+
+Read `webview/graphLayout.ts`'s `measure()`/`probeBoxes()` in full, `webview/nodes/AcmEntityNode.tsx`,
+`webview/styles.css`'s node rules, and `webview/index.tsx`'s ReactFlow wiring, then verified with
+real numbers rather than guessing:
+
+- **The box-sizing formula is mathematically self-consistent by construction, for any constant
+  values.** `measure()` sets a container's width to `w = 2*PAD_X + Math.max(NODE_MIN_W,
+  ...childSizes.map(w))` and `probeBoxes()` places every child at `x = parentAbsX + PAD_X`. Given
+  those two facts alone: `child.x + child.w <= parentAbsX + PAD_X + (parent.w - 2*PAD_X) =
+  parentAbsX + parent.w - PAD_X < parentAbsX + parent.w`. Containment cannot be violated by this
+  formula, independent of `NODE_MIN_W`'s actual numeric value (200, unchanged since before the
+  React Flow migration — confirmed via `git show 0a932a2:webview/graphView.ts`, same
+  `NODE_MIN_W`/`PAD_X`/`PAD_Y`/`HEADER_H`/`NODE_H` values as today). This is independently
+  confirmed by an EXISTING passing test, `graphLayout.test.ts`'s `layoutGraph > "lays out a child
+  entity's box fully inside its container's bounds, three levels deep"`.
+- **No CSS/DOM divergence found either.** `AcmEntityNode.tsx`'s `<svg width={w} height={h}
+  viewBox="0 0 w h">` and React Flow's own inline `width`/`height` style (verified in
+  `@xyflow/react`'s `getNodeInlineStyleDimensions`) are BOTH driven from the exact same
+  `data.box.w`/`h` computed by `measure()` — there is no separate DOM measurement path that could
+  disagree. `styles.css` has no `min-width`/padding/border rule that targets `.acm-node` or the
+  custom `.react-flow__node-acmEntity` node type (React Flow's built-in `.react-flow__node-input/
+  -default/-output/-group` padding rules don't match our custom node type name). `index.tsx` sets
+  no `nodeOrigin`/`nodeExtent` that would offset a node's rendered position relative to what the
+  layout math assumes. An SVG element's UA-stylesheet default `overflow: hidden` also means an
+  over-long `qualifiedName` label gets clipped at the box edge rather than escaping it.
+- **Confirmed the ONE real, provable regression introduced by the redesign commit** (`git show
+  1784f0e`): `.acm-node-container .acm-node-box { opacity: 0.55; }` (plus a matching divider
+  opacity) was newly added, making the container's already-thin (1-1.5px stroke), sparsely-dashed
+  frame (`"2 4"` package / `"4 3"` module dash patterns) far fainter against a dark theme
+  background, at the same time leaf children became fully-opaque solid "card" surfaces. This does
+  not change any box coordinate, but it plausibly explains a human perceiving a (numerically
+  correct) container frame as "too narrow"/children as "escaping" it, since the frame boundary
+  becomes hard to trace at a glance.
+- **Honest limit of this investigation**: I could not, from static reading of the files above,
+  reproduce an actual coordinate/CSS overflow bug — the layout math is proven correct twice over
+  (algebraic proof + pre-existing passing test) and no CSS/DOM path was found that could make a
+  node's real footprint exceed `data.box.w/h`. If the screenshot genuinely shows boxes (not just a
+  faint dashed line) numerically overlapping, the most likely remaining explanation is OUTSIDE
+  these files — e.g. the analyzer's `containerId` assignment for route-handler entities placing
+  `route.ruta1/2/3` in the wrong sibling bucket — which was not in scope of this investigation and
+  was not verified.
+
+### Fix applied
+
+`webview/styles.css`: raised `.acm-node-container .acm-node-box`/`.acm-node-container
+.acm-node-divider` opacity from `0.55` to `0.85`, restoring the container frame's legibility
+without touching any layout math or box coordinate.
+
+### Regression test added (permanent invariant, task item 3)
+
+`test/unit/graphLayout.test.ts`: added a recursive containment-invariant test using a fixture that
+mirrors the reported scenario exactly — a "route" module with three long-qualified-name leaf
+siblings near `NODE_MIN_W` — asserting `child.x/y` and `child.x+w`/`child.y+h` stay within the
+parent's box at every depth. This test PASSES against current code, confirming (rather than
+fixing) the containment guarantee; its value is as a permanent regression guard against a future
+change to the formula or constants.
+
+### Symptom 2 — floating disconnected arrowhead (NOT confirmed fixed)
+
+Read `webview/edges/AcmKindEdge.tsx` and confirmed edges are routed via `routedPaths`/
+`edgePathsFor` against the SAME `boxes` map used for node rendering (`webview/graphLayout.ts`'s
+`buildEdges`) — since that box map is proven correct (see above), edge anchor points derived from
+it should also be correctly anchored, so this symptom is UNLIKELY to be a downstream artifact of
+the container-width issue. I could not identify a concrete cause for a floating arrowhead from
+static reading of `AcmKindEdge.tsx`/`edgeGeometry.ts` alone (the port-dot circles added by the
+redesign are small neutral dots, not arrow-shaped, so they are an unlikely candidate). **This
+symptom is explicitly NOT confirmed fixed or root-caused** — it requires visual re-inspection
+after the opacity fix above (a very faint container frame plus a correctly-drawn arrowhead near it
+could itself look like a "disconnected float" once the frame is legible again), or a live-browser
+DOM inspection this text-only investigation cannot perform.
+
+### Full gate results (this fix)
+
+- `npm run typecheck` → clean
+- `npm run lint` → clean (`--max-warnings=0`)
+- `npm run test` → 540/540 passed (34 files, +1 new regression test)
+- `npm run test:e2e` → all scenarios passed, exit code 0
+- `npm run build:webview` → succeeds
+
+### Status
+
+Container-frame legibility fix applied and verified; permanent containment regression test added
+and passing. The floating-arrowhead symptom remains unconfirmed/unfixed and needs a real visual
+check. No coordinate/math bug was found or "fixed" in `graphLayout.ts` because none could be
+reproduced — this is reported transparently rather than fabricating a change to code that was
+proven correct.

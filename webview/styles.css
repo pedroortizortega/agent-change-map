@@ -65,10 +65,20 @@ body {
 }
 
 /* Containers keep NO card background (see AcmEntityNode.tsx's doc comment on this decision):
-   just a subtle, low-opacity dashed frame that reads as "grouping" around their children's own
-   cards, rather than competing with them as another raised surface. */
+   just a dashed frame that reads as "grouping" around their children's own cards, rather than
+   competing with them as another raised surface.
+
+   FIX (visual-redesign regression): this used to be `opacity: 0.55`, which, combined with the
+   already-thin (1-1.5px) sparse dash patterns in `KIND_STYLE` ("2 4" package / "4 3" module) and
+   the fully-opaque solid leaf cards introduced by the same redesign, made the container's actual
+   boundary hard to trace against a dark theme background. The layout math in `graphLayout.ts`
+   (`measure`/`probeBoxes`, see its containment tests) always sizes a container to fully enclose
+   its children with `PAD_X`/`PAD_Y` margin on every side — but a frame this faint reads, at a
+   glance, as if children escape a "too narrow" box even though their coordinates are correct.
+   Keeping the frame legible (0.85) is the fix for that perceived-overflow bug: it does not
+   change any box coordinate, only how visible the (already-correct) boundary is. */
 .acm-node-container .acm-node-box {
-  opacity: 0.55;
+  opacity: 0.85;
 }
 
 .acm-node-divider {
@@ -76,11 +86,11 @@ body {
   stroke-width: 1;
 }
 
-/* A container's divider is part of its own already-subtle low-opacity frame (see
-   `.acm-node-container .acm-node-box` above); a leaf card's divider stays full-strength so its
+/* A container's divider matches its own frame legibility fix above (see
+   `.acm-node-container .acm-node-box`); a leaf card's divider stays full-strength so its
    header row reads as clearly separated from its (small) body. */
 .acm-node-container .acm-node-divider {
-  opacity: 0.55;
+  opacity: 0.85;
 }
 
 .acm-node-status-added .acm-node-box {

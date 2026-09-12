@@ -205,6 +205,63 @@ describe("layoutGraph", () => {
     }
   });
 
+  it("keeps every child's box fully inside its parent's box at every depth, for a container with " +
+    "multiple long-labelled siblings near NODE_MIN_W (regression: visual-redesign card overflow)", () => {
+    // Regression test for the reported bug: a "route" module whose three children (each a
+    // long-qualified-name leaf close to NODE_MIN_W's assumed footprint) appeared to render wider
+    // than their own container after the card-style visual redesign. `measure()`/`probeBoxes`
+    // compute a container's width as `2*PAD_X + max(children widths)` and place every child at
+    // `parentX + PAD_X`, which — by construction — should make containment impossible to violate
+    // regardless of label length (a leaf's box width is always the fixed `NODE_MIN_W`, never
+    // derived from `qualifiedName`). This test asserts that invariant generally, at every depth,
+    // for a shape that mirrors the reported scenario, so a future change to the layout constants
+    // or formula cannot silently reintroduce a real (not just perceived) overflow.
+    const graph: AnalysisGraph = {
+      snapshot,
+      nodes: [
+        { id: "module:route", kind: "module", qualifiedName: "route", span },
+        {
+          id: "function:route.ruta1",
+          kind: "function",
+          qualifiedName: "route.ruta1.handleSomeReallyLongIdentifierName",
+          containerId: "module:route",
+          span,
+        },
+        {
+          id: "function:route.ruta2",
+          kind: "function",
+          qualifiedName: "route.ruta2.handleAnotherReallyLongIdentifierName",
+          containerId: "module:route",
+          span,
+        },
+        {
+          id: "function:route.ruta3",
+          kind: "function",
+          qualifiedName: "route.ruta3.handleYetAnotherReallyLongIdentifierName",
+          containerId: "module:route",
+          span,
+        },
+      ],
+      edges: [],
+      diagnostics: [],
+    };
+    const result = layoutGraph({ graph, diff: [], untrackedPaths: [], overrides: new Map() });
+
+    const assertContainsDescendants = (parentId: string) => {
+      const parent = result.boxes.get(parentId)!;
+      for (const node of graph.nodes) {
+        if (node.containerId !== parentId) continue;
+        const child = result.boxes.get(node.id)!;
+        expect(child.x).toBeGreaterThanOrEqual(parent.x);
+        expect(child.y).toBeGreaterThanOrEqual(parent.y);
+        expect(child.x + child.w).toBeLessThanOrEqual(parent.x + parent.w);
+        expect(child.y + child.h).toBeLessThanOrEqual(parent.y + parent.h);
+        assertContainsDescendants(node.id);
+      }
+    };
+    assertContainsDescendants("module:route");
+  });
+
   it("emits one AcmNode per entity with the exact data-carrying shape", () => {
     const result = layoutGraph({ graph: nestedGraph(), diff: [], untrackedPaths: [], overrides: new Map() });
     expect(result.nodes).toHaveLength(nestedGraph().nodes.length);
