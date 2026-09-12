@@ -3,7 +3,8 @@ import type { AnalysisGraph, Edge, Entity, SourceId } from "./protocol.js";
 import type { EdgeVintage } from "../webview/graphView.js";
 import type { SnapshotStore } from "./snapshots/snapshotStore.js";
 import type { CorrelatedDiffEntry } from "./navigation/sourceProvider.js";
-import { computeContentHash, createSourceId, resolveModuleSource, resolveSource, StaleSourceError } from "./navigation/sourceProvider.js";
+import { computeContentHash, createSourceId, gatherImportBundle, resolveModuleSource, resolveSource, StaleSourceError } from "./navigation/sourceProvider.js";
+import type { BundledModule } from "./navigation/sourceProvider.js";
 import type { DraftStore } from "./editing/draftStore.js";
 import type { DirectWriteRequest, WriteEffectPreview, WriteReceipt } from "./editing/writeGuard.js";
 import { WriteConfirmationDeclinedError, WriteGuardError } from "./editing/writeGuard.js";
@@ -414,9 +415,13 @@ export class ChangeMapSession {
   /**
    * Resolves the target's signature (design D2/D4): looks up `entity.target` for `targetId`,
    * resolves the current snippet content for `sourceId` (the freshest unsaved draft, if any,
-   * otherwise the resolved source), and checks the bounded LRU cache keyed
-   * `${targetId}|${sha256(content)}` before spawning a sandboxed introspection round-trip.
-   * Never throws: every failure path (no target metadata, stale source, Docker unavailable,
+   * otherwise the resolved source), gathers the same-repo import bundle for the source's
+   * snapshot (excluding the target's own file), and checks the bounded LRU cache keyed
+   * `${targetId}|${sha256(content)}|${sha256(JSON.stringify(bundle))}` before spawning a
+   * sandboxed introspection round-trip. The bundle hash is part of the cache key so that an
+   * edit confined to an *imported* file — not the target's own content — still correctly
+   * invalidates a previously cached signature (design's "Cache-key hazard" note). Never
+   * throws: every failure path (no target metadata, stale source, Docker unavailable,
    * non-zero exit, malformed `<<ACM>>` frame) replies `signatureUnavailable` instead.
    */
   private async handleRequestSignature(requestId: string, sourceId: SourceId, targetId: string): Promise<void> {
@@ -433,7 +438,8 @@ export class ChangeMapSession {
       this.deps.post({ type: "signatureUnavailable", requestId, targetId, reason });
       return;
     }
-    const cacheKey = `${targetId}|${sha256Hex(content)}`;
+    const bundle = gatherImportBundle(this.deps.store, sourceId.snapshot, sourceId.posixPath);
+    const cacheKey = `${targetId}|${sha256Hex(content)}|${sha256Hex(JSON.stringify(bundle))}`;
     const cached = this.introspectionCache.get(cacheKey);
     if (cached) {
       // Move to most-recently-used.
@@ -446,7 +452,7 @@ export class ChangeMapSession {
       this.deps.post({ type: "signatureUnavailable", requestId, targetId, reason: "Docker is not available; the input/call form is disabled." });
       return;
     }
-    const driver = buildIntrospectionDriver(content, target.dottedName, target.callableKind);
+    const driver = buildIntrospectionDriver(content, target.dottedName, target.callableKind, bundle);
     const outcome = await this.deps.runIntrospection({ variant: "current", path: sourceId.posixPath, content: driver });
     if (outcome.kind !== "signatureResult") {
       this.deps.post({ type: "signatureUnavailable", requestId, targetId, reason: outcome.reason });
@@ -486,6 +492,9 @@ export class ChangeMapSession {
       this.deps.post({ type: "error", message: reason });
       return;
     }
+    // Gathered once here, alongside the content resolution, and threaded through the confirm
+    // round-trip to `executeCall` rather than re-gathered afterward (design D5).
+    const bundle = gatherImportBundle(this.deps.store, sourceId.snapshot, sourceId.posixPath);
     const argsPreview = JSON.stringify(args, null, 2);
     const confirmed = new Promise<boolean>((resolveConfirm) => {
       this.pendingCallConfirmations.set(requestId, resolveConfirm);
@@ -499,17 +508,17 @@ export class ChangeMapSession {
         this.notifyIfIdle();
         return;
       }
-      await this.executeCall(requestId, sourceId, content, target, args);
+      await this.executeCall(requestId, sourceId, content, target, args, bundle);
     });
   }
 
-  private async executeCall(requestId: string, sourceId: SourceId, content: string, target: EntityTarget, args: Record<string, unknown>): Promise<void> {
+  private async executeCall(requestId: string, sourceId: SourceId, content: string, target: EntityTarget, args: Record<string, unknown>, bundle: BundledModule[]): Promise<void> {
     if (!this.deps.runCall) {
       this.deps.post({ type: "error", message: "Docker is not available; the call cannot run." });
       this.notifyIfIdle();
       return;
     }
-    const driver = buildCallDriver(content, target.dottedName, target.callableKind, JSON.stringify(args));
+    const driver = buildCallDriver(content, target.dottedName, target.callableKind, JSON.stringify(args), bundle);
     let seq = 0;
     const emit = (channel: "stdout" | "stderr", data: string): void => {
       this.deps.post({ type: "runEvent", requestId, variant: "current", seq: seq++, channel, data });

@@ -500,6 +500,69 @@ describe("ChangeMapSession signature introspection cache", () => {
     expect(Buffer.from(base64Match![1]!, "base64").toString("utf8")).toContain("class Outer");
     expect(posted.at(-1)).toMatchObject({ type: "signatureResult", requestId: "s1" });
   });
+
+  function extractBundleLiteral(driverText: string): string | undefined {
+    const match = driverText.match(/_BUNDLE = json\.loads\(base64\.b64decode\("([^"]*)"\)\)/);
+    return match?.[1];
+  }
+
+  it("gathers the same-repo import bundle and passes it through to the introspection driver", async () => {
+    const store = new SnapshotStore();
+    store.store({
+      snapshot: rightSnapshot,
+      files: [
+        { path: "m.py", content, provenance: "tracked" },
+        { path: "config.py", content: "ENV1 = 'x'\n", provenance: "tracked" },
+      ],
+    });
+    const runIntrospection = vi.fn().mockResolvedValue({ kind: "signatureResult", parameters: [] });
+    const { session } = makeDeps(store, { runIntrospection });
+    loadTargetGraph(session);
+    const sourceId = sourceIdFor();
+
+    await session.handleIntent({ type: "requestSignature", requestId: "s1", sourceId, targetId: "function:f" });
+
+    expect(runIntrospection).toHaveBeenCalledTimes(1);
+    const driverText = (runIntrospection.mock.calls[0]![0] as SnippetSource).content;
+    const literal = extractBundleLiteral(driverText);
+    expect(literal).toBeDefined();
+    const decoded = JSON.parse(Buffer.from(literal!, "base64").toString("utf8")) as Record<string, unknown>;
+    expect(decoded).toHaveProperty("config");
+  });
+
+  it("treats a change to an imported (bundled) file's content, with the target's own content unchanged, as a cache miss (regression)", async () => {
+    const store = new SnapshotStore();
+    store.store({
+      snapshot: rightSnapshot,
+      files: [
+        { path: "m.py", content, provenance: "tracked" },
+        { path: "config.py", content: "ENV1 = 'x'\n", provenance: "tracked" },
+      ],
+    });
+    const runIntrospection = vi.fn().mockResolvedValue({ kind: "signatureResult", parameters: [] });
+    const { session, posted } = makeDeps(store, { runIntrospection });
+    loadTargetGraph(session);
+    const sourceId = sourceIdFor();
+
+    await session.handleIntent({ type: "requestSignature", requestId: "s1", sourceId, targetId: "function:f" });
+    expect(runIntrospection).toHaveBeenCalledTimes(1);
+    expect(posted.at(-1)).toMatchObject({ cached: false });
+
+    // Only the bundled/imported file's content changes; the target's own file (`m.py`) and its
+    // resolved snippet content are untouched.
+    store.store({
+      snapshot: rightSnapshot,
+      files: [
+        { path: "m.py", content, provenance: "tracked" },
+        { path: "config.py", content: "ENV1 = 'changed'\n", provenance: "tracked" },
+      ],
+    });
+
+    await session.handleIntent({ type: "requestSignature", requestId: "s2", sourceId, targetId: "function:f" });
+
+    expect(runIntrospection).toHaveBeenCalledTimes(2);
+    expect(posted.at(-1)).toMatchObject({ type: "signatureResult", requestId: "s2", cached: false });
+  });
 });
 
 describe("ChangeMapSession call function", () => {

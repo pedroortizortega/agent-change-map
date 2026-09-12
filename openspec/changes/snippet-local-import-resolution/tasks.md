@@ -148,7 +148,7 @@ Depends on: Slice 2 (`gatherImportBundle`) and Slice 3 (bundle-aware builders).
 
 ### 4.1 — Wire `gatherImportBundle` into `handleRequestSignature`/`handleRequestCall`
 
-- [ ] **RED**: `test/unit/webviewHost.test.ts` (modify) — add cases:
+- [x] **RED**: `test/unit/webviewHost.test.ts` (modify) — add cases:
       - `handleRequestSignature` calls `gatherImportBundle(store, sourceId.snapshot,
         sourceId.posixPath)` and passes the result as `buildIntrospectionDriver`'s trailing
         `bundle` argument (assert the driver-building seam receives the gathered bundle, not `[]`,
@@ -159,13 +159,13 @@ Depends on: Slice 2 (`gatherImportBundle`) and Slice 3 (bundle-aware builders).
       same-repo absolute import" and "Transitive same-repo import resolves" (host-wiring half —
       Slices 2/3 proved the pieces in isolation, this proves they are actually connected).
 
-- [ ] **GREEN**: `src/webviewHost.ts` (modify) — `handleRequestSignature`/`handleRequestCall` call
+- [x] **GREEN**: `src/webviewHost.ts` (modify) — `handleRequestSignature`/`handleRequestCall` call
       `gatherImportBundle` and pass the result through to `buildIntrospectionDriver`/
       `buildCallDriver`; `executeCall` threads the bundle from `handleRequestCall` through.
 
 ### 4.2 — Cache-key fix: widen the introspection LRU key to include the bundle hash
 
-- [ ] **RED**: `test/unit/webviewHost.test.ts` (modify) — add a regression case: prime the
+- [x] **RED**: `test/unit/webviewHost.test.ts` (modify) — add a regression case: prime the
       introspection cache for a target whose content is unchanged, then change ONLY the content
       of an imported (bundled) file in the snapshot store (not the target's own file) and issue a
       second `requestSignature` for the same target/content — assert this is a cache MISS (a
@@ -177,7 +177,7 @@ Depends on: Slice 2 (`gatherImportBundle`) and Slice 3 (bundle-aware builders).
       makes newly reachable: a signature that depends on bundled content must invalidate when that
       content changes, or the introspection result silently lies about the current code. Traced to
       design.md's "Cache-key hazard (found during design)" note.
-- [ ] **GREEN**: `src/webviewHost.ts` (modify) — widen `handleRequestSignature`'s cache key from
+- [x] **GREEN**: `src/webviewHost.ts` (modify) — widen `handleRequestSignature`'s cache key from
       `` `${targetId}|${sha256Hex(content)}` `` to
       `` `${targetId}|${sha256Hex(content)}|${sha256Hex(JSON.stringify(bundle))}` ``.
 
