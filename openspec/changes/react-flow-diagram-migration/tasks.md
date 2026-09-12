@@ -121,12 +121,19 @@ Branch `feat/react-flow-diagram-migration`, base: PR2a tip, stacked-to-main.
 
 Spec: "Dragged positions persist across a panel refresh", "Dragging a container repositions its descendants".
 
-- [ ] 3.1 RED — update `test/unit/positionOverrides.test.ts`: `Position{x,y}` absolute shape, `entries()`, `hydratePositionOverrides({a:{dx:1,dy:2}})` → `size === 0` (legacy-discard, D6). Confirm it fails.
-- [ ] 3.2 GREEN — modify `webview/positionOverrides.ts`: `Offset{dx,dy}` → `Position{x,y}`, add `entries()`, add `hydratePositionOverrides` guard (finite-value rejection). Confirm 3.1 passes.
-- [ ] 3.3 RED — add cascade test cases (`graphLayout.test.ts` or a new `descendantsOf.test.ts`): dragging a container persists an absolute override for every descendant at any depth (D14 scenario). Confirm it fails.
-- [ ] 3.4 GREEN — implement `descendantsOf(id, layoutResult)` (walks `data.parentId` chains) and wire `onNodeDragStop` in `index.tsx` per design §4's exact cascade code. Confirm 3.3 passes.
-- [ ] 3.5 REFACTOR — run full `npm test`; confirm stale-position-for-removed-node scenario still no-ops (`pruneTo`).
-- [ ] 3.6 Final gate before opening PR3.
+- [x] 3.1 RED — update `test/unit/positionOverrides.test.ts`: `Position{x,y}` absolute shape, `entries()`, `hydratePositionOverrides({a:{dx:1,dy:2}})` → `size === 0` (legacy-discard, D6). Confirm it fails.
+- [x] 3.2 GREEN — modify `webview/positionOverrides.ts`: `Offset{dx,dy}` → `Position{x,y}`, add `entries()`, add `hydratePositionOverrides` guard (finite-value rejection). Confirm 3.1 passes.
+- [x] 3.3 RED — add cascade test cases (`graphLayout.test.ts` or a new `descendantsOf.test.ts`): dragging a container persists an absolute override for every descendant at any depth (D14 scenario). Confirm it fails.
+- [x] 3.4 GREEN — implement `descendantsOf(id, layoutResult)` (walks `data.parentId` chains) and wire `onNodeDragStop` in `index.tsx` per design §4's exact cascade code. Confirm 3.3 passes.
+- [x] 3.5 REFACTOR — run full `npm test`; confirm stale-position-for-removed-node scenario still no-ops (`pruneTo`).
+- [x] 3.6 Final gate before opening PR3.
+
+**PR3 result**: 513/513 unit tests green (16 in `positionOverrides.test.ts`, up from 5: absolute
+`{x,y}` shape, `entries()`, `hydratePositionOverrides` legacy-discard/finite-value guard,
+`descendantsOf` traversal + D14 cascade persistence), typecheck/lint clean, `npm run test:e2e`
+passed for real (exit code 0, all 9 scenarios completed). `descendantsOf` and `onNodeDragStop`
+wiring land in `webview/positionOverrides.ts` and `webview/index.tsx` respectively, per design §4.
+Branch `feat/react-flow-diagram-migration`, base: PR2b-ii tip (`656c444`), stacked-to-main.
 
 ## Section 4 (PR4, base: PR3) — `edgeStyleConfig.ts` + custom edge + palette
 
