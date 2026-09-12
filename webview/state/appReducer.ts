@@ -109,13 +109,87 @@ function runResultLine(result: RunResult): string {
 }
 
 /**
- * Pure `(AppState, HostToWebviewMessage) => AppState` — every case in `index.ts`'s
- * `handleHostMessage` switch (design §3) maps to a case here. DOM mutation and
- * `vscode.postMessage` side effects stay in `index.tsx`'s effects; this function only computes
- * the next state, including the stale-reply guards ported verbatim from `index.ts`.
+ * PR2b-ii addition: locally-originated UI actions that `index.tsx` dispatches alongside real
+ * `HostToWebviewMessage`s — e.g. a node click (`choosePair` in the old `index.ts`) or reserving
+ * a confirmation slot before the host has replied. These mutate exactly the `AppState` fields
+ * that already existed for this purpose (verified by `appReducer.test.ts`'s direct-spread setup
+ * of `selectedNodeId`/`pendingAction` etc.), keeping `appReducer` the single source of truth for
+ * every field the ported panels render from. Namespaced `local:` so a literal can never collide
+ * with a real `HostToWebviewMessage["type"]`.
  */
-export function appReducer(state: AppState, message: HostToWebviewMessage): AppState {
+export type LocalUiMessage =
+  | { type: "local:chooseNode"; nodeId: string; pair: { left?: SourceId; right?: SourceId } | undefined }
+  | { type: "local:reserveAction"; action: PendingAction }
+  | { type: "local:clearPendingAction"; requestId: string }
+  | { type: "local:declineConfirmation" }
+  | { type: "local:setActiveRun"; requestId: string | undefined }
+  | { type: "local:setSignatureRequest"; targetId: string; requestId: string }
+  | { type: "local:clearSignatureForm" }
+  | { type: "local:setSourceActionsText"; text: string }
+  | { type: "local:clearConfirmation" }
+  | { type: "local:setActionStatusText"; text: string };
+
+/**
+ * Pure `(AppState, HostToWebviewMessage | LocalUiMessage) => AppState` — every case in
+ * `index.ts`'s `handleHostMessage` switch (design §3) maps to a `HostToWebviewMessage` case
+ * here; every case in `index.ts`'s local mutation helpers (`choosePair`, `reserveAction`,
+ * `clearPendingAction`, `confirmAction`'s decline branch) maps to a `LocalUiMessage` case. DOM
+ * mutation and `vscode.postMessage` side effects stay in `index.tsx`'s effects/handlers; this
+ * function only computes the next state.
+ */
+export function appReducer(state: AppState, message: HostToWebviewMessage | LocalUiMessage): AppState {
   switch (message.type) {
+    case "local:chooseNode":
+      return {
+        ...state,
+        selectedNodeId: message.nodeId,
+        selectedPair: message.pair,
+        selected: undefined,
+        editingEnabled: false,
+        diffOps: [],
+        draftContent: undefined,
+        draftSourceId: undefined,
+        currentTargetId: undefined,
+        currentSignatureRequestId: undefined,
+        signatureParameters: undefined,
+        signatureUnavailableReason: undefined,
+        sourceActionsText: undefined,
+      };
+
+    case "local:reserveAction":
+      if (state.pendingAction) return state;
+      return { ...state, pendingAction: message.action, actionStatusText: "Preparing confirmation…" };
+
+    case "local:clearPendingAction":
+      if (state.pendingAction?.requestId !== message.requestId) return state;
+      return { ...state, pendingAction: undefined };
+
+    case "local:declineConfirmation":
+      return {
+        ...state,
+        pendingAction: undefined,
+        confirmation: undefined,
+        activeRun: state.pendingAction?.type === "confirmRun" ? undefined : state.activeRun,
+      };
+
+    case "local:setActiveRun":
+      return { ...state, activeRun: message.requestId };
+
+    case "local:setSignatureRequest":
+      return { ...state, currentTargetId: message.targetId, currentSignatureRequestId: message.requestId, signatureParameters: undefined, signatureUnavailableReason: undefined };
+
+    case "local:clearSignatureForm":
+      return { ...state, currentTargetId: undefined, currentSignatureRequestId: undefined, signatureParameters: undefined, signatureUnavailableReason: undefined };
+
+    case "local:setSourceActionsText":
+      return { ...state, sourceActionsText: message.text };
+
+    case "local:clearConfirmation":
+      return { ...state, confirmation: undefined };
+
+    case "local:setActionStatusText":
+      return { ...state, actionStatusText: message.text };
+
     case "graphSummary": {
       const next: AppState = {
         ...state,

@@ -19,7 +19,7 @@ import { diffLines } from "./diff/lineDiff.js";
 
 /**
  * Builds a single display graph out of up-to-two comparison sides for the webview to
- * render. This merge is display-only: `webview/graphView.ts`'s change-status colouring and
+ * render. This merge is display-only: `webview/graphFilters.ts`'s change-status colouring and
  * `correlateDiff`'s entity pairing remain the sole authority for what changed - this
  * function only decides which single node/edge representation to show per qualified name
  * so both sides can be rendered together, preferring the right (current) side's shape.

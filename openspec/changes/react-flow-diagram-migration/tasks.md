@@ -108,14 +108,14 @@ Branch `feat/react-flow-diagram-migration`, base: PR2a tip, stacked-to-main.
 
 ### Section 2b-ii (base: PR2b-i) — Atomic switch: wire the React root, delete the old renderer
 
-- [ ] 2b-ii.1 Create `webview/index.tsx`: `<App/>` root, `useReducer(appReducer, initialState)` (from 2b-i), single `window` message `useEffect`, `useMemo(layoutGraph)`, `<ReactFlow>` config (module-level `NODE_TYPES`/`EDGE_TYPES`), `AcmEntityNode` (from 2b-i) as the sole node type, ported panels (`#diff-panel`, `#signature-form`, `#draft-content`, `#action-status`, …) with identical element ids.
-- [ ] 2b-ii.2 Delete `webview/index.ts`.
-- [ ] 2b-ii.3 Delete `webview/graphView.ts` and `test/unit/graphView.test.ts` (deferred from 1.5 — `graphFilters.ts`/`graphLayout.ts` are now the sole successors and nothing references the old file). Update `tsconfig.build.json`: drop `webview/graphView.ts` and `webview/edgeGeometry.ts` from `include` (verify no `src/` import of `edgeGeometry.ts` remains before removing it); set `exclude` → `webview/index.tsx`.
-- [ ] 2b-ii.4 RED — rewrite `test/unit/webviewDom.test.ts` with `@testing-library/react` + jsdom: node/edge `data-*` contract present after render, click-to-navigate, panel ids/behavior parity. Stub `ResizeObserver`/`getBoundingClientRect` in a shared setup file per design's jsdom caveat. Confirm it fails against the just-deleted `index.ts`.
-- [ ] 2b-ii.5 GREEN — confirm `webviewDom.test.ts` passes against `index.tsx`/`AcmEntityNode.tsx`.
-- [ ] 2b-ii.6 Verify `test/e2e/scenarios.ts` click-to-navigate stays green untouched (no edits).
-- [ ] 2b-ii.7 REFACTOR — run `npm run typecheck`, `npm run lint`, `npm test`; confirm full suite green.
-- [ ] 2b-ii.8 Final gate before opening PR2b-ii.
+- [x] 2b-ii.1 Create `webview/index.tsx`: `<App/>` root, `useReducer(appReducer, initialState)` (from 2b-i), single `window` message `useEffect`, `useMemo(layoutGraph)`, `<ReactFlow>` config (module-level `NODE_TYPES`/`EDGE_TYPES`), `AcmEntityNode` (from 2b-i) as the sole node type, ported panels (`#diff-panel`, `#signature-form`, `#draft-content`, `#action-status`, …) with identical element ids.
+- [x] 2b-ii.2 Delete `webview/index.ts`.
+- [x] 2b-ii.3 Delete `webview/graphView.ts` and `test/unit/graphView.test.ts` (deferred from 1.5 — `graphFilters.ts`/`graphLayout.ts` are now the sole successors and nothing references the old file). Update `tsconfig.build.json`: drop `webview/graphView.ts` and `webview/edgeGeometry.ts` from `include` (verify no `src/` import of `edgeGeometry.ts` remains before removing it); set `exclude` → `webview/index.tsx`.
+- [x] 2b-ii.4 RED — rewrite `test/unit/webviewDom.test.ts` with `@testing-library/react` + jsdom: node/edge `data-*` contract present after render, click-to-navigate, panel ids/behavior parity. Stub `ResizeObserver`/`getBoundingClientRect` in a shared setup file per design's jsdom caveat. Confirm it fails against the just-deleted `index.ts`.
+- [x] 2b-ii.5 GREEN — confirm `webviewDom.test.ts` passes against `index.tsx`/`AcmEntityNode.tsx`.
+- [x] 2b-ii.6 Verify `test/e2e/scenarios.ts` click-to-navigate stays green untouched (no edits).
+- [x] 2b-ii.7 REFACTOR — run `npm run typecheck`, `npm run lint`, `npm test`; confirm full suite green.
+- [x] 2b-ii.8 Final gate before opening PR2b-ii.
 
 ## Section 3 (PR3, base: PR2b-ii) — `positionOverrides.ts` absolute redesign + drag cascade
 

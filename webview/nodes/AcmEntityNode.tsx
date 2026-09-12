@@ -1,5 +1,13 @@
-import type { NodeProps } from "@xyflow/react";
+import { Handle, Position, type NodeProps } from "@xyflow/react";
 import { KIND_STYLE, type AcmNode } from "../graphLayout.js";
+
+/** Invisible, non-interactive: React Flow needs at least one source and one target `<Handle>`
+ * per node to register its connection lookup — without them every edge touching this node
+ * fails silently (`error008`, "Couldn't create edge for ... handle") and is dropped from
+ * render. `nodesConnectable={false}` on `<ReactFlow>` (index.tsx) already disables the
+ * drag-a-new-connection UI these would otherwise expose; `data.path` (D1), not handle
+ * position, is what actually draws the edge. */
+const HANDLE_STYLE = { opacity: 0, pointerEvents: "none" as const };
 
 /** Baseline used by `graphView.ts`'s `renderNodeRect`-equivalent label placement. */
 const LABEL_X = 8;
@@ -50,9 +58,22 @@ export function AcmEntityNode({ data }: NodeProps<AcmNode>) {
           <circle className="acm-node-provenance-untracked" cx={w - BADGE_MARGIN} cy={BADGE_MARGIN} r={BADGE_R} />
         )}
         {data.relationshipCount > 0 && (
-          <circle className="acm-node-relationship-indicator" cx={w - BADGE_MARGIN} cy={h - BADGE_MARGIN} r={BADGE_R} />
+          <circle
+            className="acm-node-relationship-indicator"
+            data-relationship-source={data.nodeId}
+            tabIndex={0}
+            role="button"
+            aria-haspopup="dialog"
+            aria-expanded="false"
+            aria-label={`${data.relationshipCount} relationship(s) from ${data.qualifiedName}`}
+            cx={w - BADGE_MARGIN}
+            cy={h - BADGE_MARGIN}
+            r={BADGE_R}
+          />
         )}
       </svg>
+      <Handle type="target" position={Position.Top} style={HANDLE_STYLE} isConnectable={false} />
+      <Handle type="source" position={Position.Bottom} style={HANDLE_STYLE} isConnectable={false} />
     </div>
   );
 }

@@ -1,9 +1,6 @@
 import * as esbuild from "esbuild";
 
 await esbuild.build({
-  // NOTE: webview/index.tsx does not exist yet — it lands in PR2b. Verified end-to-end
-  // by temporarily pointing this at the (pre-existing, untouched) webview/index.ts
-  // during PR2a's manual build verification; see apply-progress for details.
   entryPoints: ["webview/index.tsx"],
   outfile: "out/webview/webview/index.js", // exact path src/extension.ts already resolves
   bundle: true,

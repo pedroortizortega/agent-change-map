@@ -1,8 +1,33 @@
 import { JSDOM } from "jsdom";
 import { describe, expect, it } from "vitest";
-import { renderGraphSvg, suppressAncestorSelfReferences } from "../../webview/graphView.js";
+import { suppressAncestorSelfReferences } from "../../webview/graphFilters.js";
 import { bindRelationshipDetails } from "../../webview/relationshipDetails.js";
-import type { AnalysisGraph, SourceId } from "../../src/protocol.js";
+import type { AnalysisGraph, Edge, SourceId } from "../../src/protocol.js";
+
+/**
+ * PR2b-ii: `webview/graphView.ts`'s `renderGraphSvg` is gone (replaced by `graphLayout.ts` +
+ * React Flow, §2/§3). `bindRelationshipDetails` only needs a DOM tree carrying one
+ * `[data-relationship-source]` element per node that has a qualifying (non-`contains`,
+ * not-resolved-in-view) edge — exactly the same eligibility `bindRelationshipDetails.open()`
+ * itself re-derives per source id — so this minimal markup stands in for the full render.
+ * Rewiring this suite against `AcmEntityNode`'s real React-rendered output is PR4's scope
+ * (design.md's File Changes table: "Bind against React-rendered container").
+ */
+function relationshipSourceIds(graph: AnalysisGraph): string[] {
+  const ids = new Set(graph.nodes.map((node) => node.id));
+  const sources = new Set<string>();
+  for (const edge of graph.edges as Edge[]) {
+    if (edge.kind === "contains") continue;
+    if (edge.resolution.kind === "resolved" && ids.has(edge.resolution.target)) continue;
+    sources.add(edge.source);
+  }
+  return Array.from(sources);
+}
+function renderIndicators(graph: AnalysisGraph): string {
+  return relationshipSourceIds(graph)
+    .map((id) => `<g data-relationship-source="${id}" tabindex="0"></g>`)
+    .join("");
+}
 
 const span = { path: "a.py", startByte: 0, endByte: 4, startLine: 7, startColumn: 2, endLine: 7, endColumn: 6 };
 const graph: AnalysisGraph = {
@@ -15,7 +40,7 @@ const graph: AnalysisGraph = {
   ], diagnostics: [],
 };
 function setup() {
-  const dom = new JSDOM(`<main>${renderGraphSvg(graph, [])}</main><button id="outside">Outside</button>`, { pretendToBeVisual: true });
+  const dom = new JSDOM(`<main>${renderIndicators(graph)}</main><button id="outside">Outside</button>`, { pretendToBeVisual: true });
   const root = dom.window.document.querySelector("main")!;
   const navigated: number[] = [];
   const dispose = bindRelationshipDetails(root, graph, [{ sourceId: {} as SourceId, side: "right" }, undefined, undefined], index => navigated.push(index));
@@ -97,7 +122,7 @@ describe("relationship details popup - ancestor self-reference suppression regre
     expect(graph.edges).toHaveLength(3);
     expect(graph.edges.some(edge => edge.kind === "call" && edge.source === moduleId && edge.resolution.kind === "resolved" && edge.resolution.target === classId)).toBe(false);
 
-    const dom = new JSDOM(`<main>${renderGraphSvg(graph, [])}</main>`, { pretendToBeVisual: true });
+    const dom = new JSDOM(`<main>${renderIndicators(graph)}</main>`, { pretendToBeVisual: true });
     const root = dom.window.document.querySelector("main")!;
     const edgeSources = graph.edges.map(() => undefined);
     const dispose = bindRelationshipDetails(root, graph, edgeSources, () => {});

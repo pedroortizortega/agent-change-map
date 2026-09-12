@@ -4,6 +4,6 @@
     "rootDir": ".",
     "outDir": "out"
   },
-  "include": ["src/**/*.ts", "webview/graphFilters.ts", "webview/graphView.ts", "webview/edgeGeometry.ts"],
-  "exclude": ["test/**", "webview/index.ts"]
+  "include": ["src/**/*.ts", "webview/graphFilters.ts"],
+  "exclude": ["test/**", "webview/index.tsx"]
 }
