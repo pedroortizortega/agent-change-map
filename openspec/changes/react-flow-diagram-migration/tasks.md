@@ -27,14 +27,14 @@ Risks). PR3/PR4/PR5 estimates from the design are broadly consistent with real f
 | Estimated changed lines | PR1 ~650-850 / PR2a ~120-160 / PR2b ~900-1200 / PR3 ~150-220 / PR4 ~250-320 / PR5 ~120-180 / Aggregate ~2200-2900 |
 | 400-line budget risk | High (PR1 and PR2b individually exceed budget by 2-3x) |
 | Chained PRs recommended | Yes |
-| Suggested split | PR1 → PR2a → PR2b → PR3 → PR4 → PR5 (6 slices; design proposed 5) |
+| Suggested split | PR1 → PR2a → **PR2b-i → PR2b-ii** → PR3 → PR4 → PR5 (7 slices; design proposed 5, PR2b split further per user decision after PR1/PR2a both overran forecast) |
 | Delivery strategy | ask-on-risk |
-| Chain strategy | pending — orchestrator must ask the user (see Risks) |
+| Chain strategy | **RESOLVED: stacked-to-main** — each PR targets the previous PR's branch and merges to `main` as it's approved; user chose this over feature-branch-chain. |
 
-Decision needed before apply: Yes
+Decision needed before apply: Resolved (split into 6 chained PRs, stacked-to-main)
 Chained PRs recommended: Yes
-Chain strategy: pending
-400-line budget risk: High
+Chain strategy: stacked-to-main
+400-line budget risk: High (accepted by user; each PR reviewed independently)
 
 ### Suggested Work Units
 
@@ -42,8 +42,9 @@ Chain strategy: pending
 |------|------|-----------|----------------------|-----------------|-------------------|
 | 1 | `graphFilters.ts`/`graphLayout.ts` split, verbatim + newly-exported symbols, `src/` import repoint | PR1 (base: tracker) | `npm test -- graphFilters` / `npm test -- graphLayout` | N/A — pure unit tests, no rendering | Revert PR1; nothing downstream exists yet |
 | 2a | esbuild build script, package.json deps, tsconfig.webview.json, copy-webview-assets.mjs | PR2a (base: PR1) | `npm run build:webview` (manual, no unit test — pure build tooling) | Manual: inspect `out/webview/webview/{index.js,styles.css}` emitted | Revert PR2a only; PR1 stands alone, `build:webview` reverts to `tsc`-only |
-| 2b | `index.tsx` React root + `appReducer.ts` + `AcmEntityNode.tsx`; `webviewDom.test.ts` rewrite | PR2b (base: PR2a) | `npm test -- appReducer` then `npm test -- webviewDom` | `test/e2e/scenarios.ts` click-to-navigate must stay green | Revert PR2b only; PR2a's build tooling stands alone unused until this lands |
-| 3 | `positionOverrides.ts` absolute redesign + container-drag cascade (D14) | PR3 (base: PR2b) | `npm test -- positionOverrides` | N/A — pure unit tests | Revert PR3 only; drag persists nothing, no crash (pruneTo guard) |
+| 2b-i | `appReducer.ts` + `AcmEntityNode.tsx`, tested in isolation, not wired into anything | PR2b-i (base: PR2a) | `npm test -- appReducer` then `npm test -- AcmEntityNode` | N/A — isolated unit/component tests | Revert PR2b-i only; nothing else references these files yet |
+| 2b-ii | `index.tsx` React root wiring 2b-i's pieces; deletes old `index.ts`+`graphView.ts`; `webviewDom.test.ts` rewrite | PR2b-ii (base: PR2b-i) | `npm test -- webviewDom` | `test/e2e/scenarios.ts` click-to-navigate must stay green | Revert PR2b-ii only; PR2b-i's isolated pieces stand alone unused until this lands |
+| 3 | `positionOverrides.ts` absolute redesign + container-drag cascade (D14) | PR3 (base: PR2b-ii) | `npm test -- positionOverrides` | N/A — pure unit tests | Revert PR3 only; drag persists nothing, no crash (pruneTo guard) |
 | 4 | `edgeStyleConfig.ts` + `AcmKindEdge.tsx` + palette CSS + `relationshipDetails.test.ts` rewrite | PR4 (base: PR3) | `npm test -- edgeStyleConfig` then `npm test -- relationshipDetails` | Manual visual check: particle animates, popup opens/closes | Revert PR4 only; edges keep prior style values |
 | 5 | Hover highlight + CSS + `.vsix` size measurement | PR5 (base: PR4) | `npm test -- webviewDom -t "hover"` | Manual: package `.vsix`, record size delta; manual perf probe at {nodes:300,edges:600} | Revert PR5 only; no hover dimming, rest of migration stands |
 
@@ -51,21 +52,23 @@ Chain strategy: pending
 
 ## Section 0: Setup
 
-- [ ] 0.1 Create tracker branch `feat/react-flow-diagram-migration` off `main`.
+- [x] 0.1 Create tracker branch `feat/react-flow-diagram-migration` off `main`.
 
-## Section 1 (PR1, base: tracker) — `graphFilters.ts` + `graphLayout.ts` split
+## Section 1 (PR1, base: tracker) — `graphFilters.ts` + `graphLayout.ts` split — DONE
 
 Spec: "Render the diagram via React Flow's node/edge data model" (data-model foundation).
 
-- [ ] 1.1 RED — create `test/unit/graphFilters.test.ts` importing from `../../webview/graphFilters`, porting `filterGraph`/`sectionScope`/`isAncestorSelfReference`/`suppressAncestorSelfReferences`/`buildCspMetaTag`/`changeStatusFor` assertions verbatim from `graphView.test.ts`. Confirm it fails (module doesn't exist).
-- [ ] 1.2 GREEN — create `webview/graphFilters.ts`: move the listed symbols verbatim from `graphView.ts` (design §2), export `changeStatusFor` (currently private). Confirm 1.1 passes.
-- [ ] 1.3 RED — create `test/unit/graphLayout.test.ts` importing from `../../webview/graphLayout`, porting `measure`/placement/routing assertions from `graphView.test.ts`, plus new cases for the newly-exported `computeChildrenOf`, `orderSiblings`, `clusterConnectedRoots` (design §2 — "the whole point of the split"). Confirm it fails.
-- [ ] 1.4 GREEN — create `webview/graphLayout.ts`: move layout symbols, export the previously-private functions, implement `layoutGraph(input): {nodes, edges, boxes, relationshipCounts, flat}` per design's exact `AcmNode`/`AcmEdge` shapes (§2), replacing `place()` with `probeBoxes` as sole placement pass. Confirm 1.3 passes.
-- [ ] 1.5 **DEFERRED (sequencing correction, PR1 apply attempt 1)** — do NOT delete `webview/graphView.ts`/`test/unit/graphView.test.ts` in this PR. `webview/index.ts` (only replaced in PR2b) still imports `renderGraphSvg`/`isContainerKind`/`routedPaths` from it; deleting it here breaks a file outside PR1's scope and two test suites (`webviewDom.test.ts`, `relationshipDetails.test.ts`) that PR1 must not touch. `graphView.ts` and its test suite stay as-is, coexisting temporarily as dead code from `src/`'s perspective (superseded by `graphFilters.ts`/`graphLayout.ts` there, but still the live renderer for `webview/index.ts` until PR2b). Deletion moves to task 2b.5b, alongside `index.ts`'s deletion, when nothing references it anymore.
-- [ ] 1.6 Update `src/webviewHost.ts` and `src/extension.ts`: import specifier `graphView.js` → `graphFilters.js` only. (`webview/index.ts` keeps importing from `graphView.js` unchanged — untouched per PR1's scope.)
-- [ ] 1.7 Update `tsconfig.build.json`: `include` → add `webview/graphFilters.ts`, KEEP `webview/graphView.ts` and `webview/edgeGeometry.ts` in `include` for now (still needed transitively — `graphView.ts` isn't deleted yet, see 1.5) — this task is effectively a no-op until PR2b actually removes them; skip changing `exclude` (no `index.tsx` exists yet). Confirm `tsc -p tsconfig.build.json` still compiles cleanly with graphFilters.ts added alongside the untouched files.
-- [ ] 1.8 REFACTOR — run `npm run typecheck`, `npm run lint`, `npm test`; confirm full suite green.
-- [ ] 1.9 Final gate before opening PR1.
+- [x] 1.1 RED — create `test/unit/graphFilters.test.ts` importing from `../../webview/graphFilters`, porting `filterGraph`/`sectionScope`/`isAncestorSelfReference`/`suppressAncestorSelfReferences`/`buildCspMetaTag`/`changeStatusFor` assertions verbatim from `graphView.test.ts`. Confirm it fails (module doesn't exist).
+- [x] 1.2 GREEN — create `webview/graphFilters.ts`: move the listed symbols verbatim from `graphView.ts` (design §2), export `changeStatusFor` (currently private). Confirm 1.1 passes.
+- [x] 1.3 RED — create `test/unit/graphLayout.test.ts` importing from `../../webview/graphLayout`, porting `measure`/placement/routing assertions from `graphView.test.ts`, plus new cases for the newly-exported `computeChildrenOf`, `orderSiblings`, `clusterConnectedRoots` (design §2 — "the whole point of the split"). Confirm it fails.
+- [x] 1.4 GREEN — create `webview/graphLayout.ts`: move layout symbols, export the previously-private functions, implement `layoutGraph(input): {nodes, edges, boxes, relationshipCounts, flat}` per design's exact `AcmNode`/`AcmEdge` shapes (§2), replacing `place()` with `probeBoxes` as sole placement pass. Confirm 1.3 passes.
+- [x] 1.5 **DEFERRED (sequencing correction, PR1 apply attempt 1)** — do NOT delete `webview/graphView.ts`/`test/unit/graphView.test.ts` in this PR. `webview/index.ts` (only replaced in PR2b) still imports `renderGraphSvg`/`isContainerKind`/`routedPaths` from it; deleting it here breaks a file outside PR1's scope and two test suites (`webviewDom.test.ts`, `relationshipDetails.test.ts`) that PR1 must not touch. `graphView.ts` and its test suite stay as-is, coexisting temporarily as dead code from `src/`'s perspective (superseded by `graphFilters.ts`/`graphLayout.ts` there, but still the live renderer for `webview/index.ts` until PR2b). Deletion moves to task 2b.5b, alongside `index.ts`'s deletion, when nothing references it anymore.
+- [x] 1.6 Update `src/webviewHost.ts` and `src/extension.ts`: import specifier `graphView.js` → `graphFilters.js` only. (`webview/index.ts` keeps importing from `graphView.js` unchanged — untouched per PR1's scope.)
+- [x] 1.7 Update `tsconfig.build.json`: `include` → add `webview/graphFilters.ts`, KEEP `webview/graphView.ts` and `webview/edgeGeometry.ts` in `include` for now (still needed transitively — `graphView.ts` isn't deleted yet, see 1.5) — this task is effectively a no-op until PR2b actually removes them; skip changing `exclude` (no `index.tsx` exists yet). Confirm `tsc -p tsconfig.build.json` still compiles cleanly with graphFilters.ts added alongside the untouched files.
+- [x] 1.8 REFACTOR — run `npm run typecheck`, `npm run lint`, `npm test`; confirm full suite green.
+- [x] 1.9 Final gate before opening PR1.
+
+**PR1 result**: 525/525 tests green (44 new: 22 graphFilters + 22 graphLayout), typecheck/lint/build clean, 1130 code-only changed lines (additive-only). Branch `feat/react-flow-diagram-migration`, merged-ready, not yet pushed.
 
 ## Section 2a (PR2a, base: PR1) — Build tooling
 
@@ -83,19 +86,38 @@ Spec: "Render the diagram via React Flow's node/edge data model" (bundling prere
 
 Spec: "Render the diagram via React Flow's node/edge data model", "Preserve filtering, popup, navigation, and gates under React Flow", "Preserve node and edge data attribute contract".
 
-- [ ] 2b.1 RED — create `test/unit/appReducer.test.ts` covering every `HostToWebviewMessage` case, stale-reply guards (`currentSignatureRequestId`/`currentTargetId`, `pendingAction.requestId`), oversized gate, refresh-landing `pendingInspect` — ported from `index.ts`'s `handleHostMessage` switch. Confirm it fails.
-- [ ] 2b.2 GREEN — create `webview/state/appReducer.ts`: pure `(AppState, HostToWebviewMessage) => AppState`. Confirm 2b.1 passes.
-- [ ] 2b.3 Create `webview/nodes/AcmEntityNode.tsx`: single node component owning the `data-node-id`/`data-node-kind`/`data-change-status` contract, container-vs-leaf rendering via `data.container`.
-- [ ] 2b.4 Create `webview/index.tsx`: `<App/>` root, `useReducer(appReducer, initialState)`, single `window` message `useEffect`, `useMemo(layoutGraph)`, `<ReactFlow>` config (module-level `NODE_TYPES`/`EDGE_TYPES`), ported panels (`#diff-panel`, `#signature-form`, `#draft-content`, `#action-status`, …) with identical element ids.
-- [ ] 2b.5 Delete `webview/index.ts`.
-- [ ] 2b.5b Delete `webview/graphView.ts` and `test/unit/graphView.test.ts` (deferred from 1.5 — `graphFilters.ts`/`graphLayout.ts` are now the sole successors and nothing references the old file). Update `tsconfig.build.json`: drop `webview/graphView.ts` and `webview/edgeGeometry.ts` from `include` (verify no `src/` import of `edgeGeometry.ts` remains before removing it); set `exclude` → `webview/index.tsx`.
-- [ ] 2b.6 RED — rewrite `test/unit/webviewDom.test.ts` with `@testing-library/react` + jsdom: node/edge `data-*` contract present after render, click-to-navigate, panel ids/behavior parity. Stub `ResizeObserver`/`getBoundingClientRect` in a shared setup file per design's jsdom caveat. Confirm it fails against the deleted `index.ts`.
-- [ ] 2b.7 GREEN — confirm `webviewDom.test.ts` passes against `index.tsx`/`AcmEntityNode.tsx`.
-- [ ] 2b.8 Verify `test/e2e/scenarios.ts` click-to-navigate stays green untouched (no edits).
-- [ ] 2b.9 REFACTOR — run `npm run typecheck`, `npm run lint`, `npm test`; confirm full suite green.
-- [ ] 2b.10 Final gate before opening PR2b. **Flag for review**: this is the single largest slice (~900-1200 lines); if it proves unreviewable at that size, split further into 2b-i (reducer + root wiring) and 2b-ii (`webviewDom.test.ts` rewrite alone) before opening the PR.
+**Pre-split, per user decision (before any PR2b apply attempt started)**: split into 2b-i (foundational,
+non-wired building blocks — safe to land independently, `webview/index.ts` untouched and still live)
+and 2b-ii (the atomic switch — wires everything up, deletes the old renderer, rewrites the DOM test
+suite). This mirrors design.md's own "Rollout Order" language calling PR2 "the atomic switch — the
+moment the user sees React Flow"; 2b-i extracts everything that does NOT require flipping that switch.
 
-## Section 3 (PR3, base: PR2b) — `positionOverrides.ts` absolute redesign + drag cascade
+### Section 2b-i (base: PR2a) — Reducer + node component (foundational, non-wired)
+
+- [x] 2b-i.1 RED — create `test/unit/appReducer.test.ts` covering every `HostToWebviewMessage` case, stale-reply guards (`currentSignatureRequestId`/`currentTargetId`, `pendingAction.requestId`), oversized gate, refresh-landing `pendingInspect` — ported from `index.ts`'s `handleHostMessage` switch (read-only port; `index.ts` itself is untouched). Confirm it fails.
+- [x] 2b-i.2 GREEN — create `webview/state/appReducer.ts`: pure `(AppState, HostToWebviewMessage) => AppState`. Confirm 2b-i.1 passes. Not yet imported by anything else in the tree.
+- [x] 2b-i.3 RED — create a test for `webview/nodes/AcmEntityNode.tsx` (rendered in isolation via `@testing-library/react`, no `<ReactFlow>` wrapper needed): asserts the `data-node-id`/`data-node-kind`/`data-change-status` contract and container-vs-leaf rendering via `data.container`. Confirm it fails.
+- [x] 2b-i.4 GREEN — create `webview/nodes/AcmEntityNode.tsx`. Confirm 2b-i.3 passes. Not yet mounted by any app root.
+- [x] 2b-i.5 REFACTOR — run `npm run typecheck`, `npm run lint`, `npm test`; confirm full suite green, including the **unchanged** `webviewDom.test.ts`/`relationshipDetails.test.ts` (nothing wired yet, `webview/index.ts` and `webview/graphView.ts` are both still live and untouched).
+- [x] 2b-i.6 Final gate before opening PR2b-i.
+
+**PR2b-i result**: 569/569 tests green (44 new: 37 appReducer + 7 AcmEntityNode), typecheck/lint
+clean, purely additive (`appReducer.ts`, `AcmEntityNode.tsx`, their tests, `vitest.config.ts`
+extended for `.tsx`/jsdom support). Neither file is imported by `index.ts`/anything wired yet.
+Branch `feat/react-flow-diagram-migration`, base: PR2a tip, stacked-to-main.
+
+### Section 2b-ii (base: PR2b-i) — Atomic switch: wire the React root, delete the old renderer
+
+- [ ] 2b-ii.1 Create `webview/index.tsx`: `<App/>` root, `useReducer(appReducer, initialState)` (from 2b-i), single `window` message `useEffect`, `useMemo(layoutGraph)`, `<ReactFlow>` config (module-level `NODE_TYPES`/`EDGE_TYPES`), `AcmEntityNode` (from 2b-i) as the sole node type, ported panels (`#diff-panel`, `#signature-form`, `#draft-content`, `#action-status`, …) with identical element ids.
+- [ ] 2b-ii.2 Delete `webview/index.ts`.
+- [ ] 2b-ii.3 Delete `webview/graphView.ts` and `test/unit/graphView.test.ts` (deferred from 1.5 — `graphFilters.ts`/`graphLayout.ts` are now the sole successors and nothing references the old file). Update `tsconfig.build.json`: drop `webview/graphView.ts` and `webview/edgeGeometry.ts` from `include` (verify no `src/` import of `edgeGeometry.ts` remains before removing it); set `exclude` → `webview/index.tsx`.
+- [ ] 2b-ii.4 RED — rewrite `test/unit/webviewDom.test.ts` with `@testing-library/react` + jsdom: node/edge `data-*` contract present after render, click-to-navigate, panel ids/behavior parity. Stub `ResizeObserver`/`getBoundingClientRect` in a shared setup file per design's jsdom caveat. Confirm it fails against the just-deleted `index.ts`.
+- [ ] 2b-ii.5 GREEN — confirm `webviewDom.test.ts` passes against `index.tsx`/`AcmEntityNode.tsx`.
+- [ ] 2b-ii.6 Verify `test/e2e/scenarios.ts` click-to-navigate stays green untouched (no edits).
+- [ ] 2b-ii.7 REFACTOR — run `npm run typecheck`, `npm run lint`, `npm test`; confirm full suite green.
+- [ ] 2b-ii.8 Final gate before opening PR2b-ii.
+
+## Section 3 (PR3, base: PR2b-ii) — `positionOverrides.ts` absolute redesign + drag cascade
 
 Spec: "Dragged positions persist across a panel refresh", "Dragging a container repositions its descendants".
 
