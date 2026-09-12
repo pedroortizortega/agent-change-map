@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   analysisGraphSchema,
   analyzeRequestSchema,
+  entitySchema,
   DTO_LIMITS,
   type AnalysisGraph,
 } from "../../src/protocol.js";
@@ -65,6 +66,38 @@ describe("analyzer protocol", () => {
     expect(() => analyzeRequestSchema.parse({ ...request, files: Array.from({ length: DTO_LIMITS.maxFiles + 1 }, () => request.files[0]) })).toThrow();
     expect(() => analyzeRequestSchema.parse({ ...request, files: [{ path: "p".repeat(DTO_LIMITS.maxPathLength + 1), content: "" }] })).toThrow();
     expect(() => analyzeRequestSchema.parse({ ...request, files: [{ path: "a.py", content: "x".repeat(DTO_LIMITS.maxFileContentBytes + 1) }] })).toThrow();
+  });
+
+  it("accepts an entity with an optional target for introspection/invocation addressing", () => {
+    const functionEntity = {
+      id: "function:pkg.sample.run",
+      kind: "function",
+      qualifiedName: "pkg.sample.run",
+      span,
+      target: { module: "pkg.sample", dottedName: "run", callableKind: "function" },
+    };
+    expect(entitySchema.parse(functionEntity)).toEqual(functionEntity);
+
+    const classEntity = {
+      id: "class:pkg.sample.Widget",
+      kind: "class",
+      qualifiedName: "pkg.sample.Widget",
+      span,
+      target: { module: "pkg.sample", dottedName: "Widget", callableKind: "class" },
+    };
+    expect(entitySchema.parse(classEntity)).toEqual(classEntity);
+  });
+
+  it("rejects a malformed target shape", () => {
+    const base = { id: "function:pkg.sample.run", kind: "function", qualifiedName: "pkg.sample.run", span };
+    expect(() => entitySchema.parse({ ...base, target: { module: "pkg.sample" } })).toThrow();
+    expect(() => entitySchema.parse({ ...base, target: { module: "pkg.sample", dottedName: "run", callableKind: "lambda" } })).toThrow();
+    expect(() => entitySchema.parse({ ...base, target: { dottedName: "run", callableKind: "function" } })).toThrow();
+  });
+
+  it("still validates an entity with target entirely absent (back-compat)", () => {
+    const entity = { id: "module:pkg.sample", kind: "module", qualifiedName: "pkg.sample", span };
+    expect(entitySchema.parse(entity)).toEqual(entity);
   });
 
   it("enforces response collection and relevant string bounds", () => {

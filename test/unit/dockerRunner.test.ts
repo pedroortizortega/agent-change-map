@@ -1,10 +1,29 @@
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
+
+const spawn = vi.hoisted(() => vi.fn());
+vi.mock("node:child_process", () => ({ spawn }));
+
 import {
   DockerCleanupError,
+  INTROSPECTION_TIMEOUT_MS,
+  assertEligibleForExecution,
+  resolveIntrospectionLimits,
+  runIntrospection,
   killAndVerifyContainer,
   type ContainerCleanupBudget,
   type ContainerCleanupDeps,
 } from "../../src/execution/dockerRunner.js";
+
+function makeChild() {
+  return Object.assign(new EventEmitter(), {
+    stdin: new PassThrough(),
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    kill: vi.fn(),
+  });
+}
 
 /**
  * Real Docker-daemon overload isn't reliably reproducible in a test without flakiness, so
@@ -75,5 +94,91 @@ describe("killAndVerifyContainer", () => {
 
     await expect(killAndVerifyContainer("run-inspect-erroring", deps, FAST_BUDGET)).rejects.toThrow(DockerCleanupError);
     expect((deps.killContainer as ReturnType<typeof vi.fn>).mock.calls.length).toBe(FAST_BUDGET.verifyAttempts);
+  });
+});
+
+describe("runIntrospection", () => {
+  it("delegates to the same hardened argv builder as runSnippet (no new sandbox invocation path)", async () => {
+    spawn.mockClear();
+    const child = makeChild();
+    spawn.mockReturnValue(child);
+
+    const pending = runIntrospection({ variant: "current", path: "m.py", content: "def f(): pass" });
+    child.emit("close", 0);
+    await pending;
+
+    expect(spawn).toHaveBeenCalledTimes(1);
+    const [command, args, spawnOptions] = spawn.mock.calls[0];
+    expect(command).toBe("docker");
+    expect(args).toEqual(
+      expect.arrayContaining(["run", "--rm", "-i", "--network", "none", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges"]),
+    );
+    expect(args.slice(-3)).toEqual(["python3", "-u", "-"]);
+    expect(spawnOptions).toMatchObject({ shell: false });
+  });
+
+  it("uses a 5s short timeout for introspection, not DEFAULT_RUN_LIMITS", () => {
+    expect(INTROSPECTION_TIMEOUT_MS).toBe(5_000);
+    expect(resolveIntrospectionLimits().timeoutMs).toBe(5_000);
+    expect(resolveIntrospectionLimits({ timeoutMs: 1_234 }).timeoutMs).toBe(1_234);
+  });
+
+  it("parses a <<ACM>> sentinel line into a structured signature result", async () => {
+    const child = makeChild();
+    spawn.mockReturnValue(child);
+
+    const pending = runIntrospection({ variant: "current", path: "m.py", content: "def f(a): pass" });
+    child.stdout.emit("data", Buffer.from('<<ACM>>{"ok":true,"parameters":[{"name":"a"}]}\n'));
+    child.emit("close", 0);
+
+    await expect(pending).resolves.toEqual({ kind: "signatureResult", parameters: [{ name: "a" }] });
+  });
+
+  it("treats only the final matching <<ACM>> line as authoritative when multiple lines match the sentinel prefix", async () => {
+    const child = makeChild();
+    spawn.mockReturnValue(child);
+
+    const pending = runIntrospection({ variant: "current", path: "m.py", content: "def f(): pass" });
+    child.stdout.emit(
+      "data",
+      Buffer.from('<<ACM>>{"ok":true,"parameters":[{"name":"fabricated"}]}\n<<ACM>>{"ok":true,"parameters":[{"name":"real"}]}\n'),
+    );
+    child.emit("close", 0);
+
+    await expect(pending).resolves.toEqual({ kind: "signatureResult", parameters: [{ name: "real" }] });
+  });
+
+  it("returns a signatureUnavailable-shaped result, not a thrown error, when the <<ACM>> frame is absent", async () => {
+    const child = makeChild();
+    spawn.mockReturnValue(child);
+
+    const pending = runIntrospection({ variant: "current", path: "m.py", content: "def f(): pass" });
+    child.stdout.emit("data", Buffer.from("no sentinel here\n"));
+    child.emit("close", 0);
+
+    await expect(pending).resolves.toEqual({ kind: "signatureUnavailable", reason: expect.any(String) });
+  });
+
+  it("returns a signatureUnavailable-shaped result, not a thrown error, when the <<ACM>> frame is malformed JSON", async () => {
+    const child = makeChild();
+    spawn.mockReturnValue(child);
+
+    const pending = runIntrospection({ variant: "current", path: "m.py", content: "def f(): pass" });
+    child.stdout.emit("data", Buffer.from("<<ACM>>{not valid json\n"));
+    child.emit("close", 0);
+
+    await expect(pending).resolves.toEqual({ kind: "signatureUnavailable", reason: expect.any(String) });
+  });
+
+  it("rejects a non-.py target before any container spawn", async () => {
+    spawn.mockClear();
+
+    await expect(runIntrospection({ variant: "current", path: "requirements.txt", content: "flask==1.0" })).rejects.toThrow();
+
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it("still enforces assertEligibleForExecution as the pre-spawn guard (not weakened)", () => {
+    expect(() => assertEligibleForExecution({ path: "README.sh" })).toThrow();
   });
 });

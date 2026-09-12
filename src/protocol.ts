@@ -34,12 +34,19 @@ export const sourceSpanSchema = z.object({
   "Source span must be ordered",
 );
 
+export const entityTargetSchema = z.object({
+  module: boundedString(DTO_LIMITS.maxIdentifierLength),
+  dottedName: boundedString(DTO_LIMITS.maxIdentifierLength),
+  callableKind: z.enum(["function", "class"]),
+});
+
 export const entitySchema = z.object({
   id: boundedString(DTO_LIMITS.maxIdentifierLength),
   kind: z.enum(["package", "module", "class", "function", "method"]),
   qualifiedName: boundedString(DTO_LIMITS.maxIdentifierLength),
   containerId: boundedString(DTO_LIMITS.maxIdentifierLength).optional(),
   span: sourceSpanSchema,
+  target: entityTargetSchema.optional(),
 });
 
 export const edgeResolutionSchema = z.discriminatedUnion("kind", [
@@ -87,6 +94,7 @@ export const sourceIdSchema = z.object({
 export type SnapshotId = z.infer<typeof snapshotIdSchema>;
 export type SourceSpan = z.infer<typeof sourceSpanSchema>;
 export type Entity = z.infer<typeof entitySchema>;
+export type EntityTarget = z.infer<typeof entityTargetSchema>;
 export type EdgeResolution = z.infer<typeof edgeResolutionSchema>;
 export type Edge = z.infer<typeof edgeSchema>;
 export type Diagnostic = z.infer<typeof diagnosticSchema>;
