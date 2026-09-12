@@ -96,6 +96,13 @@ describe("Python AST analyzer", () => {
     expect(call?.resolution).toEqual({ kind: "resolved", target: helper?.id });
   });
 
+  it("resolves instance-constructor calls unchanged by the _class_names extraction (characterization guard)", async () => {
+    const graph = await analyze([{ path: "local.py", content: "class Route:\n    def get_info(self): pass\n\ndef run():\n    route = Route()\n    return route.get_info()\n" }]);
+    const callAt = (line: number) => graph.edges.find((edge) => edge.kind === "call" && edge.span.startLine === line);
+    const method = graph.nodes.find((node) => node.qualifiedName === "local.Route.get_info");
+    expect(callAt(6)?.resolution).toEqual({ kind: "resolved", target: method?.id });
+  });
+
   it("resolves a call through a locally constructed instance variable", async () => {
     const graph = await analyze([{ path: "local.py", content: "class Route:\n    def get_info(self): pass\n\ndef run():\n    route = Route()\n    return route.get_info()\n" }]);
     const callAt = (line: number) => graph.edges.find((edge) => edge.kind === "call" && edge.span.startLine === line);
@@ -154,6 +161,46 @@ describe("Python AST analyzer", () => {
     // disambiguate by column since `print(` is 6 characters wide.
     const call = graph.edges.find((edge) => edge.kind === "call" && edge.span.path === "pkg/app.py" && edge.span.startLine === 6 && edge.span.startColumn === 14);
     expect(call?.resolution).toEqual({ kind: "resolved", target: method?.id });
+  });
+
+  it("resolves a call through a bare annotated variable", async () => {
+    const graph = await analyze([{ path: "local.py", content: "class Route:\n    def go(self): pass\n\ndef run():\n    x: Route\n    return x.go()\n" }]);
+    const callAt = (line: number) => graph.edges.find((edge) => edge.kind === "call" && edge.span.startLine === line);
+    const method = graph.nodes.find((node) => node.qualifiedName === "local.Route.go");
+    expect(callAt(6)?.resolution).toEqual({ kind: "resolved", target: method?.id });
+  });
+
+  it("resolves a call through an annotated variable with an assigned value", async () => {
+    const graph = await analyze([{ path: "local.py", content: "class Route:\n    def go(self): pass\n\ndef run():\n    x: Route = Route()\n    return x.go()\n" }]);
+    const callAt = (line: number) => graph.edges.find((edge) => edge.kind === "call" && edge.span.startLine === line);
+    const method = graph.nodes.find((node) => node.qualifiedName === "local.Route.go");
+    const constructor = graph.nodes.find((node) => node.qualifiedName === "local.Route");
+    expect(callAt(6)?.resolution).toEqual({ kind: "resolved", target: method?.id });
+    const constructorCall = graph.edges.find((edge) => edge.kind === "call" && edge.span.startLine === 5);
+    expect(constructorCall?.resolution).toEqual({ kind: "resolved", target: constructor?.id });
+  });
+
+  it("resolves a call through an annotated function parameter", async () => {
+    const graph = await analyze([{ path: "local.py", content: "class Route:\n    def go(self): pass\n\ndef run(r: Route):\n    return r.go()\n" }]);
+    const callAt = (line: number) => graph.edges.find((edge) => edge.kind === "call" && edge.span.startLine === line);
+    const method = graph.nodes.find((node) => node.qualifiedName === "local.Route.go");
+    expect(callAt(5)?.resolution).toEqual({ kind: "resolved", target: method?.id });
+  });
+
+  it("leaves quoted, generic, and unknown annotations unresolved", async () => {
+    const graph = await analyze([{ path: "local.py", content: "class Route:\n    def go(self): pass\n\ndef run():\n    x: \"Route\"\n    y: Optional[Route]\n    z: Unknown\n    x.go()\n    y.go()\n    z.go()\n" }]);
+    const callAt = (line: number) => graph.edges.find((edge) => edge.kind === "call" && edge.span.startLine === line);
+    for (const line of [8, 9, 10]) {
+      expect(callAt(line)?.resolution).toEqual({ kind: "unresolved" });
+    }
+  });
+
+  it("does not bind starred or keyword-collector parameter annotations", async () => {
+    const graph = await analyze([{ path: "local.py", content: "class Route:\n    def go(self): pass\n\ndef run(*args: Route, **kw: Route):\n    args.go()\n    kw.go()\n" }]);
+    const callAt = (line: number) => graph.edges.find((edge) => edge.kind === "call" && edge.span.startLine === line);
+    for (const line of [5, 6]) {
+      expect(callAt(line)?.resolution).toEqual({ kind: "unresolved" });
+    }
   });
 
   it("times out and bounds child output deterministically", async () => {

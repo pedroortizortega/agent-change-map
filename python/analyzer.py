@@ -83,10 +83,22 @@ class FileVisitor(ast.NodeVisitor):
         self.add_definition(node, "class")
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._bind_signature(node)
         self.add_definition(node, "function")
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._bind_signature(node)
         self.add_definition(node, "function")
+
+    def _bind_signature(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        """Record parameter annotations for the scope this definition opens."""
+        scope = f"{self.current_qualified_name}.{node.name}"
+        parameters = node.args.posonlyargs + node.args.args + node.args.kwonlyargs
+        if self.stack[-1][2] == "class" and parameters and parameters[0].arg == "self":
+            parameters = parameters[1:]
+        for parameter in parameters:
+            if isinstance(parameter.annotation, ast.Name):
+                self.local_bindings.append((scope, parameter.arg, parameter.annotation.id))
 
     def visit_Import(self, node: ast.Import) -> None:
         for alias in node.names:
@@ -123,8 +135,19 @@ class FileVisitor(ast.NodeVisitor):
 
     def visit_Assign(self, node: ast.Assign) -> None:
         """Bind `var = ClassName(...)` for the current scope; every other assignment shape is ignored."""
-        if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name):
-            self.local_bindings.append((self.current_qualified_name, node.targets[0].id, node.value.func.id))
+        if len(node.targets) == 1 and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name):
+            self._bind_target(node.targets[0], node.value.func.id)
+        self.generic_visit(node)
+
+    def _bind_target(self, target: ast.expr, class_name: str) -> None:
+        """Route a plain-name target to the lexical binding table."""
+        if isinstance(target, ast.Name):
+            self.local_bindings.append((self.current_qualified_name, target.id, class_name))
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        """Bind `x: ClassName` from the annotation alone, whether or not a value is assigned."""
+        if isinstance(node.annotation, ast.Name):
+            self._bind_target(node.target, node.annotation.id)
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
@@ -190,17 +213,10 @@ def analyze(request: dict[str, Any]) -> dict[str, Any]:
     variable_classes: dict[str, list[str]] = {}
     for visitor in visitors:
         for scope, var, constructor in visitor.local_bindings:
-            class_names: list[str] = []
-            for identifier in _lexical_candidates(constructor, scope, visitor.module, by_qualified_name, alias_targets):
-                if not identifier.startswith("class:"):
-                    continue
-                name = qualified_by_id[identifier]
-                if name not in class_names:
-                    class_names.append(name)
+            class_names = _class_names(constructor, scope, visitor.module, by_qualified_name, alias_targets, qualified_by_id)
             if not class_names:
                 continue
-            bound = variable_classes.setdefault(f"{scope}.{var}", [])
-            bound.extend(name for name in class_names if name not in bound)
+            _extend(variable_classes.setdefault(f"{scope}.{var}", []), class_names)
 
     for visitor in visitors:
         for source_id, scope, call in visitor.calls:
@@ -215,6 +231,19 @@ def analyze(request: dict[str, Any]) -> dict[str, Any]:
             edges.append({"kind": "call", "source": source_id, "resolution": resolution, "span": visitor.source.span(call)})
 
     return {"snapshot": request["snapshot"], "nodes": nodes, "edges": edges, "diagnostics": diagnostics}
+
+
+def _extend(target: list[str], names: list[str]) -> None:
+    target.extend(name for name in names if name not in target)
+
+
+def _class_names(name: str, scope: str, module: str, symbols: dict[str, list[str]], aliases: dict[str, list[str]], qualified_by_id: dict[str, str]) -> list[str]:
+    """Resolve a raw source name to the deduplicated qualified names of the classes it can denote."""
+    names: list[str] = []
+    for identifier in _lexical_candidates(name, scope, module, symbols, aliases):
+        if identifier.startswith("class:"):
+            _extend(names, [qualified_by_id[identifier]])
+    return names
 
 
 def _lexical_candidates(name: str, scope: str, module: str, symbols: dict[str, list[str]], aliases: dict[str, list[str]]) -> list[str]:
