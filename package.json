@@ -29,7 +29,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json && npm run build:webview",
-    "build:webview": "tsc -p tsconfig.webview.json && node scripts/copy-webview-assets.mjs",
+    "build:webview": "tsc -p tsconfig.webview.json --noEmit && node scripts/build-webview.mjs && node scripts/copy-webview-assets.mjs",
     "lint": "eslint src test webview --max-warnings=0",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.webview.json --noEmit",
     "test": "vitest run",
@@ -42,10 +42,15 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.35.0",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/react": "^16.3.3",
     "@types/jsdom": "^30.0.0",
     "@types/node": "^24.3.1",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
     "@types/vscode": "^1.95.0",
     "@vscode/test-electron": "^3.1.0",
+    "esbuild": "^0.28.2",
     "eslint": "^9.35.0",
     "jsdom": "^30.0.1",
     "typescript": "^5.9.2",
@@ -53,6 +58,12 @@
     "vitest": "^3.2.4"
   },
   "dependencies": {
+    "@xyflow/react": "^12.11.6",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
     "zod": "^4.1.5"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
   }
 }

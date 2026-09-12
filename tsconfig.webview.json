@@ -9,7 +9,10 @@
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true,
     "lib": ["ES2022", "DOM"],
-    "types": ["node"]
+    "types": ["node"],
+    "jsx": "react-jsx",
+    "jsxImportSource": "react",
+    "noEmit": true
   },
-  "include": ["webview/**/*.ts"]
+  "include": ["webview/**/*.ts", "webview/**/*.tsx"]
 }

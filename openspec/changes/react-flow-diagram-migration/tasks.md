@@ -71,13 +71,13 @@ Spec: "Render the diagram via React Flow's node/edge data model" (data-model fou
 
 Spec: "Render the diagram via React Flow's node/edge data model" (bundling prerequisite, no behavior visible yet).
 
-- [ ] 2a.1 Add `react`, `react-dom`, `@xyflow/react` to `dependencies`; `esbuild`, `@types/react`, `@types/react-dom`, `@testing-library/react`, `@testing-library/dom` to `devDependencies`.
-- [ ] 2a.2 Create `scripts/build-webview.mjs` per design's exact esbuild config — `define: {"process.env.NODE_ENV": '"production"'}` is mandatory (D11).
-- [ ] 2a.3 Update `package.json`'s `build:webview` script to run `tsc --noEmit` → `build-webview.mjs` → `copy-webview-assets.mjs`.
-- [ ] 2a.4 Update `tsconfig.webview.json`: `jsx: "react-jsx"`, `jsxImportSource: "react"`, `noEmit: true`, include `.tsx`.
-- [ ] 2a.5 Modify `scripts/copy-webview-assets.mjs` to concatenate `@xyflow/react/dist/style.css` + `webview/styles.css` into one `out/webview/webview/styles.css` (vendor-first order, D7).
-- [ ] 2a.6 Manual verification — run `npm run build:webview`; confirm `out/webview/webview/index.js` and `styles.css` are emitted with no errors. No automated test: this is build tooling, not application logic.
-- [ ] 2a.7 Final gate: `npm run typecheck` + `npm run build:webview` green before opening PR2a.
+- [x] 2a.1 Add `react`, `react-dom`, `@xyflow/react` to `dependencies`; `esbuild`, `@types/react`, `@types/react-dom`, `@testing-library/react`, `@testing-library/dom` to `devDependencies`.
+- [x] 2a.2 Create `scripts/build-webview.mjs` per design's exact esbuild config — `define: {"process.env.NODE_ENV": '"production"'}` is mandatory (D11).
+- [x] 2a.3 Update `package.json`'s `build:webview` script to run `tsc --noEmit` → `build-webview.mjs` → `copy-webview-assets.mjs`.
+- [x] 2a.4 Update `tsconfig.webview.json`: `jsx: "react-jsx"`, `jsxImportSource: "react"`, `noEmit: true`, include `.tsx`.
+- [x] 2a.5 Modify `scripts/copy-webview-assets.mjs` to concatenate `@xyflow/react/dist/style.css` + `webview/styles.css` into one `out/webview/webview/styles.css` (vendor-first order, D7).
+- [x] 2a.6 Manual verification — run `npm run build:webview`; confirm `out/webview/webview/index.js` and `styles.css` are emitted with no errors. No automated test: this is build tooling, not application logic. (Verified via temporary entry-point swap to the pre-existing `webview/index.ts`, reverted after — see apply-progress.)
+- [x] 2a.7 Final gate: `npm run typecheck` green + build pipeline verified (see 2a.6 — final `webview/index.tsx` entry expectedly unresolved until PR2b creates it).
 
 ## Section 2b (PR2b, base: PR2a) — React root port
 
