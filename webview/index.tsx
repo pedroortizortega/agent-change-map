@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { BaseEdge, ReactFlow, ReactFlowProvider, type EdgeProps, type EdgeTypes, type NodeTypes } from "@xyflow/react";
+import { BaseEdge, ReactFlow, ReactFlowProvider, type EdgeProps, type EdgeTypes, type Node, type NodeTypes } from "@xyflow/react";
 import { bindRelationshipDetails } from "./relationshipDetails.js";
 import { layoutGraph, type AcmEdge } from "./graphLayout.js";
 import { AcmEntityNode } from "./nodes/AcmEntityNode.js";
+import { PositionOverrides, descendantsOf } from "./positionOverrides.js";
 import { appReducer, createInitialState, type Confirmation, type PendingAction } from "./state/appReducer.js";
 import type { HostToWebviewMessage, WebviewToHostMessage } from "../src/webviewProtocol.js";
 import type { Entity, SourceId } from "../src/protocol.js";
@@ -19,14 +20,6 @@ const CONTEXT = 3;
 
 declare function acquireVsCodeApi(): { postMessage(message: WebviewToHostMessage): void };
 const vscode = acquireVsCodeApi();
-
-/**
- * No position overrides are wired into `layoutGraph` yet (PR3's scope — see design.md D5/D6
- * and `positionOverrides.ts`'s still-`{dx,dy}`-shaped API, which does not match `layoutGraph`'s
- * absolute-`{x,y}` `overrides` input). A single, stable, empty map means every render calls
- * `layoutGraph` with the same "no overrides" input; drag persistence lands in PR3.
- */
-const NO_OVERRIDES = new Map<string, { x: number; y: number }>();
 
 /**
  * Minimal placeholder edge (design.md's PR2b-ii scope note: per-kind dash/arrow/particle
@@ -248,6 +241,8 @@ function App() {
   const [currentThemeColors, setCurrentThemeColors] = useState<Partial<Record<TokenRole, string>>>({ ...DEFAULT_PALETTE.dark });
   const nextId = useRef(0);
   const graphRef = useRef<HTMLDivElement>(null);
+  const positionOverrides = useRef(new PositionOverrides()).current;
+  const [overrideSeq, setOverrideSeq] = useState(0);
   /** Snapshot of `expandedRuns` taken right before a refresh-landing re-`inspectSources` request
    * (see the `state.pendingInspect` effect below), consumed by the `diffOps` effect so a landing
    * refresh's diff panel re-render restores the same collapse state — mirrors the old `index.ts`'s
@@ -313,10 +308,35 @@ function App() {
 
   const layout = useMemo(() => {
     if (!state.graph) return undefined;
-    return layoutGraph({ graph: state.graph, diff: state.diff, untrackedPaths: state.untrackedPaths, overrides: NO_OVERRIDES });
-  }, [state.graph, state.diff, state.untrackedPaths]);
+    return layoutGraph({ graph: state.graph, diff: state.diff, untrackedPaths: state.untrackedPaths, overrides: new Map(positionOverrides.entries()) });
+    // `overrideSeq` is the drag-commit trigger (see `onNodeDragStop`); `positionOverrides` is a stable ref.
+  }, [state.graph, state.diff, state.untrackedPaths, overrideSeq]);
   const nodes = layout?.nodes ?? [];
   const edges = layout?.edges ?? [];
+
+  // `layoutGraph` applies overrides after `probeBoxes`; pruning here on every layout run drops
+  // any retained override for a node no longer present (design.md §4's `applyPositionOverrides()`
+  // contract, minus the DOM) so a stale position for a removed node no-ops rather than resurfacing.
+  useEffect(() => {
+    if (layout) positionOverrides.pruneTo(layout.boxes.keys());
+  }, [layout]);
+
+  const onNodeDragStop = useCallback(
+    (_: unknown, node: Node) => {
+      if (!layout) return;
+      const before = layout.boxes.get(node.id); // pre-drag absolute box
+      const dx = node.position.x - (before?.x ?? node.position.x);
+      const dy = node.position.y - (before?.y ?? node.position.y);
+      positionOverrides.set(node.id, { x: node.position.x, y: node.position.y }); // the dragged node itself
+      for (const descendantId of descendantsOf(node.id, layout)) {
+        // D14 — cascade
+        const box = layout.boxes.get(descendantId);
+        if (box) positionOverrides.set(descendantId, { x: box.x + dx, y: box.y + dy });
+      }
+      setOverrideSeq((s) => s + 1); // re-run layoutGraph
+    },
+    [layout],
+  );
 
   useEffect(() => {
     if (!graphRef.current || !state.graph) return;
@@ -497,6 +517,7 @@ function App() {
             edgeTypes={EDGE_TYPES}
             onNodeClick={(_, n) => choosePair(n.id)}
             onEdgeClick={(_, e) => navigateEdge((e.data as AcmEdge["data"]).edgeIndex)}
+            onNodeDragStop={onNodeDragStop}
             fitView
             fitViewOptions={{ padding: 0.1 }}
             minZoom={0.2}
