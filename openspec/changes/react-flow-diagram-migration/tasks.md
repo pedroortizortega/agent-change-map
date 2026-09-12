@@ -139,15 +139,28 @@ Branch `feat/react-flow-diagram-migration`, base: PR2b-ii tip (`656c444`), stack
 
 Spec: "Source edge visuals from a single style config module", "Draw directional import and call edges" (dash/color), "Distinguish ambiguous and unresolved edges".
 
-- [ ] 4.1 RED — create `test/unit/edgeStyleConfig.test.ts`: exact `EDGE_STYLE_BY_KIND` values, `edgeStyleFor` dispatch, invariant regex `/^var\(--acm-edge-(import|call|ambiguous)\)$/` on every `stroke`/`particle.fill`. Confirm it fails.
-- [ ] 4.2 GREEN — create `webview/edgeStyleConfig.ts` per design's exact code (Palette C, D13): `import` dashed `8 6`, `call` solid, `EDGE_STYLE_UNRESOLVED` dotted `2 5`. Confirm 4.1 passes.
-- [ ] 4.3 Create `webview/edges/AcmKindEdge.tsx`: `BaseEdge` + `<animateMotion>` particle, `mpath`/stable `pathId`, `data-edge-index`/`data-edge-kind`/`data-resolution` attrs.
-- [ ] 4.4 Update `webview/styles.css`: `--acm-edge-{import,call,ambiguous}` `var(--vscode-charts-*, <fallback>)` chain, `.react-flow__*` coexistence rules.
-- [ ] 4.5 RED — rewrite `test/unit/relationshipDetails.test.ts` binding against a React-rendered container (D10). Confirm it fails against the old imperative-DOM fixture.
-- [ ] 4.6 GREEN — wire `relationshipDetails.ts`'s `useEffect` binding (keyed on `graphSeq`) in `index.tsx`, no source changes to `relationshipDetails.ts` itself. Confirm 4.5 passes.
-- [ ] 4.7 DOM test — extend `webviewDom.test.ts`: each edge renders exactly one `<animateMotion>` with `mpath href` matching its `pathId`.
-- [ ] 4.8 REFACTOR — run full `npm test`, `npm run lint`, `npm run typecheck`.
-- [ ] 4.9 Final gate before opening PR4.
+- [x] 4.1 RED — create `test/unit/edgeStyleConfig.test.ts`: exact `EDGE_STYLE_BY_KIND` values, `edgeStyleFor` dispatch, invariant regex `/^var\(--acm-edge-(import|call|ambiguous)\)$/` on every `stroke`/`particle.fill`. Confirm it fails.
+- [x] 4.2 GREEN — create `webview/edgeStyleConfig.ts` per design's exact code (Palette C, D13): `import` dashed `8 6`, `call` solid, `EDGE_STYLE_UNRESOLVED` dotted `2 5`. Confirm 4.1 passes.
+- [x] 4.3 Create `webview/edges/AcmKindEdge.tsx`: `BaseEdge` + `<animateMotion>` particle, `mpath`/stable `pathId`, `data-edge-index`/`data-edge-kind`/`data-resolution` attrs. Wired into `index.tsx`'s module-level `EDGE_TYPES` (replacing PR2b-ii's `PlainEdge` placeholder), plus a shared `<defs>`/`<marker>` block (`acm-arrow-import`/`acm-arrow-call`, `orient="auto-start-reverse"`) rendered once inside `<ReactFlow>`, ported verbatim from the deleted `graphView.ts`'s marker markup.
+- [x] 4.4 Update `webview/styles.css`: `--acm-edge-{import,call,ambiguous}` `var(--vscode-charts-*, <fallback>)` chain (Palette C, no `body.vscode-*` branch needed), `.acm-arrow-import`/`.acm-arrow-call`/`.acm-particle` coexistence rules replacing the dead `graphView.ts`-era `.edge-*`/`.arrow-*`/`.resolution-*` selectors, and fixed the pre-existing dead `.relationship-indicator` badge CSS (mismatched selector, never matched `AcmEntityNode`'s real `.acm-node-relationship-indicator` circle) to target the real markup, still driven by `--acm-edge-ambiguous` (EDGE_STYLE_UNRESOLVED's indicator-chrome contract, D12).
+- [x] 4.5 RED — rewrite `test/unit/relationshipDetails.test.ts` (renamed `.test.tsx` — JSX) binding against a React-rendered container (D10): runs `graph` through the real `layoutGraph` and renders every `AcmNode` via the real `AcmEntityNode` component, replacing PR2b-ii's hand-authored `<g data-relationship-source>` stand-in markup. Confirmed it fails against the old imperative-DOM fixture before rewriting (module/markup mismatch).
+- [x] 4.6 GREEN — `relationshipDetails.ts`'s `useEffect` binding in `index.tsx` was already wired from PR2b-ii (D10: source file itself stays untouched, unchanged this PR); confirmed 4.5's rewritten suite passes against it unmodified.
+- [x] 4.7 DOM test — extended `webviewDom.test.ts`: each drawn edge (import/call) renders exactly one `<animateMotion>` with `mpath href` matching its own `pathId`; an ambiguous/unresolved relationship renders no `[data-edge-index]`/`.acm-edge`/`.acm-particle`/`<animateMotion>` at all (D12 regression guard, indicator-only).
+- [x] 4.8 REFACTOR — ran full `npm test` (524/524), `npm run lint`, `npm run typecheck`: all green.
+- [x] 4.9 Final gate before opening PR4 — `npm run test:e2e` run for real, exit code 0, all 9 scenarios completed.
+
+**PR4 result**: 524/524 tests green (12 new: 8 `edgeStyleConfig` + 2 net `webviewDom` +
+2 net `relationshipDetails`), typecheck/lint clean, `npm run test:e2e` passed for real (exit code
+0, all 9 scenarios completed). 455 changed lines (347 additions / 108 deletions) across 7 files —
+over the ~250-320 forecast but within the user's standing exception for this change (each PR
+reviewed independently, `400-line budget risk: High` already accepted). Confirmed: the palette
+resolves entirely via `var(--vscode-charts-*, <fallback>)` with no raw hex anywhere except that
+CSS fallback chain (`edgeStyleConfig.ts`'s own invariant test enforces this); ambiguous/unresolved
+relationships never reach `graphLayout.ts`'s `AcmEdge[]` output (`buildEdges` already filtered
+`resolution.kind !== "resolved"` before this PR — verified, not "fixed") and now have an explicit
+DOM regression test proving no drawn line/path/particle exists for them. `webview/index.tsx`,
+`webview/styles.css`, `webview/edgeStyleConfig.ts` (new), `webview/edges/AcmKindEdge.tsx` (new).
+Branch `feat/react-flow-diagram-migration`, base: PR3 tip (`337e08c`), stacked-to-main.
 
 ## Section 5 (PR5, base: PR4) — Hover highlight + measurement
 

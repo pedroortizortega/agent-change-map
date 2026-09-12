@@ -113,6 +113,55 @@ describe("node/edge data-* contract", () => {
     expect(edgeEl.getAttribute("data-edge-kind")).toBe("call");
     expect(edgeEl.getAttribute("data-resolution")).toBe("resolved");
   });
+
+  it("renders exactly one <animateMotion> per drawn edge (import and call), whose mpath/href matches that edge's own stable pathId (PR4, design.md §6)", async () => {
+    const edgeSpan = { ...node.span, startByte: 6, endByte: 13, startColumn: 6, endColumn: 13 };
+    const importTarget = { ...node, id: "module:importTarget", qualifiedName: "importTarget" };
+    const callTarget = { ...node, id: "module:callTarget", qualifiedName: "callTarget" };
+    session.loadComparison({ ...graph, snapshot: leftSnapshot }, {
+      ...graph,
+      nodes: [node, importTarget, callTarget],
+      edges: [
+        { kind: "import", importedName: "pkg", source: node.id, resolution: { kind: "resolved", target: importTarget.id }, span: edgeSpan },
+        { kind: "call", source: node.id, resolution: { kind: "resolved", target: callTarget.id }, span: edgeSpan },
+      ],
+    }, []);
+    await vi.waitFor(() => expect(dom.window.document.querySelector('[data-edge-index="1"]')).not.toBeNull());
+
+    for (const index of [0, 1]) {
+      const edgeEl = element(`[data-edge-index="${index}"]`);
+      const path = edgeEl.querySelector("path");
+      expect(path, `edge ${index} missing its <path>`).not.toBeNull();
+      const pathId = path!.getAttribute("id")!;
+      expect(pathId).toBe(`acm-edge-path-${index}`);
+      const motions = edgeEl.querySelectorAll("animateMotion");
+      expect(motions, `edge ${index} should render exactly one <animateMotion>`).toHaveLength(1);
+      const mpath = motions[0].querySelector("mpath")!;
+      expect(mpath.getAttribute("href")).toBe(`#${pathId}`);
+      expect(edgeEl.querySelectorAll(".acm-particle")).toHaveLength(1);
+    }
+    expect(element('[data-edge-index="0"]').getAttribute("data-edge-kind")).toBe("import");
+    expect(element('[data-edge-index="1"]').getAttribute("data-edge-kind")).toBe("call");
+  });
+
+  it("renders NO line, path, or particle for an ambiguous/unresolved relationship — indicator-only (D12)", async () => {
+    const edgeSpan = { ...node.span, startByte: 6, endByte: 13, startColumn: 6, endColumn: 13 };
+    session.loadComparison(undefined, {
+      ...graph,
+      edges: [
+        { kind: "call", source: node.id, resolution: { kind: "unresolved" }, span: edgeSpan },
+        { kind: "call", source: node.id, resolution: { kind: "ambiguous", candidates: ["x", "y"] }, span: edgeSpan },
+      ],
+    }, []);
+    await vi.waitFor(() => expect(dom.window.document.querySelector('[data-relationship-source="module:m"]')).not.toBeNull());
+
+    // D12 (indicator-only): no AcmEdge, hence no <g data-edge-index>, no <path>, no particle —
+    // the relationship is disclosed exclusively through the node's indicator badge/popup.
+    expect(dom.window.document.querySelector("[data-edge-index]")).toBeNull();
+    expect(dom.window.document.querySelector(".acm-edge")).toBeNull();
+    expect(dom.window.document.querySelector(".acm-particle")).toBeNull();
+    expect(dom.window.document.querySelector("animateMotion")).toBeNull();
+  });
 });
 
 describe("click-to-navigate", () => {

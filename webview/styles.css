@@ -3,9 +3,16 @@
   --acm-status-removed: #f85149;
   --acm-status-modified: #d29922;
   --acm-status-unchanged: #6e7681;
-  --acm-edge-import: #4f9cf9;
-  --acm-edge-call: #c586c0;
-  --acm-edge-ambiguous: #f0883e;
+  /* Palette C, "Theme-Native Charts" (D13, design.md §5 "PALETTE — RESOLVED"): every installed
+     VS Code theme (light, dark, high-contrast, third-party) already supplies its own
+     contrast-tuned `--vscode-charts-*` value, so no `body.vscode-light`/`vscode-high-contrast`
+     branch is needed here at all. The fallback hexes only engage for a theme that omits
+     `--vscode-charts-*` entirely; they are Palette A's *light*-theme values (not the previous
+     dark-tuned `#4f9cf9`/`#c586c0`/`#f0883e`), since a theme that omits the token cannot be
+     assumed dark, so a light-safe fallback is the conservative choice. */
+  --acm-edge-import: var(--vscode-charts-blue, #0b5cd6);
+  --acm-edge-call: var(--vscode-charts-purple, #9b2fa0);
+  --acm-edge-ambiguous: var(--vscode-charts-orange, #b04d00);
   --acm-provenance-untracked: #a371f7;
 }
 
@@ -63,33 +70,22 @@ body {
   stroke: var(--acm-status-unchanged);
 }
 
-/* The edge line itself is outline-only (see the inline fill="none" on <path> in
-   graphView.ts); only the arrowhead marker triangle is meant to be filled. */
-.edge-import {
-  stroke: var(--acm-edge-import);
-  stroke-width: 3;
-  fill: none;
-}
-
-.arrow-import {
+/* `AcmKindEdge.tsx` (PR4, design.md §6) sets stroke/stroke-width/dasharray inline via the
+   `style` prop (CSSOM, CSP-safe) sourced from `edgeStyleConfig.ts` — only the arrowhead marker
+   triangles (`<path>` inside index.tsx's shared `<defs>`) and the particle are styled here. */
+.acm-arrow-import {
   fill: var(--acm-edge-import);
 }
 
-.edge-call {
-  stroke: var(--acm-edge-call);
-  stroke-width: 3;
-  fill: none;
-}
-
-.arrow-call {
+.acm-arrow-call {
   fill: var(--acm-edge-call);
 }
 
-.resolution-ambiguous,
-.resolution-unresolved {
-  stroke: var(--acm-edge-ambiguous);
-  stroke-width: 3;
-  fill: none;
+/* The particle `<circle>`'s r/fill are set inline by AcmKindEdge (per-kind, from
+   edgeStyleConfig.ts); this rule only keeps it non-interactive/non-hit-testable so it never
+   steals a click from the edge's own `interactionWidth` hit area. */
+.acm-particle {
+  pointer-events: none;
 }
 
 .provenance-untracked {
@@ -216,19 +212,19 @@ button, select, textarea { color: var(--vscode-input-foreground, #ccc); backgrou
 button { margin: 4px; padding: 6px; }
 button:disabled { opacity: 0.5; }
 
-.relationship-indicator { cursor: pointer; }
-.relationship-indicator rect {
+/* The relationship-indicator badge (`AcmEntityNode.tsx`'s `.acm-node-relationship-indicator`
+   circle): EDGE_STYLE_UNRESOLVED (edgeStyleConfig.ts, D12) governs ONLY this indicator chrome,
+   never a drawn edge — ambiguous/unresolved relationships have no in-view target and are never
+   emitted as an AcmEdge. Its stroke/fill share the same `--acm-edge-ambiguous` custom property
+   as EDGE_STYLE_UNRESOLVED, so the badge and the popup it discloses read as one visual family. */
+.acm-node-relationship-indicator {
+  cursor: pointer;
   fill: var(--vscode-editor-background, #1e1e1e);
   stroke: var(--acm-edge-ambiguous);
   stroke-width: 1.5;
 }
-.relationship-indicator text {
-  fill: var(--acm-edge-ambiguous);
-  font: 11px var(--vscode-font-family, sans-serif);
-  pointer-events: none;
-}
-.relationship-indicator:focus { outline: none; }
-.relationship-indicator:focus rect {
+.acm-node-relationship-indicator:focus { outline: none; }
+.acm-node-relationship-indicator:focus {
   stroke: var(--vscode-focusBorder, #4f9cf9);
   stroke-width: 3;
 }

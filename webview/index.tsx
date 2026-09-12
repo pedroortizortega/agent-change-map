@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { BaseEdge, ReactFlow, ReactFlowProvider, type EdgeProps, type EdgeTypes, type Node, type NodeTypes } from "@xyflow/react";
+import { ReactFlow, ReactFlowProvider, type EdgeTypes, type Node, type NodeTypes } from "@xyflow/react";
 import { bindRelationshipDetails } from "./relationshipDetails.js";
 import { layoutGraph, type AcmEdge } from "./graphLayout.js";
 import { AcmEntityNode } from "./nodes/AcmEntityNode.js";
+import { AcmKindEdge } from "./edges/AcmKindEdge.js";
 import { PositionOverrides, descendantsOf } from "./positionOverrides.js";
 import { appReducer, createInitialState, type Confirmation, type PendingAction } from "./state/appReducer.js";
 import type { HostToWebviewMessage, WebviewToHostMessage } from "../src/webviewProtocol.js";
@@ -21,22 +22,6 @@ const CONTEXT = 3;
 declare function acquireVsCodeApi(): { postMessage(message: WebviewToHostMessage): void };
 const vscode = acquireVsCodeApi();
 
-/**
- * Minimal placeholder edge (design.md's PR2b-ii scope note: per-kind dash/arrow/particle
- * styling is PR4's `AcmKindEdge.tsx`/`edgeStyleConfig.ts`). Renders the coordinated router's
- * `data.path` via `<BaseEdge>` with no additional styling, and keeps the `data-edge-*`
- * attribute contract `relationshipDetails.ts`/tests address edges by.
- */
-function PlainEdge({ data }: EdgeProps<AcmEdge>) {
-  if (!data) return null;
-  return (
-    <g data-edge-index={data.edgeIndex} data-edge-kind={data.kind} data-resolution={data.resolution}>
-      <title>{data.title}</title>
-      <BaseEdge id={data.pathId} path={data.path} />
-    </g>
-  );
-}
-
 /** Module-level constants (design.md §3): defining these inline would remount every node/edge
  * on every render. The component-level casts are React Flow's own well-known generic-strictness
  * gap (tracked upstream): `NodeTypes`/`EdgeTypes` expect a component typed against the
@@ -44,7 +29,7 @@ function PlainEdge({ data }: EdgeProps<AcmEdge>) {
  * with `NodeProps<AcmNode>`/`EdgeProps<AcmEdge>` on a couple of incidentally-optional fields
  * (`parentId`, `style`) — the runtime shapes are exactly what `layoutGraph` produces either way. */
 const NODE_TYPES: NodeTypes = { acmEntity: AcmEntityNode as unknown as NodeTypes["acmEntity"] };
-const EDGE_TYPES: EdgeTypes = { acmKind: PlainEdge as unknown as EdgeTypes["acmKind"] };
+const EDGE_TYPES: EdgeTypes = { acmKind: AcmKindEdge as unknown as EdgeTypes["acmKind"] };
 
 /** Pure widget-mapping table (ported verbatim from `index.ts`). */
 type Widget =
@@ -529,7 +514,23 @@ function App() {
             elementsSelectable
             proOptions={{ hideAttribution: false }}
             aria-label="Change map"
-          />
+          >
+            {/* Single `<defs>` shared by every `AcmKindEdge` (design.md §6): keeps today's
+                `acm-arrow-import`/`acm-arrow-call` marker ids and `orient="auto-start-reverse"`
+                ported verbatim from `graphView.ts`'s `renderEdge`. Rendered once here rather
+                than per-edge so `markerEnd={url(#acm-arrow-${kind})}` resolves regardless of
+                which edge renders first. */}
+            <svg style={{ position: "absolute", width: 0, height: 0 }} aria-hidden="true">
+              <defs>
+                <marker id="acm-arrow-import" viewBox="0 0 10 10" refX="9" refY="5" markerWidth={8} markerHeight={8} markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+                  <path d="M0,0 L10,5 L0,10 z" className="acm-arrow-import" />
+                </marker>
+                <marker id="acm-arrow-call" viewBox="0 0 10 10" refX="9" refY="5" markerWidth={8} markerHeight={8} markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+                  <path d="M0,0 L10,5 L0,10 z" className="acm-arrow-call" />
+                </marker>
+              </defs>
+            </svg>
+          </ReactFlow>
         </ReactFlowProvider>
       </div>
 

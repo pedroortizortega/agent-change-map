@@ -666,3 +666,50 @@ highlighting (PR3/4/5 scope, untouched).
 - Mode: correction to already-landed PR2b-ii, not a new chained-PR slice
 - Diff size: 3 files changed, +310/-12 (322 total changed lines) — within the 400-line budget
 - Boundary: starts from PR2b-ii's tip (commit `2b61931`); this commit is the correction
+
+---
+
+## Section 4 (PR4, base: PR3) — `edgeStyleConfig.ts` + custom edge + palette
+
+**Status**: 9/9 tasks complete (4.1-4.9). Branch `feat/react-flow-diagram-migration`, base: PR3
+tip (`337e08c`), stacked-to-main.
+
+### TDD Cycle Evidence (Strict TDD Mode)
+
+| Task | RED | GREEN | REFACTOR |
+|---|---|---|---|
+| 4.1/4.2 `edgeStyleConfig.ts` | `test/unit/edgeStyleConfig.test.ts` written first; failed — `Cannot find module '../../webview/edgeStyleConfig.js'` | Created `webview/edgeStyleConfig.ts` per design.md §5's exact code; 8/8 passed | n/a — module is a pure data table, no further extraction needed |
+| 4.3 `AcmKindEdge.tsx` | No standalone RED for this file (design.md gives its exact JSX verbatim; behavior is exercised transitively by 4.7's `webviewDom.test.ts` additions and 4.5/4.6's `relationshipDetails.test.tsx`) | Wired into `index.tsx`'s `EDGE_TYPES`, replacing PR2b-ii's `PlainEdge` placeholder; typecheck/build green | Added the shared `<defs>`/`<marker>` block (arrow markers), ported verbatim from the deleted `graphView.ts` |
+| 4.4 `styles.css` palette | n/a — CSS constants, no test framework applicable; verified visually via the invariant regex in 4.1's test (config module never leaks a raw hex) | Replaced `:root`'s `--acm-edge-*` with the `var(--vscode-charts-*, <fallback>)` chain (Palette C) | Replaced dead `graphView.ts`-era `.edge-*`/`.arrow-*`/`.resolution-*` selectors with real `.acm-arrow-*`/`.acm-particle` coexistence rules; also fixed a pre-existing dead `.relationship-indicator` selector (never matched `AcmEntityNode`'s real `.acm-node-relationship-indicator` markup) — found while auditing which classes are live |
+| 4.5/4.6/4.7 `relationshipDetails.test.tsx` rewrite | Confirmed the pre-rewrite `.test.ts` fixture was hand-authored stand-in markup (`<g data-relationship-source>`), not a real render — rewrote against `layoutGraph` + real `AcmEntityNode` render via `@testing-library/react` (D10: bind against React-rendered container); file renamed `.ts` → `.tsx` (JSX requires it) | 4/4 passed (was 2 tests, now 4 — added explicit assertions for the real `.acm-node-relationship-indicator` badge contract and D12's "zero drawn edges" invariant) | `bindRelationshipDetails`/`relationshipDetails.ts` itself stayed untouched (D10) |
+| 4.7/4.8 `webviewDom.test.ts` extension | Two new cases written against the still-`PlainEdge`-era wiring (before 4.3's `AcmKindEdge` swap landed in the same working tree) — would have failed on `<animateMotion>`/`.acm-particle` absence | 33/33 passed after `AcmKindEdge` wiring | n/a |
+
+### Work Unit Evidence
+
+| Evidence | Value |
+|---|---|
+| Focused test command and exact result | `npx vitest run edgeStyleConfig` — 8/8 passed; `npx vitest run relationshipDetails` — 4/4 passed; `npx vitest run webviewDom` — 33/33 passed |
+| Runtime harness command/scenario and exact result | `npm run test:e2e` — "VS Code extension e2e scenarios passed", exit code 0, all 9 scenarios (selection, exact/stale navigation, draft save, forged-root refusal, direct save, oversized consent, refresh, run/stream, cancel) green |
+| Rollback boundary | `webview/edgeStyleConfig.ts` (new), `webview/edges/AcmKindEdge.tsx` (new), `webview/index.tsx`, `webview/styles.css`, `test/unit/edgeStyleConfig.test.ts` (new), `test/unit/relationshipDetails.test.tsx` (renamed+rewritten from `.test.ts`), `test/unit/webviewDom.test.ts` — revertable as one unit back to PR3's tip; edges fall back to no per-kind styling (React Flow's default bezier, no D12 change) if reverted, nothing downstream depends on this PR yet |
+
+### Full-suite gate
+
+- `npm run typecheck` — clean (both `tsconfig.json` and `tsconfig.webview.json`)
+- `npm run lint` — clean, `--max-warnings=0`
+- `npm test` — 524/524 passed (up from 513 after PR3; +8 `edgeStyleConfig`, net +2 `webviewDom`, net +2 `relationshipDetails`, minus the file being replaced not duplicated)
+- `npm run test:e2e` — ran for real, exit code 0, all 9 scenarios completed
+
+### Deviations from design
+
+- None in substance. Two things not explicitly spelled out in design.md that required judgment calls, both documented inline in the code/CSS comments:
+  1. The shared `<defs>`/marker block's exact placement: design.md says "rendered once by `<GraphCanvas>` inside the React Flow SVG" but doesn't give a code snippet. Rendered it as a child `<svg><defs>...</defs></svg>` inside `<ReactFlow>` (a sibling overlay within the same DOM tree — browsers resolve `url(#id)` marker references across sibling `<svg>` elements in the same document), reusing `graphView.ts`'s exact deleted marker markup (`viewBox`, `refX`/`refY`, `markerWidth`/`markerHeight`, `orient="auto-start-reverse"`) verbatim.
+  2. Found and fixed a **pre-existing** dead-CSS bug unrelated to this PR's core scope: `styles.css`'s `.relationship-indicator` rule block (targeting `<g><rect><text>`) never matched `AcmEntityNode.tsx`'s actual `.acm-node-relationship-indicator` `<circle>` markup — a gap from PR2b-ii/PR3 that predates this PR. Fixed it since it's the exact indicator chrome `EDGE_STYLE_UNRESOLVED` governs (task 4.6's own wording: "the indicator's styling is asserted"), kept the fix minimal (same `--acm-edge-ambiguous` variable, just retargeted the selector).
+
+### Issues Found
+
+- None blocking. Confirmed (not assumed) that `graphLayout.ts`'s `buildEdges` already filters `edge.resolution.kind !== "resolved"` before constructing any `AcmEdge` — D12 was already correctly enforced by PR1, `edgeStyleFor`'s `resolution` parameter is exercised only via the indicator-chrome path (`EDGE_STYLE_UNRESOLVED`), never by a drawn edge. No "fix" was needed or made.
+
+### Status
+
+Sections 0-4 all complete (Section 4/PR4: 9/9 tasks). Section 5 (PR5, hover highlight +
+measurement) remains. Ready for verify / PR4 open.

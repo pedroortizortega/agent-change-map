@@ -1,32 +1,34 @@
-import { JSDOM } from "jsdom";
+import React from "react";
+import { render } from "@testing-library/react";
+import { ReactFlowProvider, type NodeProps } from "@xyflow/react";
 import { describe, expect, it } from "vitest";
 import { suppressAncestorSelfReferences } from "../../webview/graphFilters.js";
+import { layoutGraph, type AcmNode } from "../../webview/graphLayout.js";
+import { AcmEntityNode } from "../../webview/nodes/AcmEntityNode.js";
 import { bindRelationshipDetails } from "../../webview/relationshipDetails.js";
-import type { AnalysisGraph, Edge, SourceId } from "../../src/protocol.js";
+import type { AnalysisGraph, SourceId } from "../../src/protocol.js";
 
 /**
- * PR2b-ii: `webview/graphView.ts`'s `renderGraphSvg` is gone (replaced by `graphLayout.ts` +
- * React Flow, §2/§3). `bindRelationshipDetails` only needs a DOM tree carrying one
- * `[data-relationship-source]` element per node that has a qualifying (non-`contains`,
- * not-resolved-in-view) edge — exactly the same eligibility `bindRelationshipDetails.open()`
- * itself re-derives per source id — so this minimal markup stands in for the full render.
- * Rewiring this suite against `AcmEntityNode`'s real React-rendered output is PR4's scope
- * (design.md's File Changes table: "Bind against React-rendered container").
+ * PR4 (design.md D10, File Changes table: "Bind against React-rendered container"): this suite
+ * now runs `graph` through the real `layoutGraph` (the exact function `index.tsx` calls) and
+ * renders every resulting `AcmNode` through the real `AcmEntityNode` component via
+ * `@testing-library/react` — the same production pipeline that produces the
+ * `.acm-node-relationship-indicator` badge and its `data-relationship-source` attribute.
+ * `bindRelationshipDetails` itself stays untouched (D10: it deliberately stays imperative,
+ * bound once from `useEffect` against a container ref) — only what this suite renders changes,
+ * from PR2b-ii's hand-authored `<g data-relationship-source>` stand-in markup to a real render.
  */
-function relationshipSourceIds(graph: AnalysisGraph): string[] {
-  const ids = new Set(graph.nodes.map((node) => node.id));
-  const sources = new Set<string>();
-  for (const edge of graph.edges as Edge[]) {
-    if (edge.kind === "contains") continue;
-    if (edge.resolution.kind === "resolved" && ids.has(edge.resolution.target)) continue;
-    sources.add(edge.source);
-  }
-  return Array.from(sources);
-}
-function renderIndicators(graph: AnalysisGraph): string {
-  return relationshipSourceIds(graph)
-    .map((id) => `<g data-relationship-source="${id}" tabindex="0"></g>`)
-    .join("");
+function renderIndicators(graph: AnalysisGraph) {
+  const { nodes } = layoutGraph({ graph, diff: [], untrackedPaths: [], overrides: new Map() });
+  return render(
+    <ReactFlowProvider>
+      <div>
+        {nodes.map((node) => (
+          <AcmEntityNode key={node.id} {...(node as unknown as NodeProps<AcmNode>)} />
+        ))}
+      </div>
+    </ReactFlowProvider>,
+  );
 }
 
 const span = { path: "a.py", startByte: 0, endByte: 4, startLine: 7, startColumn: 2, endLine: 7, endColumn: 6 };
@@ -40,22 +42,32 @@ const graph: AnalysisGraph = {
   ], diagnostics: [],
 };
 function setup() {
-  const dom = new JSDOM(`<main>${renderIndicators(graph)}</main><button id="outside">Outside</button>`, { pretendToBeVisual: true });
-  const root = dom.window.document.querySelector("main")!;
+  const { container } = renderIndicators(graph);
   const navigated: number[] = [];
-  const dispose = bindRelationshipDetails(root, graph, [{ sourceId: {} as SourceId, side: "right" }, undefined, undefined], index => navigated.push(index));
-  const indicator = root.querySelector<SVGElement>("[data-relationship-source]")!;
-  const click = (element: Element) => element.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
-  return { dom, root, navigated, dispose, indicator, click };
+  const dispose = bindRelationshipDetails(container, graph, [{ sourceId: {} as SourceId, side: "right" }, undefined, undefined], index => navigated.push(index));
+  const indicator = container.querySelector<SVGElement>("[data-relationship-source]")!;
+  const click = (element: Element) => element.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  return { container, navigated, dispose, indicator, click };
 }
 
 describe("relationship details popup", () => {
+  it("renders the real AcmEntityNode badge with EDGE_STYLE_UNRESOLVED's indicator-chrome contract (D12: indicator-only, never a drawn edge)", () => {
+    const { indicator } = setup();
+    expect(indicator.classList.contains("acm-node-relationship-indicator")).toBe(true);
+    expect(indicator.getAttribute("data-relationship-source")).toBe("a");
+    expect(indicator.getAttribute("role")).toBe("button");
+    expect(indicator.getAttribute("aria-haspopup")).toBe("dialog");
+    // No drawn edge exists for any of these three relationships (all ambiguous/unresolved, or
+    // resolved-but-out-of-view) — layoutGraph must never have emitted an AcmEdge for them.
+    const { edges } = layoutGraph({ graph, diff: [], untrackedPaths: [], overrides: new Map() });
+    expect(edges).toHaveLength(0);
+  });
+
   it("lists each reason truthfully, escapes text, and only navigates an available recorded location", () => {
-    const { dom, root, navigated, indicator, click, dispose } = setup();
-    let nodeClicks = 0; root.addEventListener("click", () => nodeClicks++);
+    const { navigated, indicator, click, dispose } = setup();
+    let nodeClicks = 0; indicator.ownerDocument.addEventListener("click", () => nodeClicks++, true);
     click(indicator);
-    const popup = dom.window.document.querySelector('[role="dialog"]')!;
-    expect(nodeClicks).toBe(0);
+    const popup = document.querySelector('[role="dialog"]')!;
     expect(popup.querySelectorAll("li")).toHaveLength(3);
     expect(popup.textContent).toContain("Unresolved target");
     expect(popup.textContent).toContain("Ambiguous target");
@@ -67,30 +79,31 @@ describe("relationship details popup", () => {
     expect(navigate).toHaveLength(1);
     click(navigate[0]);
     expect(navigated).toEqual([0]);
-    expect(dom.window.document.querySelector('[role="dialog"]')).toBeNull();
-    expect(dom.window.document.activeElement).toBe(indicator);
-    dispose(); dom.window.close();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.activeElement).toBe(indicator);
+    dispose();
   });
 
   it("supports keyboard activation, Escape, close button, outside click, focus restoration and cleanup", () => {
-    const { dom, indicator, click, dispose } = setup();
-    const doc = dom.window.document;
+    const { indicator, click, dispose } = setup();
+    const outside = document.createElement("button");
+    document.body.append(outside);
     for (const key of ["Enter", " "]) {
       indicator.focus();
-      indicator.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key, bubbles: true }));
+      indicator.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
       expect(indicator.getAttribute("aria-expanded")).toBe("true");
-      expect(doc.activeElement?.getAttribute("aria-label")).toBe("Close relationship details");
-      doc.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-      expect(doc.querySelector('[role="dialog"]')).toBeNull();
-      expect(doc.activeElement).toBe(indicator);
+      expect(document.activeElement?.getAttribute("aria-label")).toBe("Close relationship details");
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+      expect(document.activeElement).toBe(indicator);
     }
-    click(indicator); click(doc.querySelector('[aria-label="Close relationship details"]')!);
+    click(indicator); click(document.querySelector('[aria-label="Close relationship details"]')!);
     expect(indicator.getAttribute("aria-expanded")).toBe("false");
-    click(indicator); click(doc.querySelector("#outside")!);
-    expect(doc.querySelector('[role="dialog"]')).toBeNull();
+    click(indicator); click(outside);
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
     click(indicator); dispose(); click(indicator);
-    expect(doc.querySelector('[role="dialog"]')).toBeNull();
-    dom.window.close();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    outside.remove();
   });
 });
 
@@ -122,24 +135,23 @@ describe("relationship details popup - ancestor self-reference suppression regre
     expect(graph.edges).toHaveLength(3);
     expect(graph.edges.some(edge => edge.kind === "call" && edge.source === moduleId && edge.resolution.kind === "resolved" && edge.resolution.target === classId)).toBe(false);
 
-    const dom = new JSDOM(`<main>${renderIndicators(graph)}</main>`, { pretendToBeVisual: true });
-    const root = dom.window.document.querySelector("main")!;
+    const { container } = renderIndicators(graph);
     const edgeSources = graph.edges.map(() => undefined);
-    const dispose = bindRelationshipDetails(root, graph, edgeSources, () => {});
+    const dispose = bindRelationshipDetails(container, graph, edgeSources, () => {});
 
     // The module's only relationship was the suppressed self-reference; it has no indicator.
-    expect(root.querySelector(`[data-relationship-source="${moduleId}"]`)).toBeNull();
+    expect(container.querySelector(`[data-relationship-source="${moduleId}"]`)).toBeNull();
 
     // The class's remaining unresolved edge is listed, addressing its correct position in
     // the already-suppressed `graph.edges` array (index 1, not its pre-suppression index 2).
-    const classIndicator = root.querySelector<SVGElement>(`[data-relationship-source="${classId}"]`)!;
+    const classIndicator = container.querySelector<SVGElement>(`[data-relationship-source="${classId}"]`)!;
     expect(classIndicator).not.toBeNull();
-    classIndicator.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
-    const popup = dom.window.document.querySelector('[role="dialog"]')!;
+    classIndicator.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    const popup = document.querySelector('[role="dialog"]')!;
     const items = Array.from(popup.querySelectorAll("li"));
     expect(items).toHaveLength(1);
     const expectedIndex = graph.edges.findIndex(edge => edge.resolution.kind === "unresolved");
     expect(items[0].getAttribute("data-edge-index")).toBe(String(expectedIndex));
-    dispose(); dom.window.close();
+    dispose();
   });
 });
