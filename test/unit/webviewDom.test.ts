@@ -770,6 +770,48 @@ describe("signature introspection parameter form", () => {
     await vi.waitFor(() => expect(element('#signature-status').textContent).toContain("unavailable"));
     expect(dom.window.document.querySelectorAll('#signature-form input, #signature-form textarea')).toHaveLength(0);
   });
+
+  it("selecting a nested function does not let the click bubble to its container and clobber the selection", async () => {
+    // Regression test: a click on a leaf node's SVG element bubbles (native DOM behavior) up
+    // through every ancestor container's own [data-node-id] element, each carrying this exact
+    // same click listener. Without stopPropagation, selecting `function:f` (nested inside
+    // `module:m`) immediately re-fires choosePair for `module:m` too - the module has no
+    // `target`, so requestSignatureFor's early-return clears currentTargetId right after the
+    // function's own selection set it, and the eventually-arriving signatureResult gets
+    // dropped as stale (its requestId/targetId no longer match). The user saw this as the
+    // parameter form and "Call function" button never activating for any function they picked.
+    const introspection = vi.fn().mockResolvedValue({ kind: "signatureResult", parameters: [{ name: "count", kind: "POSITIONAL_OR_KEYWORD", annotation: "int", required: true }] });
+    session = new ChangeMapSession({
+      repoRoot: "/repo",
+      store: new SnapshotStore(),
+      draftStore: new DraftStore(),
+      openSource: vi.fn(),
+      performWrite: vi.fn(),
+      runSnippet: vi.fn(),
+      runIntrospection: introspection,
+      post: message => dom.window.dispatchEvent(new dom.window.MessageEvent("message", { data: message })),
+    });
+    (session as unknown as { deps: { store: SnapshotStore } }).deps.store.store({ snapshot, files: [{ path: "m.py", content: "def f():\n    return 1\n", provenance: "tracked" }] });
+    const nestedGraph: AnalysisGraph = {
+      snapshot,
+      nodes: [
+        { id: "module:m", kind: "module", qualifiedName: "m", span: node.span },
+        { id: "function:f", kind: "function", qualifiedName: "m.f", containerId: "module:m", span: node.span, target: { module: "m", dottedName: "f", callableKind: "function" } },
+      ],
+      edges: [],
+      diagnostics: [],
+    };
+    session.loadComparison(undefined, nestedGraph, []);
+
+    // A bubbling click event, matching real SVG nesting - the `click` helper already dispatches
+    // with `bubbles: true`; asserting the nested structure exists is the precondition for the
+    // bubbling path to even be exercised.
+    expect(element('[data-node-id="module:m"]').contains(element('[data-node-id="function:f"]'))).toBe(true);
+    click('[data-node-id="function:f"]');
+
+    await vi.waitFor(() => expect(dom.window.document.querySelector('[data-param="count"]')).not.toBeNull());
+    expect(element('#call-function').hasAttribute("disabled")).toBe(false);
+  });
 });
 
 describe("call function box", () => {

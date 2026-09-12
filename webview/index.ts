@@ -813,7 +813,17 @@ function handleHostMessage(message: HostToWebviewMessage): void {
       byId("graph").innerHTML = renderGraphSvg(graph, message.diff, message.untrackedPaths);
       byId("status").textContent = `${graph.nodes.length} nodes / ${graph.edges.length} edges shown`;
       for (const node of Array.from(byId("graph").querySelectorAll<SVGGElement>("[data-node-id]"))) {
-        node.addEventListener("click", () => {
+        node.addEventListener("click", (event) => {
+          // Nested containers (module > class > method) mean a click on an inner node's SVG
+          // element bubbles up through every ancestor container's own [data-node-id] element,
+          // each of which has this exact same listener - without stopping propagation here,
+          // selecting a leaf immediately re-fires this handler for every ancestor too, and the
+          // last (outermost) call always wins, silently overwriting the correct selection's
+          // state (currentTargetId, selectedPair, the in-flight signature request, etc.) with
+          // the container's own - the introspection request the user actually wanted then
+          // arrives correctly, but gets dropped as stale because currentTargetId no longer
+          // matches by the time the response lands.
+          event.stopPropagation();
           if (suppressNextClick) return;
           choosePair(node.getAttribute("data-node-id")!);
         });
