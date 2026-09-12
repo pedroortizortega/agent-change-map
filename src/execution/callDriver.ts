@@ -58,3 +58,30 @@ for _name, _param in _sig.parameters.items():
 print("<<ACM>>" + json.dumps({"ok": True, "parameters": _params}))
 `;
 }
+
+/**
+ * Builds a driver program that imports `content` as a synthetic module, resolves
+ * `dottedName` within it, and invokes it with the decoded `argsJson` payload:
+ * `_t(**_ARGS)`. For a class target this is uniform - calling the class constructs an
+ * instance via `__init__` implicitly, using the same `_t(**_ARGS)` shape as a function
+ * call (design's "driver shape" section). The result (or the raised exception, left to
+ * propagate and be captured as ordinary stderr/exit-code failure) is reported via the
+ * `<<ACM>>` sentinel-framed line so `runCall()` can parse it out of stdout.
+ */
+export function buildCallDriver(content: string, dottedName: string, callableKind: CallableKind, argsJson: string): string {
+  const sourceLiteral = pythonStringLiteral(toBase64(content));
+  const argsLiteral = pythonStringLiteral(toBase64(argsJson));
+  const dottedNameLiteral = pythonStringLiteral(dottedName);
+
+  return `import base64, json, types
+_SRC = base64.b64decode(${sourceLiteral})
+_ARGS = json.loads(base64.b64decode(${argsLiteral}))
+_m = types.ModuleType("acm_target")
+exec(compile(_SRC, "<acm-target>", "exec"), _m.__dict__)
+_t = _m
+for _p in ${dottedNameLiteral}.split("."):
+    _t = getattr(_t, _p)
+_r = _t(**_ARGS)
+print("<<ACM>>" + json.dumps({"ok": True, "repr": repr(_r)}))
+`;
+}
