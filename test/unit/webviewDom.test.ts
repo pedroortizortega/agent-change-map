@@ -1,5 +1,5 @@
 import { JSDOM } from "jsdom";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChangeMapSession } from "../../src/webviewHost.js";
 import { SnapshotStore } from "../../src/snapshots/snapshotStore.js";
 import { DraftStore } from "../../src/editing/draftStore.js";
@@ -688,4 +688,86 @@ it("posts requestGraphView with an empty vintages array when both are unchecked"
   current.checked = false;
   current.dispatchEvent(new dom.window.Event('change'));
   expect(intents.at(-1)).toMatchObject({ type: "requestGraphView", vintages: [] });
+});
+
+describe("signature introspection parameter form", () => {
+  function targetGraph(): AnalysisGraph {
+    return {
+      snapshot,
+      nodes: [{ id: "function:f", kind: "function", qualifiedName: "f", span: node.span, target: { module: "m", dottedName: "f", callableKind: "function" } }],
+      edges: [],
+      diagnostics: [],
+    };
+  }
+
+  function withIntrospection(parameters: { name: string; kind?: string; annotation?: string | null; defaultRepr?: string | null; required?: boolean }[]) {
+    const introspection = vi.fn().mockResolvedValue({ kind: "signatureResult", parameters });
+    session = new ChangeMapSession({
+      repoRoot: "/repo",
+      store: new SnapshotStore(),
+      draftStore: new DraftStore(),
+      openSource: vi.fn(),
+      performWrite: vi.fn(),
+      runSnippet: vi.fn(),
+      runIntrospection: introspection,
+      post: message => dom.window.dispatchEvent(new dom.window.MessageEvent("message", { data: message })),
+    });
+    (session as unknown as { deps: { store: SnapshotStore } }).deps.store.store({ snapshot, files: [{ path: "m.py", content: "def f():\n    return 1\n", provenance: "tracked" }] });
+    session.loadComparison(undefined, targetGraph(), []);
+    return introspection;
+  }
+
+  it("maps each annotation kind to its expected widget: number/checkbox/text/optional/raw-json", async () => {
+    withIntrospection([
+      { name: "count", kind: "POSITIONAL_OR_KEYWORD", annotation: "int", required: true },
+      { name: "ratio", kind: "POSITIONAL_OR_KEYWORD", annotation: "float", required: true },
+      { name: "flag", kind: "POSITIONAL_OR_KEYWORD", annotation: "bool", required: true },
+      { name: "label", kind: "POSITIONAL_OR_KEYWORD", annotation: "str", required: true },
+      { name: "maybe", kind: "POSITIONAL_OR_KEYWORD", annotation: "Optional[int]", required: false },
+      { name: "items", kind: "POSITIONAL_OR_KEYWORD", annotation: "list[int]", required: true },
+      { name: "mapping", kind: "POSITIONAL_OR_KEYWORD", annotation: "dict[str, int]", required: true },
+      { name: "unknown", kind: "POSITIONAL_OR_KEYWORD", annotation: null, required: true },
+      { name: "args", kind: "VAR_POSITIONAL", annotation: null, required: false },
+      { name: "kwargs", kind: "VAR_KEYWORD", annotation: null, required: false },
+    ]);
+    click('[data-node-id="function:f"]');
+    await vi.waitFor(() => expect(dom.window.document.querySelector('[data-param="count"]')).not.toBeNull());
+
+    expect(element<HTMLInputElement>('[data-param="count"]').type).toBe("number");
+    expect(element<HTMLInputElement>('[data-param="ratio"]').type).toBe("number");
+    expect(element<HTMLInputElement>('[data-param="flag"]').type).toBe("checkbox");
+    expect(element<HTMLInputElement>('[data-param="label"]').type).toBe("text");
+    expect(element<HTMLInputElement>('[data-param="maybe"]').tagName).toBe("INPUT");
+    expect(dom.window.document.querySelector('[data-param-toggle="maybe"]')).not.toBeNull();
+    expect(element<HTMLTextAreaElement>('[data-param="items"]').tagName).toBe("TEXTAREA");
+    expect(element<HTMLTextAreaElement>('[data-param="mapping"]').tagName).toBe("TEXTAREA");
+    expect(element<HTMLTextAreaElement>('[data-param="unknown"]').tagName).toBe("TEXTAREA");
+    expect(element<HTMLTextAreaElement>('[data-param="args"]').tagName).toBe("TEXTAREA");
+    expect(element<HTMLTextAreaElement>('[data-param="kwargs"]').tagName).toBe("TEXTAREA");
+  });
+
+  it("blocks on invalid raw JSON and clears the error once the value parses", async () => {
+    withIntrospection([{ name: "items", kind: "POSITIONAL_OR_KEYWORD", annotation: "list[int]", required: true }]);
+    click('[data-node-id="function:f"]');
+    await vi.waitFor(() => expect(dom.window.document.querySelector('[data-param="items"]')).not.toBeNull());
+
+    const textarea = element<HTMLTextAreaElement>('[data-param="items"]');
+    textarea.value = "not json";
+    textarea.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    expect(element('#signature-form-validity').textContent).toContain("Fix invalid JSON");
+    expect(element('[data-param-error="items"]').textContent).not.toBe("");
+
+    textarea.value = "[1, 2, 3]";
+    textarea.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    expect(element('#signature-form-validity').textContent).toBe("");
+    expect(element('[data-param-error="items"]').textContent).toBe("");
+  });
+
+  it("shows a disabled unavailable state with no static-AST fallback when Docker is unavailable", async () => {
+    // The outer `session` (from beforeEach) has no `runIntrospection` dependency at all.
+    session.loadComparison(undefined, targetGraph(), []);
+    click('[data-node-id="function:f"]');
+    await vi.waitFor(() => expect(element('#signature-status').textContent).toContain("unavailable"));
+    expect(dom.window.document.querySelectorAll('#signature-form input, #signature-form textarea')).toHaveLength(0);
+  });
 });
