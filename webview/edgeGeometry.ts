@@ -315,6 +315,72 @@ function polylinePath(points: readonly Point[]): string {
   return points.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");
 }
 
+/** Default corner-rounding radius used by `roundedPolylinePath` (visual redesign, post-PR4):
+ * small enough to read as a gentle bend rather than an actual curve replacing the router's
+ * orthogonal shape, matching the reference image's softened node-editor connector style. */
+export const CORNER_RADIUS = 8;
+
+/**
+ * Renders a polyline of `points` as an SVG path `d` string whose interior corners (every point
+ * strictly between the first and last) are smoothed with a small quadratic-Bezier blend instead
+ * of a sharp `L,L` turn - purely a rendering change over `polylinePath`: the exact same waypoints
+ * are visited in the exact same order, so the router's obstacle-avoidance decisions (port
+ * allocation, crossing-penalty cost function, outer-lane fallback) are entirely unaffected. This
+ * is deliberately applied only to the FINAL rendered `d` string, not to the waypoint arrays the
+ * router itself reasons about, so `edgePathFor`'s (single-edge fallback) own geometry and its
+ * existing exact-string unit tests are untouched.
+ *
+ * For each interior corner, both adjacent straight segments are shortened by `r` (clamped to
+ * half the SHORTER of the two segments, so two waypoints closer together than `2r` never produce
+ * a self-intersecting curve) and a `Q` command curves from the shortened end of the incoming leg,
+ * through the original corner point (as the quadratic control point), to the shortened start of
+ * the outgoing leg. The path's own start/end points, and therefore the edge's visual anchor onto
+ * its source/target box, are unchanged - only points strictly between them are ever rounded.
+ */
+export function roundedPolylinePath(points: readonly Point[], radius: number = CORNER_RADIUS): string {
+  if (points.length <= 2) return polylinePath(points);
+  const parts: string[] = [`M${points[0].x},${points[0].y}`];
+  for (let i = 1; i < points.length - 1; i += 1) {
+    const prev = points[i - 1];
+    const corner = points[i];
+    const next = points[i + 1];
+    const lenIn = Math.hypot(corner.x - prev.x, corner.y - prev.y);
+    const lenOut = Math.hypot(next.x - corner.x, next.y - corner.y);
+    const r = Math.min(radius, lenIn / 2, lenOut / 2);
+    if (r <= EPS) {
+      parts.push(`L${corner.x},${corner.y}`);
+      continue;
+    }
+    const inX = corner.x + (r / lenIn) * (prev.x - corner.x);
+    const inY = corner.y + (r / lenIn) * (prev.y - corner.y);
+    const outX = corner.x + (r / lenOut) * (next.x - corner.x);
+    const outY = corner.y + (r / lenOut) * (next.y - corner.y);
+    parts.push(`L${inX},${inY}`, `Q${corner.x},${corner.y} ${outX},${outY}`);
+  }
+  const last = points[points.length - 1];
+  parts.push(`L${last.x},${last.y}`);
+  return parts.join(" ");
+}
+
+/**
+ * Extracts an edge path's rendered start and end coordinates directly from its `d` string's
+ * first and last numeric coordinate pair (the `M` point and the final segment's destination
+ * point, whichever command produced it - `L`, `Q`, or `C` all end with a plain `x,y` pair).
+ * `roundedPolylinePath`/`edgePathFor`'s corner-rounding and Bezier tails never move the path's
+ * own start/end anchors (see `roundedPolylinePath`'s doc comment), so these two numbers are
+ * exactly the same anchor coordinates the router itself computed - reading them back off the
+ * final string is a pragmatic alternative to plumbing a second parallel return value through
+ * every routing call site, not a reconstruction/estimate of the path's shape. */
+export function pathEndpoints(d: string): { start: Point; end: Point } {
+  const matches = Array.from(d.matchAll(/(-?[\d.]+),(-?[\d.]+)/g));
+  const first = matches[0]!;
+  const last = matches[matches.length - 1]!;
+  return {
+    start: { x: Number(first[1]), y: Number(first[2]) },
+    end: { x: Number(last[1]), y: Number(last[2]) },
+  };
+}
+
 /**
  * The `y` `escapeSafeY` climbs/drops a side anchor to: whichever of "above the topmost box in
  * the whole diagram" or "below the bottommost box in the whole diagram" is closer to `y` (a tie
@@ -651,7 +717,10 @@ export function edgePathsFor(boxes: ReadonlyMap<string, Rect>, edges: readonly R
     // Preserve the relationship rather than hide it; ordinary stacked layouts find a route.
     if (!best) { paths[index] = edgePathFor(boxes, edge.source, edge.target); continue; }
     occupied.push(best);
-    paths[index] = best.map((point, i) => `${i === 0 ? "M" : "L"}${point.x},${point.y}`).join(" ");
+    // Corner-rounding (visual redesign, post-PR4) is applied to the final rendered string only;
+    // `occupied` and every future candidate's cost/crossing checks keep using the sharp-cornered
+    // `best` waypoints, so obstacle-avoidance and lane bookkeeping are unaffected.
+    paths[index] = roundedPolylinePath(best);
   }
   return paths;
 }

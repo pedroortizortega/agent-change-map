@@ -1,0 +1,875 @@
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createRoot } from "react-dom/client";
+import {
+  ReactFlow,
+  ReactFlowProvider,
+  Background,
+  BackgroundVariant,
+  getConnectedEdges,
+  getIncomers,
+  getOutgoers,
+  type Edge as RFEdge,
+  type EdgeTypes,
+  type Node,
+  type NodeChange,
+  type NodeTypes,
+} from "@xyflow/react";
+import { bindRelationshipDetails } from "./relationshipDetails.js";
+import { computeLiveDragUpdate, layoutGraph, type AcmEdge, type Position } from "./graphLayout.js";
+import { AcmEntityNode } from "./nodes/AcmEntityNode.js";
+import { AcmKindEdge } from "./edges/AcmKindEdge.js";
+import { PositionOverrides, descendantsOf } from "./positionOverrides.js";
+import { appReducer, createInitialState, type Confirmation, type PendingAction } from "./state/appReducer.js";
+import type { HostToWebviewMessage, WebviewToHostMessage } from "../src/webviewProtocol.js";
+import type { Entity, SourceId } from "../src/protocol.js";
+import type { IntrospectionParameter, RunResult, SnippetVariant } from "../src/execution/dockerRunner.js";
+import type { DiffOp } from "../src/diff/lineDiff.js";
+import { DEFAULT_PALETTE, type TokenRole } from "../src/theme/tokenPalette.js";
+import { highlight, type RoleSpan } from "./highlight.js";
+
+/** Consecutive `unchanged` ops at or above this length collapse behind a click-to-expand summary. */
+const COLLAPSE_MIN_RUN = 6;
+/** Rows kept visible at each boundary of a collapsed run. */
+const CONTEXT = 3;
+
+declare function acquireVsCodeApi(): { postMessage(message: WebviewToHostMessage): void };
+const vscode = acquireVsCodeApi();
+
+/** Module-level constants (design.md §3): defining these inline would remount every node/edge
+ * on every render. The component-level casts are React Flow's own well-known generic-strictness
+ * gap (tracked upstream): `NodeTypes`/`EdgeTypes` expect a component typed against the
+ * library's own internal `Node`/`Edge` generic reconstruction, which structurally disagrees
+ * with `NodeProps<AcmNode>`/`EdgeProps<AcmEdge>` on a couple of incidentally-optional fields
+ * (`parentId`, `style`) — the runtime shapes are exactly what `layoutGraph` produces either way. */
+const NODE_TYPES: NodeTypes = { acmEntity: AcmEntityNode as unknown as NodeTypes["acmEntity"] };
+const EDGE_TYPES: EdgeTypes = { acmKind: AcmKindEdge as unknown as EdgeTypes["acmKind"] };
+
+/** Pure widget-mapping table (ported verbatim from `index.ts`). */
+type Widget =
+  | { kind: "number" }
+  | { kind: "checkbox" }
+  | { kind: "text" }
+  | { kind: "optional"; inner: Widget }
+  | { kind: "raw-json" };
+
+function widgetFor(param: Pick<IntrospectionParameter, "annotation" | "kind">): Widget {
+  if (param.kind === "VAR_POSITIONAL" || param.kind === "VAR_KEYWORD") return { kind: "raw-json" };
+  const annotation = param.annotation?.trim();
+  if (!annotation) return { kind: "raw-json" };
+  if (annotation === "int" || annotation === "float") return { kind: "number" };
+  if (annotation === "bool") return { kind: "checkbox" };
+  if (annotation === "str") return { kind: "text" };
+  const optionalMatch = /^(?:typing\.)?Optional\[(.+)\]$/.exec(annotation);
+  if (optionalMatch) return { kind: "optional", inner: widgetFor({ annotation: optionalMatch[1] }) };
+  return { kind: "raw-json" };
+}
+
+function runKeyFor(run: DiffOp[]): string {
+  const first = run[0]!;
+  const last = run[run.length - 1]!;
+  const leftStart = first.op === "added" ? undefined : first.leftLine;
+  const leftEnd = last.op === "added" ? undefined : last.leftLine;
+  const rightStart = first.op === "removed" ? undefined : first.rightLine;
+  const rightEnd = last.op === "removed" ? undefined : last.rightLine;
+  return `L${leftStart ?? "-"}-${leftEnd ?? "-"}/R${rightStart ?? "-"}-${rightEnd ?? "-"}`;
+}
+
+function DiffRow({ op }: { op: DiffOp }) {
+  const leftLine = op.op === "added" ? undefined : op.leftLine;
+  const rightLine = op.op === "removed" ? undefined : op.rightLine;
+  const leftText = op.op === "added" ? undefined : op.text;
+  const rightText = op.op === "removed" ? undefined : op.text;
+  return (
+    <div className={`diff-row op-${op.op}${op.op === "unchanged" ? " muted" : ""}`}>
+      <span className="ln">{leftLine !== undefined ? String(leftLine) : ""}</span>
+      <code className={leftText === undefined ? "side left ghost" : "side left"} aria-hidden={leftText === undefined ? "true" : undefined}>
+        {leftText ?? ""}
+      </code>
+      <span className="ln">{rightLine !== undefined ? String(rightLine) : ""}</span>
+      <code className={rightText === undefined ? "side right ghost" : "side right"} aria-hidden={rightText === undefined ? "true" : undefined}>
+        {rightText ?? ""}
+      </code>
+    </div>
+  );
+}
+
+/** Ported from `index.ts`'s `renderDiffPanel`: groups consecutive `unchanged` runs and
+ * collapses long ones behind a click-to-expand summary. */
+function DiffPanel({ ops, expanded, onToggle }: { ops: DiffOp[]; expanded: Set<string>; onToggle: (key: string) => void }) {
+  const rows: React.ReactNode[] = [];
+  let index = 0;
+  while (index < ops.length) {
+    const op = ops[index]!;
+    if (op.op !== "unchanged") {
+      rows.push(<DiffRow key={index} op={op} />);
+      index++;
+      continue;
+    }
+    let end = index;
+    while (end < ops.length && ops[end]!.op === "unchanged") end++;
+    const run = ops.slice(index, end);
+    if (run.length >= COLLAPSE_MIN_RUN && !expanded.has(runKeyFor(run))) {
+      const key = runKeyFor(run);
+      for (const contextOp of run.slice(0, CONTEXT)) rows.push(<DiffRow key={`${key}-head-${rows.length}`} op={contextOp} />);
+      rows.push(
+        <button key={`${key}-toggle`} type="button" className="diff-collapsed" data-run-key={key} onClick={() => onToggle(key)}>
+          {`⋯ ${run.length - 2 * CONTEXT} unchanged lines ⋯`}
+        </button>,
+      );
+      for (const contextOp of run.slice(run.length - CONTEXT)) rows.push(<DiffRow key={`${key}-tail-${rows.length}`} op={contextOp} />);
+    } else {
+      for (const runOp of run) rows.push(<DiffRow key={index + run.indexOf(runOp)} op={runOp} />);
+    }
+    index = end;
+  }
+  return (
+    <div id="diff-panel">
+      <div className="diff" role="table">
+        {rows}
+      </div>
+    </div>
+  );
+}
+
+function inputForWidget(widget: Widget, name: string, onValidate: (name: string, textarea: HTMLTextAreaElement) => void): React.ReactNode {
+  if (widget.kind === "number" || widget.kind === "text") {
+    return <input type={widget.kind} data-param={name} />;
+  }
+  if (widget.kind === "checkbox") {
+    return <input type="checkbox" data-param={name} />;
+  }
+  if (widget.kind === "raw-json") {
+    return <textarea className="raw-json" data-param={name} onInput={(event) => onValidate(name, event.currentTarget)} />;
+  }
+  return (
+    <span className="optional-widget">
+      <input
+        type="checkbox"
+        data-param-toggle={name}
+        onChange={(event) => {
+          const wrapper = event.currentTarget.closest(".optional-widget")!;
+          const inner = wrapper.querySelector<HTMLInputElement | HTMLTextAreaElement>(`[data-param="${name}"]`)!;
+          inner.disabled = !event.currentTarget.checked;
+          if (!event.currentTarget.checked && inner instanceof HTMLTextAreaElement) onValidate(name, inner);
+        }}
+      />
+      {inputForWidget(widget.inner, name, onValidate)}
+    </span>
+  );
+}
+
+function ParameterRow({ param, invalid, onValidate }: { param: IntrospectionParameter; invalid: boolean; onValidate: (name: string, textarea: HTMLTextAreaElement) => void }) {
+  return (
+    <div className="param-row" data-param-row={param.name}>
+      <label>{`${param.name}${param.required ? "" : " (optional)"}`}</label>
+      {inputForWidget(widgetFor(param), param.name, onValidate)}
+      <p className="param-error" data-param-error={param.name}>
+        {invalid ? "Invalid JSON." : ""}
+      </p>
+    </div>
+  );
+}
+
+/** Reads the current widget-rendered value for one parameter out of the signature form DOM
+ * (ported from `index.ts`'s `valueForWidget`). */
+function valueForWidget(widget: Widget, name: string, form: HTMLElement): unknown {
+  if (widget.kind === "number") {
+    const el = form.querySelector<HTMLInputElement>(`[data-param="${name}"]`)!;
+    return el.value === "" ? undefined : Number(el.value);
+  }
+  if (widget.kind === "text") {
+    return form.querySelector<HTMLInputElement>(`[data-param="${name}"]`)!.value;
+  }
+  if (widget.kind === "checkbox") {
+    return form.querySelector<HTMLInputElement>(`[data-param="${name}"]`)!.checked;
+  }
+  if (widget.kind === "raw-json") {
+    const el = form.querySelector<HTMLTextAreaElement>(`[data-param="${name}"]`)!;
+    const text = el.value.trim();
+    return text === "" ? undefined : JSON.parse(text);
+  }
+  const toggle = form.querySelector<HTMLInputElement>(`[data-param-toggle="${name}"]`)!;
+  if (!toggle.checked) return null;
+  return valueForWidget(widget.inner, name, form);
+}
+
+function ConfirmationPanel({ confirmation, onRespond }: { confirmation: Confirmation | undefined; onRespond: (confirmed: boolean) => void }) {
+  if (!confirmation) return <section id="confirmation" aria-live="polite" />;
+  let description: string;
+  if (confirmation.type === "confirmDirectWrite") {
+    description = `Write to ${confirmation.preview.path}\nDestructive: ${confirmation.preview.isDestructive}\nBefore (complete file):\n${confirmation.preview.previousContent}\nAfter (complete file):\n${confirmation.preview.nextContent}`;
+  } else if (confirmation.type === "confirmRun") {
+    description = `Run ${confirmation.variants.join(", ")} in Docker? No network; read-only root; no host mounts; non-root user; CPU/memory/PID/time/output limits.\n${(confirmation.sources ?? []).map((source) => `${source.variant}: ${source.path ?? "unavailable"}\n${source.content ?? "No saved source"}`).join("\n")}`;
+  } else {
+    description = `Call ${confirmation.dottedName} with args:\n${confirmation.argsPreview}`;
+  }
+  return (
+    <section id="confirmation" aria-live="polite">
+      <pre>{description}</pre>
+      <button id="confirm-action" onClick={() => onRespond(true)}>
+        Confirm
+      </button>
+      <button id="decline-action" onClick={() => onRespond(false)}>
+        Decline
+      </button>
+    </section>
+  );
+}
+
+function renderCallResultText(result: RunResult, returnRepr?: string): string {
+  if (result.kind === "success" || result.kind === "failure") {
+    const label = result.kind === "success" ? "Success" : "Failure";
+    const repr = result.kind === "success" && returnRepr !== undefined ? ` (returned ${returnRepr})` : "";
+    return `${label}${repr} (exit code ${result.exitCode})\n${result.stdout}${result.stderr}`;
+  }
+  if (result.kind === "timeout") return `Timeout (after ${result.timeoutMs}ms)\n${result.stdout}${result.stderr}`;
+  return `${result.kind}`;
+}
+
+/** React root (design.md §3). One `useReducer` over the protocol-shaped snapshot; `nodes`/
+ * `edges` are derived via `useMemo(layoutGraph)`. Non-graph UI (diff panel, signature form,
+ * call box, draft overlay, confirmation flow) is a straight port of `index.ts`, keeping every
+ * element id `test/e2e/scenarios.ts`/the host protocol address by id. */
+function App() {
+  const [state, dispatch] = React.useReducer(appReducer, createInitialState());
+  const [expandedRuns, setExpandedRuns] = useState<Set<string>>(new Set());
+  const [draftText, setDraftText] = useState("");
+  const [invalidRawJsonParams, setInvalidRawJsonParams] = useState<Set<string>>(new Set());
+  const [activeRunId, setActiveRunId] = useState<string | undefined>(undefined);
+  const [currentThemeColors, setCurrentThemeColors] = useState<Partial<Record<TokenRole, string>>>({ ...DEFAULT_PALETTE.dark });
+  const nextId = useRef(0);
+  const graphRef = useRef<HTMLDivElement>(null);
+  const positionOverrides = useRef(new PositionOverrides()).current;
+  const [overrideSeq, setOverrideSeq] = useState(0);
+  /** Snapshot of `expandedRuns` taken right before a refresh-landing re-`inspectSources` request
+   * (see the `state.pendingInspect` effect below), consumed by the `diffOps` effect so a landing
+   * refresh's diff panel re-render restores the same collapse state — mirrors the old `index.ts`'s
+   * `preservedRuns` module variable (design.md's refresh-landing behavior). `undefined` means an
+   * ordinary (non-refresh) selection change, which resets collapse state as before. */
+  const preservedRunsRef = useRef<Set<string> | undefined>(undefined);
+
+  useEffect(() => {
+    const onMessage = (event: MessageEvent<HostToWebviewMessage>) => dispatch(event.data);
+    window.addEventListener("message", onMessage);
+    vscode.postMessage({ type: "ready" });
+    return () => window.removeEventListener("message", onMessage);
+  }, []);
+
+  useEffect(() => {
+    for (const role of Object.keys(DEFAULT_PALETTE.dark) as TokenRole[]) {
+      document.documentElement.style.setProperty(`--tok-${role}`, currentThemeColors[role] ?? DEFAULT_PALETTE.dark[role]);
+    }
+  }, [currentThemeColors]);
+
+  useEffect(() => {
+    if (state.themeColors) setCurrentThemeColors(state.themeColors);
+  }, [state.themeColors]);
+
+  // Keeps the local `activeRunId` (read by the "Run selected variants…"/"Cancel run" button
+  // handlers below) in sync with the reducer's own `state.activeRun`. Without this, a
+  // `runResult`/`runFailed` reply clears `state.activeRun` but leaves the local copy stale,
+  // permanently disabling "Request run" after the very first run (success OR failure) — the
+  // guard `if (activeRunId || ...) return;` would silently no-op forever.
+  useEffect(() => {
+    setActiveRunId(state.activeRun);
+  }, [state.activeRun]);
+
+  useEffect(() => {
+    setDraftText(state.draftContent ?? "");
+  }, [state.draftContent, state.draftSourceId]);
+
+  useEffect(() => {
+    if (preservedRunsRef.current) {
+      setExpandedRuns(preservedRunsRef.current);
+      preservedRunsRef.current = undefined;
+    } else {
+      setExpandedRuns(new Set());
+    }
+  }, [state.diffOps]);
+
+  // Refresh-landing re-navigation (design §3): once a fresh "graph" snapshot lands after a
+  // refresh and the previously selected node still exists, the reducer's "graph" case has
+  // already set `pendingInspect` (without touching `selected`/`editingEnabled`/`draftContent`/
+  // `diffOps` — those stay exactly as `local:chooseNode` would have wiped them, which is
+  // wrong here: the pre-refresh SourceId only goes stale, the user's in-progress draft must
+  // not). This effect only drains that flag: re-issue `inspectSources` for the same node so the
+  // diff panel re-renders, and snapshot the current collapse state first so the incoming
+  // `sourcePair` reply's diff panel restores it instead of resetting to fully-collapsed.
+  useEffect(() => {
+    if (state.pendingInspect) {
+      const nodeId = state.pendingInspect;
+      preservedRunsRef.current = new Set(expandedRuns);
+      dispatch({ type: "local:clearPendingInspect" });
+      vscode.postMessage({ type: "inspectSources", nodeId });
+    }
+  }, [state.pendingInspect]);
+
+  const layout = useMemo(() => {
+    if (!state.graph) return undefined;
+    return layoutGraph({ graph: state.graph, diff: state.diff, untrackedPaths: state.untrackedPaths, overrides: new Map(positionOverrides.entries()) });
+    // `overrideSeq` is the drag-commit trigger (see `onNodeDragStop`); `positionOverrides` is a stable ref.
+  }, [state.graph, state.diff, state.untrackedPaths, overrideSeq]);
+
+  /** Live drag-preview positions for the node currently being dragged AND every one of its
+   * cascaded descendants (regression fix — see `computeLiveDragUpdate`'s doc comment in
+   * `graphLayout.ts` for the full root cause). `nodes` below is derived from `layout`, which only
+   * reflects COMMITTED `positionOverrides` (written on drop); without merging these live
+   * positions in, the array passed to `<ReactFlow nodes={...}>` never changes reference during
+   * the gesture, so the box(es) visually snap back to their pre-drag spot on every re-render
+   * mid-drag. Keyed by node id, one entry per dragged node plus each cascaded descendant — a
+   * single-entry map (only the directly-dragged node) used to leave a dragged container's
+   * descendants visually frozen while the container itself tracked the pointer. Cleared on
+   * `onNodeDragStop`, once the committed `positionOverrides` + `layoutGraph` re-run takes over as
+   * authoritative. */
+  const [liveDrag, setLiveDrag] = useState<Map<string, Position> | undefined>(undefined);
+
+  const nodes = useMemo(() => {
+    const base = layout?.nodes ?? [];
+    if (!liveDrag || liveDrag.size === 0) return base;
+    return base.map((node) => {
+      const livePosition = liveDrag.get(node.id);
+      return livePosition ? { ...node, position: livePosition } : node;
+    });
+  }, [layout, liveDrag]);
+
+  /** Live edge-path preview during an in-progress drag (design.md §4, "Live re-routing during a
+   * drag" — documented but never actually wired up until now, see `onNodesChange` below). Keyed
+   * by `AcmEdge.data.edgeIndex`; cleared once the drag ends (`onNodeDragStop`), at which point
+   * the full coordinated `layoutGraph`/`overrideSeq` re-run supersedes it with the authoritative
+   * routed paths. */
+  const [liveEdgeOverrides, setLiveEdgeOverrides] = useState<
+    Map<number, { path: string; startPoint: { x: number; y: number }; endPoint: { x: number; y: number } }> | undefined
+  >(undefined);
+
+  const edges = useMemo(() => {
+    const base = layout?.edges ?? [];
+    if (!liveEdgeOverrides || liveEdgeOverrides.size === 0) return base;
+    return base.map((edge) => {
+      const override = liveEdgeOverrides.get(edge.data.edgeIndex);
+      if (!override) return edge;
+      return { ...edge, data: { ...edge.data, ...override } };
+    });
+  }, [layout, liveEdgeOverrides]);
+
+  /**
+   * Hover highlight (design.md §7, D8/D9). `hoverId` is a node id or an edge id — the two
+   * namespaces are disjoint because edge ids are `e${edgeIndex}` (graphLayout.ts), never a
+   * qualified entity id. Connected-subgraph membership is derived via xyflow's own
+   * `getIncomers`/`getOutgoers`/`getConnectedEdges` against the CURRENT `nodes`/`edges` arrays
+   * (already merged with live-drag state above, for consistency, though hover and drag do not
+   * realistically overlap in practice).
+   */
+  const [hoverId, setHoverId] = useState<string | undefined>(undefined);
+
+  const { highlightNodes, highlightEdges } = useMemo(() => {
+    if (!hoverId) return { highlightNodes: undefined, highlightEdges: undefined };
+    const hoveredNode = nodes.find((n) => n.id === hoverId);
+    if (hoveredNode) {
+      const neighbours = [...getIncomers(hoveredNode, nodes, edges as RFEdge[]), ...getOutgoers(hoveredNode, nodes, edges as RFEdge[])];
+      return {
+        highlightNodes: new Set([hoveredNode.id, ...neighbours.map((n) => n.id)]),
+        highlightEdges: new Set(getConnectedEdges([hoveredNode], edges as RFEdge[]).map((e) => e.id)),
+      };
+    }
+    const hoveredEdge = edges.find((e) => e.id === hoverId);
+    if (!hoveredEdge) return { highlightNodes: undefined, highlightEdges: undefined };
+    return {
+      highlightNodes: new Set([hoveredEdge.source, hoveredEdge.target]),
+      highlightEdges: new Set([hoveredEdge.id]),
+    };
+  }, [hoverId, nodes, edges]);
+
+  /** Every node passed to `<ReactFlow>` always carries `measured` (design does not mention this;
+   * discovered empirically via the D9 regression test below). React Flow's `adoptUserNodes`
+   * only preserves a node's already-computed `handleBounds` — which every edge touching that
+   * node needs to resolve a real, non-null connection point — when EITHER the node object
+   * reference is unchanged, OR `measured` is already present on the incoming node object (see
+   * `@xyflow/system`'s `parseHandles`: `!userNode.measured ? undefined :
+   * internalNode?.internals.handleBounds`). A brand-new node object with no `measured` field —
+   * exactly what a naive `{...n, className}` spread produces — resets `handleBounds` to
+   * `undefined`, which makes every edge touching that node briefly report a null connection
+   * point and UNMOUNT (verified empirically: this was a real remount, catchable only by a
+   * DOM-identity assertion, not a mere presence assertion). Re-stating the ALREADY-KNOWN,
+   * unchanged `width`/`height` (from `layoutGraph`, never from DOM measurement) as `measured`
+   * keeps `parseHandles` on the "preserve" branch. This has to be applied consistently on BOTH
+   * the neutral (`!hoverId`) and highlighted array, or the two shapes' round-trip (hover-enter
+   * then hover-leave) still swaps a `measured`-less object back in on leave and re-triggers the
+   * exact same bug in the other direction. */
+  const measuredNodes = useMemo(() => nodes.map((n) => ({ ...n, measured: { width: n.width, height: n.height } })), [nodes]);
+
+  /** Final className pass (D8): `.acm-dim` on everything NOT in the highlight set, `.acm-hot` on
+   * everything IN it. Only a `className` string changes — never `data` — so React Flow updates
+   * an attribute on the EXISTING node/edge element rather than remounting `AcmKindEdge`, which
+   * would restart its `<animateMotion>` (D9). No-op (identity arrays) when nothing is hovered. */
+  const highlightedNodes = useMemo(() => {
+    if (!highlightNodes) return measuredNodes;
+    return measuredNodes.map((n) => ({ ...n, className: highlightNodes.has(n.id) ? "acm-hot" : "acm-dim" }));
+  }, [measuredNodes, highlightNodes]);
+
+  const highlightedEdges = useMemo(() => {
+    if (!highlightEdges) return edges;
+    return edges.map((e) => ({ ...e, className: highlightEdges.has(e.id) ? "acm-hot" : "acm-dim" }));
+  }, [edges, highlightEdges]);
+
+  // `layoutGraph` applies overrides after `probeBoxes`; pruning here on every layout run drops
+  // any retained override for a node no longer present (design.md §4's `applyPositionOverrides()`
+  // contract, minus the DOM) so a stale position for a removed node no-ops rather than resurfacing.
+  useEffect(() => {
+    if (layout) positionOverrides.pruneTo(layout.boxes.keys());
+  }, [layout]);
+
+  /**
+   * Live re-routing during a drag (design.md §4 — previously documented but never implemented:
+   * `<ReactFlow>` had no `onNodesChange` handler at all, so edges only snapped to their correct
+   * routing on drop, never tracking the node visually mid-drag). React Flow itself already moves
+   * the dragged node's own on-screen position during the gesture independent of the controlled
+   * `nodes` prop (only committed via `onNodeDragStop`, unchanged) — this handler exists solely to
+   * keep the EDGES touching that node visually in sync in the meantime.
+   *
+   * Performance/fidelity tradeoff (explicitly chosen over re-running the full coordinated
+   * `edgePathsFor` on every pointermove): only the edges whose source or target is the dragged
+   * node (or one of its cascaded container descendants, mirroring `onNodeDragStop`'s own D14
+   * cascade) are re-anchored, each via the cheap single-edge `edgePathFor` against a locally
+   * patched `boxes` clone. Every other edge keeps its last fully-coordinated path unchanged. This
+   * is an O(edges touching this node) preview, not an O(all edges²) full re-route, so it stays
+   * cheap regardless of overall graph size; the full coordinated re-route (with its crossing-
+   * penalty cost function over every edge) still runs exactly once per drag, on drop.
+   */
+  const onNodesChange = useCallback(
+    (changes: NodeChange[]) => {
+      if (!layout) return;
+      const dragChange = changes.find(
+        (change): change is Extract<NodeChange, { type: "position" }> =>
+          change.type === "position" && change.dragging === true && !!change.position,
+      );
+      if (!dragChange) return;
+      const update = computeLiveDragUpdate({
+        layout,
+        overrides: new Map(positionOverrides.entries()),
+        nodeId: dragChange.id,
+        position: dragChange.position!,
+        movedDescendantIds: descendantsOf(dragChange.id, layout), // D14 cascade, mirrored for the live preview
+      });
+      if (!update) return;
+      // Merging BOTH the dragged node's (and its cascaded descendants') live positions and the
+      // edges' re-anchored paths from the SAME `update` is exactly what keeps every moved box and
+      // its lines moving together in sync with the pointer — see `computeLiveDragUpdate`'s doc
+      // comment for the regression this fixes (a container's descendants used to stay frozen
+      // mid-drag because only the directly-dragged node's position was ever tracked here).
+      setLiveDrag(update.positions);
+      setLiveEdgeOverrides(update.edgeOverrides);
+    },
+    [layout],
+  );
+
+  const onNodeDragStop = useCallback(
+    (_: unknown, node: Node) => {
+      if (!layout) return;
+      const before = layout.boxes.get(node.id); // pre-drag absolute box
+      const dx = node.position.x - (before?.x ?? node.position.x);
+      const dy = node.position.y - (before?.y ?? node.position.y);
+      positionOverrides.set(node.id, { x: node.position.x, y: node.position.y }); // the dragged node itself
+      for (const descendantId of descendantsOf(node.id, layout)) {
+        // D14 — cascade
+        const box = layout.boxes.get(descendantId);
+        if (box) positionOverrides.set(descendantId, { x: box.x + dx, y: box.y + dy });
+      }
+      setLiveDrag(undefined); // the drop below re-runs the full coordinated layout, which is now authoritative
+      setLiveEdgeOverrides(undefined); // the drop below re-runs the full coordinated router
+      setOverrideSeq((s) => s + 1); // re-run layoutGraph
+    },
+    [layout],
+  );
+
+  useEffect(() => {
+    if (!graphRef.current || !state.graph) return;
+    return bindRelationshipDetails(graphRef.current, state.graph, state.edgeSources, navigateEdge);
+  }, [state.graphSeq]);
+
+  function navigateEdge(index: number): void {
+    const edge = state.graph?.edges[index];
+    const edgeSource = state.edgeSources[index];
+    if (!edge) return;
+    if (!edgeSource) {
+      dispatch({ type: "local:setSourceActionsText", text: `Relationship ${edge.kind}: exact recorded location is unavailable; endpoint navigation is intentionally refused.` });
+      return;
+    }
+    dispatch({ type: "local:setSourceActionsText", text: `Relationship ${edge.kind}: opening its recorded location.` });
+    vscode.postMessage({ type: "navigate", sourceId: edgeSource.sourceId, side: edgeSource.side });
+  }
+
+  function requestSignatureFor(targetNode: Entity | undefined, pair: { left?: SourceId; right?: SourceId } | undefined): void {
+    dispatch({ type: "local:clearSignatureForm" });
+    setInvalidRawJsonParams(new Set());
+    if (!targetNode?.target) return;
+    const sourceId = pair?.right ?? pair?.left;
+    if (!sourceId) return;
+    const requestId = `sig-${++nextId.current}`;
+    dispatch({ type: "local:setSignatureRequest", targetId: targetNode.id, requestId });
+    vscode.postMessage({ type: "requestSignature", requestId, sourceId, targetId: targetNode.id });
+  }
+
+  const choosePair = useCallback(
+    (nodeId: string) => {
+      const pair = state.sourceIndex[nodeId];
+      dispatch({ type: "local:chooseNode", nodeId, pair });
+      vscode.postMessage({ type: "inspectSources", nodeId });
+      requestSignatureFor(state.graph?.nodes.find((candidate) => candidate.id === nodeId), pair);
+    },
+    [state.sourceIndex, state.graph],
+  );
+
+  function reserveAction(type: PendingAction["type"], requestId: string): boolean {
+    if (state.pendingAction) return false;
+    dispatch({ type: "local:reserveAction", action: { type, requestId } });
+    return true;
+  }
+
+  function respondToConfirmation(confirmed: boolean): void {
+    const confirmation = state.confirmation;
+    if (!confirmation) return;
+    if ((confirmation.type === "confirmRun" || confirmation.type === "confirmCall") && !confirmed) {
+      dispatch({ type: "local:declineConfirmation" });
+      if (confirmation.type === "confirmRun") setActiveRunId(undefined);
+    } else {
+      dispatch({ type: "local:clearConfirmation" });
+      dispatch({ type: "local:setActionStatusText", text: "Waiting for result…" });
+    }
+    vscode.postMessage({ type: confirmation.type, requestId: confirmation.requestId, confirmed } as WebviewToHostMessage);
+  }
+
+  function validateRawJson(name: string, textarea: HTMLTextAreaElement): void {
+    const text = textarea.value.trim();
+    setInvalidRawJsonParams((previous) => {
+      const next = new Set(previous);
+      if (text === "") {
+        next.delete(name);
+      } else {
+        try {
+          JSON.parse(text);
+          next.delete(name);
+        } catch {
+          next.add(name);
+        }
+      }
+      return next;
+    });
+  }
+
+  function gatherArgs(form: HTMLElement, parameters: IntrospectionParameter[]): Record<string, unknown> | undefined {
+    if (invalidRawJsonParams.size > 0) return undefined;
+    const args: Record<string, unknown> = {};
+    for (const param of parameters) {
+      const value = valueForWidget(widgetFor(param), param.name, form);
+      if (value !== undefined) args[param.name] = value;
+    }
+    return args;
+  }
+
+  const parameters = state.signatureParameters ?? [];
+  const signatureFormRef = useRef<HTMLDivElement>(null);
+  const callBoxRef = useRef<HTMLDivElement>(null);
+
+  const currentIdentifierRoles: RoleSpan[] = useMemo(
+    () => (state.graph?.nodes.find((candidate) => candidate.id === state.selectedNodeId)?.identifierRoles as RoleSpan[] | undefined) ?? [],
+    [state.graph, state.selectedNodeId],
+  );
+
+  const sections = state.graphSummary?.sections ?? [];
+  const editingBusy = !!state.pendingAction || !!activeRunId;
+  const signatureUnavailable = state.signatureUnavailableReason !== undefined;
+  const callDisabled = !state.currentTargetId || signatureUnavailable || invalidRawJsonParams.size > 0 || editingBusy;
+
+  function requestView(): void {
+    const form = document.getElementById("toolbar")!;
+    const scope = form.querySelector<HTMLSelectElement>("#filter-scope")?.value ?? "";
+    const kind = form.querySelector<HTMLSelectElement>("#filter-kind")!.value as "contains" | "import" | "call" | "";
+    const status = form.querySelector<HTMLSelectElement>("#filter-status")?.value as "" | "added" | "removed" | "modified" | "unchanged";
+    const vintages = (["current", "removed"] as const).filter((v) => form.querySelector<HTMLInputElement>(`#vintage-${v}`)?.checked);
+    vscode.postMessage({ type: "requestGraphView", scopeIds: scope ? [scope] : [], relationshipKinds: kind ? [kind] : [], changeStatuses: status ? [status] : [], vintages });
+  }
+
+  return (
+    <>
+      <div id="toolbar">
+        <label htmlFor="filter-scope">Section</label>
+        <select id="filter-scope" onChange={requestView} defaultValue="">
+          <option value="">All</option>
+          {sections.map((section) => (
+            <option key={section.id} value={section.id}>
+              {section.label}
+            </option>
+          ))}
+        </select>
+        <label htmlFor="filter-status">Change</label>
+        <select id="filter-status" onChange={requestView} defaultValue="">
+          {["", "added", "removed", "modified", "unchanged"].map((value) => (
+            <option key={value} value={value}>
+              {value || "All"}
+            </option>
+          ))}
+        </select>
+        <label htmlFor="filter-kind">Relationship</label>
+        <select id="filter-kind" onChange={requestView} defaultValue="">
+          <option value="">All</option>
+          <option value="contains">contains</option>
+          <option value="import">import</option>
+          <option value="call">call</option>
+        </select>
+        <fieldset id="filter-vintage">
+          <legend>Vintage</legend>
+          {(["current", "removed"] as const).map((value) => (
+            <label key={value}>
+              <input type="checkbox" id={`vintage-${value}`} defaultChecked={value === "current"} onChange={requestView} />
+              {value}
+            </label>
+          ))}
+        </fieldset>
+        <button
+          id="trigger-refresh"
+          onClick={() => {
+            const requestId = `refresh-${++nextId.current}`;
+            vscode.postMessage({ type: "requestRefresh", requestId });
+          }}
+        >
+          Refresh
+        </button>
+      </div>
+
+      <div id="oversized-consent" hidden={!state.graphSummary?.oversized}>
+        {state.graphSummary?.oversized && (
+          <>
+            Large map: choose a section/change filter above before rendering, or explicitly allow the full map.{" "}
+            <button id="render-full" onClick={() => vscode.postMessage({ type: "confirmOversized", confirmed: true })}>
+              Render full map anyway
+            </button>
+          </>
+        )}
+      </div>
+
+      <div id="status">
+        {state.graphSummary ? `${state.graphSummary.nodeCount} nodes / ${state.graphSummary.edgeCount} edges / ${state.graphSummary.diagnosticCount} diagnostics` : ""}
+      </div>
+
+      <div id="graph" ref={graphRef} style={{ width: "100%", height: 600 }}>
+        <ReactFlowProvider>
+          <ReactFlow
+            nodes={highlightedNodes}
+            edges={highlightedEdges}
+            nodeTypes={NODE_TYPES}
+            edgeTypes={EDGE_TYPES}
+            onNodeClick={(_, n) => choosePair(n.id)}
+            onEdgeClick={(_, e) => navigateEdge((e.data as AcmEdge["data"]).edgeIndex)}
+            onNodesChange={onNodesChange}
+            onNodeDragStop={onNodeDragStop}
+            onNodeMouseEnter={(_, n) => setHoverId(n.id)}
+            onNodeMouseLeave={() => setHoverId(undefined)}
+            onEdgeMouseEnter={(_, e) => setHoverId(e.id)}
+            onEdgeMouseLeave={() => setHoverId(undefined)}
+            fitView
+            fitViewOptions={{ padding: 0.1 }}
+            minZoom={0.2}
+            maxZoom={5}
+            panOnScroll={false}
+            zoomOnScroll
+            panOnDrag
+            nodesConnectable={false}
+            elementsSelectable
+            proOptions={{ hideAttribution: false }}
+            aria-label="Change map"
+          >
+            {/* Dotted-grid background (visual redesign, post-PR4): React Flow v12's built-in
+                `<Background variant="dots">`, styled through the theme's own low-emphasis
+                foreground token rather than a hardcoded color, and kept sparse/subtle
+                (`gap`/`size`) to match the reference image rather than a loud, busy grid. */}
+            <Background
+              variant={BackgroundVariant.Dots}
+              gap={24}
+              size={1}
+              color="var(--vscode-editorWhitespace-foreground, rgba(128, 128, 128, 0.25))"
+            />
+            {/* Single `<defs>` shared by every `AcmKindEdge` (design.md §6): keeps today's
+                `acm-arrow-import`/`acm-arrow-call` marker ids and `orient="auto-start-reverse"`
+                ported verbatim from `graphView.ts`'s `renderEdge`. Rendered once here rather
+                than per-edge so `markerEnd={url(#acm-arrow-${kind})}` resolves regardless of
+                which edge renders first. */}
+            <svg style={{ position: "absolute", width: 0, height: 0 }} aria-hidden="true">
+              <defs>
+                <marker id="acm-arrow-import" viewBox="0 0 10 10" refX="9" refY="5" markerWidth={8} markerHeight={8} markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+                  <path d="M0,0 L10,5 L0,10 z" className="acm-arrow-import" />
+                </marker>
+                <marker id="acm-arrow-call" viewBox="0 0 10 10" refX="9" refY="5" markerWidth={8} markerHeight={8} markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+                  <path d="M0,0 L10,5 L0,10 z" className="acm-arrow-call" />
+                </marker>
+              </defs>
+            </svg>
+          </ReactFlow>
+        </ReactFlowProvider>
+      </div>
+
+      <section id="source-actions">
+        {(["left", "right"] as const).map((side) => {
+          const sourceId = state.selectedPair?.[side];
+          return (
+            <button
+              key={side}
+              id={`source-${side}`}
+              disabled={!sourceId}
+              onClick={() => {
+                if (!sourceId) return;
+                vscode.postMessage({ type: "navigate", sourceId, side });
+              }}
+            >
+              {`${side === "left" ? "Left" : "Right"} source${sourceId ? `: ${sourceId.posixPath}` : " unavailable"}`}
+            </button>
+          );
+        })}
+        {state.sourceActionsText}
+      </section>
+
+      <DiffPanel
+        ops={state.diffOps}
+        expanded={expandedRuns}
+        onToggle={(key) =>
+          setExpandedRuns((previous) => {
+            const next = new Set(previous);
+            next.add(key);
+            return next;
+          })
+        }
+      />
+
+      <label htmlFor="draft-content">Snippet draft (does not write to disk)</label>
+      <div id="draft-overlay-wrap">
+        <pre id="draft-overlay" aria-hidden="true" dangerouslySetInnerHTML={{ __html: highlight(draftText, currentIdentifierRoles, currentThemeColors) }} />
+        <textarea
+          id="draft-content"
+          rows={10}
+          disabled={!state.editingEnabled}
+          value={draftText}
+          onChange={(event) => setDraftText(event.currentTarget.value)}
+          onScroll={(event) => {
+            const overlay = document.getElementById("draft-overlay");
+            if (overlay) {
+              overlay.scrollTop = event.currentTarget.scrollTop;
+              overlay.scrollLeft = event.currentTarget.scrollLeft;
+            }
+          }}
+        />
+      </div>
+      <button
+        id="save-draft"
+        disabled={!state.editingEnabled}
+        onClick={() => {
+          if (state.selected) vscode.postMessage({ type: "saveDraft", sourceId: state.selected, content: draftText });
+        }}
+      >
+        Save draft
+      </button>
+      <button
+        id="write-snippet"
+        disabled={!state.editingEnabled || editingBusy}
+        onClick={() => {
+          const requestId = `write-${++nextId.current}`;
+          if (state.selected && reserveAction("confirmDirectWrite", requestId)) {
+            vscode.postMessage({ type: "requestSnippetWrite", requestId, sourceId: state.selected, content: draftText });
+          }
+        }}
+      >
+        Apply snippet to worktree…
+      </button>
+      <fieldset>
+        <legend>Run variants</legend>
+        {(["original", "current", "draft"] as const).map((variant) => (
+          <label key={variant}>
+            <input type="checkbox" id={`run-${variant}`} defaultChecked />
+            {variant}
+          </label>
+        ))}
+      </fieldset>
+      <button
+        id="request-run"
+        disabled={!state.editingEnabled || editingBusy}
+        onClick={() => {
+          if (activeRunId || state.pendingAction) return;
+          const variants = (["original", "current", "draft"] as SnippetVariant[]).filter((variant) => {
+            const checkbox = document.getElementById(`run-${variant}`);
+            return !!checkbox && "checked" in checkbox && (checkbox as HTMLInputElement).checked;
+          });
+          if (!variants.length) {
+            dispatch({ type: "local:setActionStatusText", text: "Select at least one variant." });
+            return;
+          }
+          const requestId = `run-${++nextId.current}`;
+          if (!reserveAction("confirmRun", requestId)) return;
+          setActiveRunId(requestId);
+          dispatch({ type: "local:setActiveRun", requestId });
+          vscode.postMessage({ type: "requestRun", requestId, variants });
+        }}
+      >
+        Run selected variants…
+      </button>
+      <button
+        id="cancel-run"
+        onClick={() => {
+          if (activeRunId) vscode.postMessage({ type: "cancelRun", requestId: activeRunId });
+        }}
+      >
+        Cancel run
+      </button>
+
+      <ConfirmationPanel confirmation={state.confirmation} onRespond={respondToConfirmation} />
+      <p id="action-status" role="status">
+        {state.actionStatusText}
+      </p>
+      <pre id="run-output" aria-live="polite">
+        {state.runOutputLines.join("\n")}
+      </pre>
+
+      <section id="signature-section">
+        <p id="signature-status" role="status">
+          {state.signatureUnavailableReason !== undefined
+            ? `Signature unavailable: ${state.signatureUnavailableReason}`
+            : state.signatureParameters
+              ? `${state.signatureParameters.length} parameter(s)${state.signatureCached ? " (cached)" : ""}.`
+              : state.currentTargetId
+                ? "Introspecting signature…"
+                : ""}
+        </p>
+        <div id="signature-form" ref={signatureFormRef} data-state={signatureUnavailable ? "unavailable" : undefined}>
+          {parameters.map((param) => (
+            <ParameterRow key={param.name} param={param} invalid={invalidRawJsonParams.has(param.name)} onValidate={validateRawJson} />
+          ))}
+        </div>
+        <p id="signature-form-validity" role="status">
+          {invalidRawJsonParams.size > 0 ? "Fix invalid JSON before calling." : ""}
+        </p>
+      </section>
+
+      <section id="call-box" ref={callBoxRef}>
+        <button
+          id="call-function"
+          disabled={callDisabled}
+          onClick={() => {
+            if (state.pendingAction || editingBusy || !state.currentTargetId || !signatureFormRef.current) return;
+            const args = gatherArgs(signatureFormRef.current, parameters);
+            if (!args) return;
+            const sourceId = state.selectedPair?.right ?? state.selectedPair?.left;
+            if (!sourceId) return;
+            const requestId = `call-${++nextId.current}`;
+            if (!reserveAction("confirmCall", requestId)) return;
+            vscode.postMessage({ type: "requestCall", requestId, sourceId, targetId: state.currentTargetId, args });
+          }}
+        >
+          Call function
+        </button>
+        <p id="call-status" role="status" />
+        <pre id="call-result" aria-live="polite">
+          {state.callResult ? renderCallResultText(state.callResult.result, state.callResult.returnRepr) : state.callResultLines.join("\n")}
+        </pre>
+      </section>
+    </>
+  );
+}
+
+createRoot(document.body).render(<App />);

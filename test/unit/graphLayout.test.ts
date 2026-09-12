@@ -1,0 +1,564 @@
+import { describe, expect, it } from "vitest";
+import {
+  KIND_STYLE,
+  clusterConnectedRoots,
+  computeChildrenOf,
+  computeLiveDragUpdate,
+  isContainerKind,
+  layoutGraph,
+  measure,
+  orderSiblings,
+} from "../../webview/graphLayout.js";
+import type { AnalysisGraph, Edge, Entity } from "../../src/protocol.js";
+
+const snapshot = { repoId: "repo", kind: "worktree" as const, contentDigest: "sha256:x" };
+const span = { path: "pkg/a.py", startByte: 0, endByte: 3, startLine: 1, startColumn: 0, endLine: 1, endColumn: 3 };
+
+/** Three-level containment fixture: package -> module -> class -> method, plus a root function
+ * used as the target of resolved import/call edges. */
+function nestedGraph(): AnalysisGraph {
+  return {
+    snapshot,
+    nodes: [
+      { id: "package:pkg", kind: "package", qualifiedName: "pkg", span },
+      { id: "module:pkg.a", kind: "module", qualifiedName: "pkg.a", containerId: "package:pkg", span },
+      { id: "class:pkg.a.C", kind: "class", qualifiedName: "pkg.a.C", containerId: "module:pkg.a", span },
+      { id: "method:pkg.a.C.m", kind: "method", qualifiedName: "pkg.a.C.m", containerId: "class:pkg.a.C", span },
+      { id: "function:pkg.a.f", kind: "function", qualifiedName: "pkg.a.f", containerId: "module:pkg.a", span },
+      { id: "function:pkg.b.g", kind: "function", qualifiedName: "pkg.b.g", span },
+    ],
+    edges: [
+      { kind: "contains", source: "module:pkg.a", resolution: { kind: "resolved", target: "class:pkg.a.C" }, span },
+      { kind: "contains", source: "class:pkg.a.C", resolution: { kind: "resolved", target: "method:pkg.a.C.m" }, span },
+      { kind: "import", source: "module:pkg.a", resolution: { kind: "resolved", target: "function:pkg.b.g" }, span },
+      { kind: "call", source: "function:pkg.a.f", resolution: { kind: "resolved", target: "function:pkg.b.g" }, span },
+      { kind: "call", source: "function:pkg.a.f", resolution: { kind: "ambiguous", candidates: ["function:pkg.b.g", "function:pkg.c.h"] }, span },
+      { kind: "call", source: "function:pkg.a.f", resolution: { kind: "unresolved" }, span },
+    ],
+    diagnostics: [],
+  };
+}
+
+describe("KIND_STYLE / isContainerKind", () => {
+  it("encodes the exact per-kind stroke-width/dasharray/rx table", () => {
+    expect(KIND_STYLE).toEqual({
+      package: { strokeWidth: 1, dasharray: "2 4", rx: 4 },
+      module: { strokeWidth: 1.5, dasharray: "4 3", rx: 4 },
+      class: { strokeWidth: 3.5, rx: 2 },
+      function: { strokeWidth: 2.5, rx: 10 },
+      method: { strokeWidth: 2, rx: 6 },
+    });
+  });
+
+  it("marks exactly the dashed-stroke kinds (package/module) as draggable containers", () => {
+    expect(isContainerKind("package")).toBe(true);
+    expect(isContainerKind("module")).toBe(true);
+    expect(isContainerKind("class")).toBe(false);
+    expect(isContainerKind("function")).toBe(false);
+    expect(isContainerKind("method")).toBe(false);
+  });
+});
+
+describe("computeChildrenOf", () => {
+  it("buckets nodes by their normalized containerId, treating an orphan (dangling containerId) as a loose root", () => {
+    const orphanNodes: Entity[] = [{ id: "module:pkg.a", kind: "module", qualifiedName: "pkg.a", containerId: "package:missing", span }];
+    const childrenOf = computeChildrenOf(orphanNodes, []);
+    expect(childrenOf.get(undefined)?.map((n) => n.id)).toEqual(["module:pkg.a"]);
+    expect(childrenOf.has("package:missing")).toBe(false);
+  });
+
+  it("breaks a containerId cycle by treating both cyclic members as loose roots", () => {
+    const nodes: Entity[] = [
+      { id: "cycle:a", kind: "class", qualifiedName: "cycle.a", containerId: "cycle:b", span },
+      { id: "cycle:b", kind: "class", qualifiedName: "cycle.b", containerId: "cycle:a", span },
+    ];
+    const childrenOf = computeChildrenOf(nodes, []);
+    expect(childrenOf.get(undefined)?.map((n) => n.id).sort()).toEqual(["cycle:a", "cycle:b"]);
+  });
+
+  it("nests a three-level containment chain under the correct immediate parent", () => {
+    const childrenOf = computeChildrenOf(nestedGraph().nodes, nestedGraph().edges);
+    expect(childrenOf.get("package:pkg")?.map((n) => n.id)).toEqual(["module:pkg.a"]);
+    expect(childrenOf.get("module:pkg.a")?.map((n) => n.id).sort()).toEqual(["class:pkg.a.C", "function:pkg.a.f"]);
+    expect(childrenOf.get("class:pkg.a.C")?.map((n) => n.id)).toEqual(["method:pkg.a.C.m"]);
+  });
+});
+
+describe("orderSiblings", () => {
+  it("places a sibling ordered after another sibling due to a call edge below it (B->A places A above B)", () => {
+    const byId = new Map<string, Entity>([
+      ["function:pkg.m.b", { id: "function:pkg.m.b", kind: "function", qualifiedName: "pkg.m.b", containerId: "module:pkg.m", span }],
+      ["function:pkg.m.a", { id: "function:pkg.m.a", kind: "function", qualifiedName: "pkg.m.a", containerId: "module:pkg.m", span }],
+    ]);
+    const bucket = [byId.get("function:pkg.m.b")!, byId.get("function:pkg.m.a")!];
+    const edges: Edge[] = [{ kind: "call", source: "function:pkg.m.b", resolution: { kind: "resolved", target: "function:pkg.m.a" }, span }];
+    const ordered = orderSiblings(bucket, edges, byId);
+    expect(ordered.map((n) => n.id)).toEqual(["function:pkg.m.a", "function:pkg.m.b"]);
+  });
+
+  it("keeps exact array order for siblings with no non-contains edges between them", () => {
+    const byId = new Map<string, Entity>([
+      ["class:pkg.a.C", { id: "class:pkg.a.C", kind: "class", qualifiedName: "pkg.a.C", containerId: "module:pkg.a", span }],
+      ["function:pkg.a.f", { id: "function:pkg.a.f", kind: "function", qualifiedName: "pkg.a.f", containerId: "module:pkg.a", span }],
+    ]);
+    const bucket = [byId.get("class:pkg.a.C")!, byId.get("function:pkg.a.f")!];
+    const ordered = orderSiblings(bucket, [], byId);
+    expect(ordered.map((n) => n.id)).toEqual(["class:pkg.a.C", "function:pkg.a.f"]);
+  });
+
+  it("emits every sibling exactly once, deterministically, even with a sibling cycle", () => {
+    const byId = new Map<string, Entity>([
+      ["function:pkg.m.a", { id: "function:pkg.m.a", kind: "function", qualifiedName: "pkg.m.a", containerId: "module:pkg.m", span }],
+      ["function:pkg.m.b", { id: "function:pkg.m.b", kind: "function", qualifiedName: "pkg.m.b", containerId: "module:pkg.m", span }],
+    ]);
+    const bucket = [byId.get("function:pkg.m.a")!, byId.get("function:pkg.m.b")!];
+    const edges: Edge[] = [
+      { kind: "call", source: "function:pkg.m.a", resolution: { kind: "resolved", target: "function:pkg.m.b" }, span },
+      { kind: "call", source: "function:pkg.m.b", resolution: { kind: "resolved", target: "function:pkg.m.a" }, span },
+    ];
+    const ordered1 = orderSiblings(bucket, edges, byId).map((n) => n.id);
+    const ordered2 = orderSiblings(bucket, edges, byId).map((n) => n.id);
+    expect(new Set(ordered1)).toEqual(new Set(["function:pkg.m.a", "function:pkg.m.b"]));
+    expect(ordered1).toEqual(ordered2); // deterministic
+  });
+});
+
+describe("clusterConnectedRoots", () => {
+  it("clusters two call-connected top-level containers adjacently even with unrelated roots between them in the original order", () => {
+    const nodes: Entity[] = [
+      { id: "function:pkg.A", kind: "function", qualifiedName: "pkg.A", span },
+      { id: "function:pkg.B", kind: "function", qualifiedName: "pkg.B", span },
+      { id: "function:pkg.C", kind: "function", qualifiedName: "pkg.C", span },
+      { id: "function:pkg.D", kind: "function", qualifiedName: "pkg.D", span },
+    ];
+    const byId = new Map(nodes.map((n) => [n.id, n] as const));
+    const edges: Edge[] = [{ kind: "call", source: "function:pkg.D", resolution: { kind: "resolved", target: "function:pkg.A" }, span }];
+    const clustered = clusterConnectedRoots(nodes, edges, byId).map((n) => n.id);
+    const indexA = clustered.indexOf("function:pkg.A");
+    const indexD = clustered.indexOf("function:pkg.D");
+    expect(Math.abs(indexA - indexD)).toBe(1);
+  });
+
+  it("leaves two-root graphs untouched (no clustering pass needed or applied)", () => {
+    const nodes: Entity[] = [
+      { id: "function:pkg.b", kind: "function", qualifiedName: "pkg.b", span },
+      { id: "function:pkg.a", kind: "function", qualifiedName: "pkg.a", span },
+    ];
+    const byId = new Map(nodes.map((n) => [n.id, n] as const));
+    const clustered = clusterConnectedRoots(nodes, [], byId);
+    expect(clustered).toEqual(nodes);
+  });
+});
+
+describe("measure", () => {
+  it("gives a leaf entity the minimum node box size", () => {
+    const leaf: Entity = { id: "function:pkg.a.f", kind: "function", qualifiedName: "pkg.a.f", span };
+    const size = measure(leaf, new Map(), new Map());
+    expect(size).toEqual({ w: 200, h: 32 });
+  });
+
+  it("sizes a container to fit its children with padding and vertical gaps", () => {
+    const childrenOf = computeChildrenOf(nestedGraph().nodes, nestedGraph().edges);
+    const memo = new Map();
+    const classSize = measure({ id: "class:pkg.a.C", kind: "class", qualifiedName: "pkg.a.C", containerId: "module:pkg.a", span }, childrenOf, memo);
+    // class:pkg.a.C contains exactly one leaf child (method), so its size is the leaf's box
+    // plus the container's own header/padding.
+    expect(classSize.w).toBe(2 * 12 + 200);
+    expect(classSize.h).toBe(20 + 2 * 10 + 32);
+  });
+});
+
+describe("routedPaths", () => {
+  it("routes an edge whose straight path crosses an unrelated sibling box with L waypoints", () => {
+    const nodes: Entity[] = [
+      { id: "module:pkg", kind: "module", qualifiedName: "pkg", span },
+      { id: "function:pkg.c", kind: "function", qualifiedName: "pkg.c", containerId: "module:pkg", span },
+      { id: "function:pkg.b", kind: "function", qualifiedName: "pkg.b", containerId: "module:pkg", span },
+      { id: "function:pkg.a", kind: "function", qualifiedName: "pkg.a", containerId: "module:pkg", span },
+    ];
+    const edges: Edge[] = [
+      { kind: "contains", source: "module:pkg", resolution: { kind: "resolved", target: "function:pkg.c" }, span },
+      { kind: "contains", source: "module:pkg", resolution: { kind: "resolved", target: "function:pkg.b" }, span },
+      { kind: "contains", source: "module:pkg", resolution: { kind: "resolved", target: "function:pkg.a" }, span },
+      { kind: "call", source: "function:pkg.a", resolution: { kind: "resolved", target: "function:pkg.c" }, span },
+    ];
+    const routingGraph: AnalysisGraph = { snapshot, nodes, edges, diagnostics: [] };
+    const result = layoutGraph({ graph: routingGraph, diff: [], untrackedPaths: [], overrides: new Map() });
+    const callEdge = result.edges.find((e) => e.data.kind === "call")!;
+    expect(callEdge.data.path).toContain("L");
+  });
+});
+
+describe("layoutGraph", () => {
+  it("lays out a child entity's box fully inside its container's bounds, three levels deep", () => {
+    const result = layoutGraph({ graph: nestedGraph(), diff: [], untrackedPaths: [], overrides: new Map() });
+    const boxOf = (id: string) => result.boxes.get(id)!;
+    const pkg = boxOf("package:pkg");
+    const mod = boxOf("module:pkg.a");
+    const cls = boxOf("class:pkg.a.C");
+    const method = boxOf("method:pkg.a.C.m");
+    for (const [outer, inner] of [[pkg, mod], [mod, cls], [cls, method]] as const) {
+      expect(inner.x).toBeGreaterThanOrEqual(outer.x);
+      expect(inner.y).toBeGreaterThanOrEqual(outer.y);
+      expect(inner.x + inner.w).toBeLessThanOrEqual(outer.x + outer.w);
+      expect(inner.y + inner.h).toBeLessThanOrEqual(outer.y + outer.h);
+    }
+  });
+
+  it("keeps every child's box fully inside its parent's box at every depth, for a container with " +
+    "multiple long-labelled siblings near NODE_MIN_W (regression: visual-redesign card overflow)", () => {
+    // Regression test for the reported bug: a "route" module whose three children (each a
+    // long-qualified-name leaf close to NODE_MIN_W's assumed footprint) appeared to render wider
+    // than their own container after the card-style visual redesign. `measure()`/`probeBoxes`
+    // compute a container's width as `2*PAD_X + max(children widths)` and place every child at
+    // `parentX + PAD_X`, which — by construction — should make containment impossible to violate
+    // regardless of label length (a leaf's box width is always the fixed `NODE_MIN_W`, never
+    // derived from `qualifiedName`). This test asserts that invariant generally, at every depth,
+    // for a shape that mirrors the reported scenario, so a future change to the layout constants
+    // or formula cannot silently reintroduce a real (not just perceived) overflow.
+    const graph: AnalysisGraph = {
+      snapshot,
+      nodes: [
+        { id: "module:route", kind: "module", qualifiedName: "route", span },
+        {
+          id: "function:route.ruta1",
+          kind: "function",
+          qualifiedName: "route.ruta1.handleSomeReallyLongIdentifierName",
+          containerId: "module:route",
+          span,
+        },
+        {
+          id: "function:route.ruta2",
+          kind: "function",
+          qualifiedName: "route.ruta2.handleAnotherReallyLongIdentifierName",
+          containerId: "module:route",
+          span,
+        },
+        {
+          id: "function:route.ruta3",
+          kind: "function",
+          qualifiedName: "route.ruta3.handleYetAnotherReallyLongIdentifierName",
+          containerId: "module:route",
+          span,
+        },
+      ],
+      edges: [],
+      diagnostics: [],
+    };
+    const result = layoutGraph({ graph, diff: [], untrackedPaths: [], overrides: new Map() });
+
+    const assertContainsDescendants = (parentId: string) => {
+      const parent = result.boxes.get(parentId)!;
+      for (const node of graph.nodes) {
+        if (node.containerId !== parentId) continue;
+        const child = result.boxes.get(node.id)!;
+        expect(child.x).toBeGreaterThanOrEqual(parent.x);
+        expect(child.y).toBeGreaterThanOrEqual(parent.y);
+        expect(child.x + child.w).toBeLessThanOrEqual(parent.x + parent.w);
+        expect(child.y + child.h).toBeLessThanOrEqual(parent.y + parent.h);
+        assertContainsDescendants(node.id);
+      }
+    };
+    assertContainsDescendants("module:route");
+  });
+
+  it("emits one AcmNode per entity with the exact data-carrying shape", () => {
+    const result = layoutGraph({ graph: nestedGraph(), diff: [], untrackedPaths: [], overrides: new Map() });
+    expect(result.nodes).toHaveLength(nestedGraph().nodes.length);
+    const moduleNode = result.nodes.find((n) => n.id === "module:pkg.a")!;
+    expect(moduleNode.type).toBe("acmEntity");
+    expect(moduleNode.draggable).toBe(true); // module is a container kind
+    expect(moduleNode.selectable).toBe(true);
+    expect(moduleNode.data.nodeId).toBe("module:pkg.a");
+    expect(moduleNode.data.kind).toBe("module");
+    expect(moduleNode.data.container).toBe(true);
+    expect(moduleNode.data.parentId).toBe("package:pkg");
+    expect(moduleNode.data.status).toBe("unchanged");
+    expect(moduleNode.data.provenance).toBe("tracked");
+
+    const rootFn = result.nodes.find((n) => n.id === "function:pkg.b.g")!;
+    expect(rootFn.data.parentId).toBeUndefined();
+    expect(rootFn.draggable).toBe(false); // function is not a container kind
+  });
+
+  it("assigns a strictly greater zIndex to a deeper-nested node than its ancestor", () => {
+    const result = layoutGraph({ graph: nestedGraph(), diff: [], untrackedPaths: [], overrides: new Map() });
+    const byId = new Map(result.nodes.map((n) => [n.id, n] as const));
+    expect(byId.get("module:pkg.a")!.zIndex).toBeLessThan(byId.get("class:pkg.a.C")!.zIndex);
+    expect(byId.get("class:pkg.a.C")!.zIndex).toBeLessThan(byId.get("method:pkg.a.C.m")!.zIndex);
+  });
+
+  it("only emits edges for resolved relationships with both endpoints in view, excluding contains/ambiguous/unresolved", () => {
+    const result = layoutGraph({ graph: nestedGraph(), diff: [], untrackedPaths: [], overrides: new Map() });
+    // 6 edges total: 2 contains, 1 import (resolved, in view), 1 call (resolved, in view),
+    // 1 ambiguous, 1 unresolved -> only the import + call survive as drawn AcmEdge entries.
+    expect(result.edges).toHaveLength(2);
+    expect(result.edges.map((e) => e.data.kind).sort()).toEqual(["call", "import"]);
+    for (const edge of result.edges) {
+      expect(edge.data.resolution).toBe("resolved");
+      expect(edge.type).toBe("acmKind");
+      expect(edge.interactionWidth).toBe(16);
+      expect(edge.data.pathId).toBe(`acm-edge-path-${edge.data.edgeIndex}`);
+    }
+  });
+
+  it("counts ambiguous/unresolved/out-of-view relationships toward the source node's relationshipCount", () => {
+    const result = layoutGraph({ graph: nestedGraph(), diff: [], untrackedPaths: [], overrides: new Map() });
+    const fnNode = result.nodes.find((n) => n.id === "function:pkg.a.f")!;
+    // function:pkg.a.f has one resolved-in-view call (not counted) plus one ambiguous and one
+    // unresolved call (both counted) -> relationshipCount === 2.
+    expect(fnNode.data.relationshipCount).toBe(2);
+  });
+
+  it("applies an absolute override position on top of the computed layout position", () => {
+    const overrides = new Map([["function:pkg.b.g", { x: 999, y: 111 }]]);
+    const result = layoutGraph({ graph: nestedGraph(), diff: [], untrackedPaths: [], overrides });
+    const overridden = result.nodes.find((n) => n.id === "function:pkg.b.g")!;
+    expect(overridden.position).toEqual({ x: 999, y: 111 });
+    // boxes (used for re-routing) stay at the computed layout position, not the override.
+    expect(result.boxes.get("function:pkg.b.g")).not.toEqual({ x: 999, y: 111, w: 200, h: 32 });
+  });
+
+  it("routes edges against the OVERRIDDEN position, not the stale pre-drag box (regression: edges disconnected from a dragged/refresh-hydrated node)", () => {
+    const overrides = new Map([["function:pkg.b.g", { x: 999, y: 111 }]]);
+    const result = layoutGraph({ graph: nestedGraph(), diff: [], untrackedPaths: [], overrides });
+    const importEdge = result.edges.find((e) => e.data.kind === "import")!;
+    // The import edge's target is the overridden node ("function:pkg.b.g"), a 200x32 box whose
+    // absolute top-left the override moves to (999, 111). Wherever exactly on that box's border
+    // the router anchors (top-center, a side lane, ...), the path's terminal point must land
+    // somewhere on/around THAT box — not near the node's stale, pre-override computed box (which
+    // sits close to the small nested-graph origin, far outside this range either way).
+    const numbers = importEdge.data.path.match(/-?\d+(\.\d+)?/g)!.map(Number);
+    const lastX = numbers[numbers.length - 2];
+    const lastY = numbers[numbers.length - 1];
+    expect(lastX).toBeGreaterThanOrEqual(999 - 1);
+    expect(lastX).toBeLessThanOrEqual(999 + 200 + 1);
+    expect(lastY).toBeGreaterThanOrEqual(111 - 1);
+    expect(lastY).toBeLessThanOrEqual(111 + 32 + 1);
+  });
+
+  it("marks untracked nodes via data.provenance from untrackedPaths", () => {
+    const result = layoutGraph({ graph: nestedGraph(), diff: [], untrackedPaths: ["pkg/a.py"], overrides: new Map() });
+    for (const node of result.nodes) expect(node.data.provenance).toBe("untracked");
+  });
+
+  it("degrades to a flat stack above NESTED_LAYOUT_LIMITS.nodes, still emitting drawn edges", () => {
+    const nodes: Entity[] = Array.from({ length: 61 }, (_, index) => ({
+      id: `function:pkg.f${index}`,
+      kind: "function" as const,
+      qualifiedName: `pkg.f${index}`,
+      span,
+    }));
+    const edges: Edge[] = [{ kind: "call", source: nodes[0].id, resolution: { kind: "resolved", target: nodes[1].id }, span }];
+    const bigGraph: AnalysisGraph = { snapshot, nodes, edges, diagnostics: [] };
+    const result = layoutGraph({ graph: bigGraph, diff: [], untrackedPaths: [], overrides: new Map() });
+    expect(result.flat).toBe(true);
+    expect(result.nodes).toHaveLength(nodes.length);
+    expect(result.edges).toHaveLength(1);
+    expect(result.boxes.get(nodes[1].id)).toEqual({ x: 16, y: 24 + 48, w: 220, h: 32 });
+  });
+
+  it("does not degrade to flat at or below NESTED_LAYOUT_LIMITS.nodes", () => {
+    const result = layoutGraph({ graph: nestedGraph(), diff: [], untrackedPaths: [], overrides: new Map() });
+    expect(result.flat).toBe(false);
+  });
+});
+
+describe("computeLiveDragUpdate", () => {
+  /** Regression coverage for the live-drag visual-freeze bug: `<ReactFlow nodes={...}>` is fed
+   * from `layoutGraph`'s own absolute-position output, which never reflects React Flow's own
+   * in-progress drag position — only the committed `positionOverrides` written on drop. Without
+   * this function's result being merged back into whatever feeds the `nodes` prop, a dragged
+   * box visually snaps back to its pre-drag position on every re-render mid-gesture (looking
+   * static), while any edge-preview logic reading a DIFFERENT position than what's rendered
+   * produces edges detached from both the box and the pointer — exactly the reported symptom. */
+  function twoFunctionGraph(): AnalysisGraph {
+    return {
+      snapshot,
+      nodes: [
+        { id: "function:pkg.f", kind: "function", qualifiedName: "pkg.f", span },
+        { id: "function:pkg.g", kind: "function", qualifiedName: "pkg.g", span },
+      ],
+      edges: [{ kind: "call", source: "function:pkg.f", resolution: { kind: "resolved", target: "function:pkg.g" }, span }],
+      diagnostics: [],
+    };
+  }
+
+  it("reports the dragged node's exact live position, not the stale pre-drag layout position", () => {
+    const layout = layoutGraph({ graph: twoFunctionGraph(), diff: [], untrackedPaths: [], overrides: new Map() });
+    const before = layout.boxes.get("function:pkg.f")!;
+    const livePosition = { x: before.x + 500, y: before.y + 300 };
+
+    const update = computeLiveDragUpdate({
+      layout,
+      overrides: new Map(),
+      nodeId: "function:pkg.f",
+      position: livePosition,
+      movedDescendantIds: [],
+    });
+
+    expect(update).toBeDefined();
+    expect(update!.positions.get("function:pkg.f")).toEqual(livePosition);
+    expect(update!.positions.get("function:pkg.f")).not.toEqual({ x: before.x, y: before.y });
+  });
+
+  it("re-anchors edges touching the dragged node against the LIVE position, not the stale committed box", () => {
+    const layout = layoutGraph({ graph: twoFunctionGraph(), diff: [], untrackedPaths: [], overrides: new Map() });
+    const staleEdge = layout.edges.find((edge) => edge.source === "function:pkg.f")!;
+    const before = layout.boxes.get("function:pkg.f")!;
+    const livePosition = { x: before.x + 500, y: before.y + 300 };
+
+    const update = computeLiveDragUpdate({
+      layout,
+      overrides: new Map(),
+      nodeId: "function:pkg.f",
+      position: livePosition,
+      movedDescendantIds: [],
+    });
+
+    const liveEdge = update!.edgeOverrides.get(staleEdge.data.edgeIndex);
+    expect(liveEdge).toBeDefined();
+    // The re-anchored edge must actually move with the live position — not stay pinned at the
+    // stale, pre-drag anchor (which is exactly the "lines offset from where you're dragging"
+    // symptom the user reported).
+    expect(liveEdge!.startPoint).not.toEqual(staleEdge.data.startPoint);
+  });
+
+  it("leaves edges that do not touch the dragged node (or its cascaded descendants) untouched", () => {
+    const layout = layoutGraph({ graph: twoFunctionGraph(), diff: [], untrackedPaths: [], overrides: new Map() });
+    const before = layout.boxes.get("function:pkg.f")!;
+
+    const update = computeLiveDragUpdate({
+      layout,
+      overrides: new Map(),
+      nodeId: "function:pkg.f",
+      position: { x: before.x + 500, y: before.y + 300 },
+      movedDescendantIds: [],
+    });
+
+    // Only the one edge touching "function:pkg.f" exists in this fixture, and it DOES get an
+    // override; a node with no edges at all produces an empty override map.
+    const isolatedUpdate = computeLiveDragUpdate({
+      layout: { boxes: layout.boxes, edges: [] },
+      overrides: new Map(),
+      nodeId: "function:pkg.g",
+      position: { x: 0, y: 0 },
+      movedDescendantIds: [],
+    });
+    expect(update!.edgeOverrides.size).toBe(1);
+    expect(isolatedUpdate!.edgeOverrides.size).toBe(0);
+  });
+
+  it("returns undefined for a node absent from the layout's boxes", () => {
+    const layout = layoutGraph({ graph: twoFunctionGraph(), diff: [], untrackedPaths: [], overrides: new Map() });
+    const update = computeLiveDragUpdate({
+      layout,
+      overrides: new Map(),
+      nodeId: "function:pkg.does-not-exist",
+      position: { x: 0, y: 0 },
+      movedDescendantIds: [],
+    });
+    expect(update).toBeUndefined();
+  });
+
+  /** Cascade regression: dragging a CONTAINER must carry every cascaded descendant's live
+   * position along with it during the gesture itself — not just the dragged node's own box.
+   * Before this fix, `computeLiveDragUpdate` only ever returned a single `{nodeId, position}`
+   * pair; `movedDescendantIds` were consulted solely to re-anchor their EDGES, so a dragged
+   * container's children visually stayed frozen at their pre-drag spot mid-drag (exactly the
+   * "container box moved away from its stranded children" symptom reported via screenshot),
+   * only snapping to their correct cascaded position on drop (`onNodeDragStop`, unchanged). */
+  it("carries every cascaded descendant's live position along with the dragged container, offset by the same dx/dy", () => {
+    const layout = layoutGraph({ graph: nestedGraph(), diff: [], untrackedPaths: [], overrides: new Map() });
+    const draggedId = "module:pkg.a";
+    const descendantIds = ["class:pkg.a.C", "method:pkg.a.C.m", "function:pkg.a.f"];
+    const before = layout.boxes.get(draggedId)!;
+    const livePosition = { x: before.x + 120, y: before.y + 80 };
+    const dx = livePosition.x - before.x;
+    const dy = livePosition.y - before.y;
+
+    const update = computeLiveDragUpdate({
+      layout,
+      overrides: new Map(),
+      nodeId: draggedId,
+      position: livePosition,
+      movedDescendantIds: descendantIds,
+    });
+
+    expect(update).toBeDefined();
+    expect(update!.positions.get(draggedId)).toEqual(livePosition);
+    for (const descendantId of descendantIds) {
+      const preDragBox = layout.boxes.get(descendantId)!;
+      expect(update!.positions.get(descendantId)).toEqual({ x: preDragBox.x + dx, y: preDragBox.y + dy });
+    }
+    // Exactly the dragged node plus its descendants — no stray/extra entries.
+    expect(update!.positions.size).toBe(1 + descendantIds.length);
+  });
+});
+
+/**
+ * Performance probe at design.md's flagged-as-unmeasured boundary (PR5 task 5.5): the host's own
+ * `OVERSIZED_THRESHOLDS` gate (`src/webviewProtocol.ts`) sits at `{nodes: 300, edges: 600}` — the
+ * size at which a user has explicitly clicked "render full map anyway" past the size warning, and
+ * therefore the size React Flow + up to 600 concurrent SMIL `<animateMotion>` particles must not
+ * choke on. A genuine rendered-frame-timing measurement needs a real browser paint loop (or the
+ * VS Code Extension Development Host), neither of which is scriptable from this test runner —
+ * what IS measurable here, cheaply and deterministically, is `layoutGraph`'s own synchronous
+ * compute cost (containment placement + the coordinated multi-edge router), which is the
+ * dominant CPU-bound step before any pixel is ever painted.
+ *
+ * FINDING (manually measured with `tsx`, NOT run as part of this committed suite — see below for
+ * why): `layoutGraph`'s flat-fallback coordinated router scales far worse than linearly with edge
+ * count for a densely cross-connected flat graph — `{60,120}`: ~0.9s, `{100,200}`: ~8.8s,
+ * `{150,300}`: ~28.8s (measured on this machine). Extrapolating, `{300,600}` — the exact
+ * `OVERSIZED_THRESHOLDS` boundary a user can explicitly opt into — is on the order of MINUTES of
+ * synchronous, main-thread compute, which would freeze the webview's UI thread long before a
+ * single SMIL particle even has a chance to matter. This is a genuine, severe, previously
+ * unmeasured algorithmic risk in the coordinated multi-edge router's crossing-penalty computation
+ * (`webview/edgeGeometry.ts`'s `edgePathsFor`, unchanged by this PR) — NOT something introduced by
+ * this PR's hover-highlight work, and NOT something this PR fixes (explicitly out of scope per the
+ * task brief: "no code change in this PR, record as a follow-up"). Flagging concretely for a
+ * follow-up: either cap/short-circuit the coordinated crossing-penalty pass above a size
+ * threshold (falling back to the cheap per-edge `edgePathFor`, already used for live-drag preview
+ * — see `onNodesChange` in `index.tsx`), or reduce it algorithmically.
+ *
+ * The committed test below intentionally stays at `{60,120}` (`NESTED_LAYOUT_LIMITS`'s own
+ * boundary, ~0.9s measured) rather than `{300,600}`: a `{300,600}` case would make `npm test`
+ * itself hang for minutes on every run, which is disproportionate to what one probe test should
+ * cost future contributors — the `{300,600}` numbers above were obtained once, out-of-band, and
+ * are recorded here and in apply-progress.md instead of being re-measured on every CI run.
+ */
+describe("performance probe near the OVERSIZED_THRESHOLDS boundary (design.md, unmeasured risk)", () => {
+  /** Flat function nodes (no containment nesting — the router's worst case per-edge, since every
+   * edge in a flat layout is a direct sibling-to-sibling route rather than a short parent/child
+   * hop) plus resolved `call` edges chained/fanned across them. */
+  function flatGraph(nodeCount: number, edgeCount: number): AnalysisGraph {
+    const nodes: Entity[] = Array.from({ length: nodeCount }, (_, i) => ({
+      id: `function:f${i}`,
+      kind: "function" as const,
+      qualifiedName: `f${i}`,
+      span,
+    }));
+    const edges: Edge[] = Array.from({ length: edgeCount }, (_, i) => {
+      const source = nodes[i % nodeCount]!.id;
+      const target = nodes[(i * 7 + 3) % nodeCount]!.id; // spread targets to avoid a trivial ring
+      return { kind: "call" as const, source, resolution: { kind: "resolved" as const, target }, span };
+    });
+    return { snapshot, nodes, edges, diagnostics: [] };
+  }
+
+  it("computes layoutGraph at {nodes:60, edges:120} (NESTED_LAYOUT_LIMITS' own boundary) without hanging, and reports its wall-clock cost", () => {
+    const graph = flatGraph(60, 120);
+    const start = performance.now();
+    const result = layoutGraph({ graph, diff: [], untrackedPaths: [], overrides: new Map() });
+    const elapsedMs = performance.now() - start;
+
+    expect(result.nodes).toHaveLength(60);
+
+    console.log(`[perf-probe] layoutGraph({nodes:60, edges:120}) took ${elapsedMs.toFixed(2)}ms`);
+    // Generous upper bound (measured ~0.9s on this machine) — catches a catastrophic regression
+    // without making this an exact, environment-sensitive timing assertion. See the doc comment
+    // above for the far more severe {300,600} finding, deliberately NOT run here.
+    expect(elapsedMs).toBeLessThan(10_000);
+  });
+});

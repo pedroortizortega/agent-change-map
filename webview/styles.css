@@ -3,9 +3,16 @@
   --acm-status-removed: #f85149;
   --acm-status-modified: #d29922;
   --acm-status-unchanged: #6e7681;
-  --acm-edge-import: #4f9cf9;
-  --acm-edge-call: #c586c0;
-  --acm-edge-ambiguous: #f0883e;
+  /* Palette C, "Theme-Native Charts" (D13, design.md §5 "PALETTE — RESOLVED"): every installed
+     VS Code theme (light, dark, high-contrast, third-party) already supplies its own
+     contrast-tuned `--vscode-charts-*` value, so no `body.vscode-light`/`vscode-high-contrast`
+     branch is needed here at all. The fallback hexes only engage for a theme that omits
+     `--vscode-charts-*` entirely; they are Palette A's *light*-theme values (not the previous
+     dark-tuned `#4f9cf9`/`#c586c0`/`#f0883e`), since a theme that omits the token cannot be
+     assumed dark, so a light-safe fallback is the conservative choice. */
+  --acm-edge-import: var(--vscode-charts-blue, #0b5cd6);
+  --acm-edge-call: var(--vscode-charts-purple, #9b2fa0);
+  --acm-edge-ambiguous: var(--vscode-charts-orange, #b04d00);
   --acm-provenance-untracked: #a371f7;
 }
 
@@ -43,56 +50,98 @@ body {
   margin-bottom: 8px;
 }
 
-.node-box {
-  fill: none;
+/* `AcmEntityNode.tsx` (PR2b-i/ii) emits `acm-node-box` on its `<rect>`, not the pre-migration
+   `node-box` name — these selectors were dead against the React-rendered DOM (the box rendered
+   with the SVG default black fill and no status stroke) until this fix. Container fill is set
+   inline (`fill={data.container ? "none" : undefined}`), so a leaf box needs an explicit fill
+   here too, since an unset SVG `fill` defaults to black, not transparent.
+
+   Visual redesign (post-PR4): a leaf card's fill uses `--vscode-editorWidget-background` rather
+   than `--vscode-editor-background` — the same token the relationship popup already uses (see
+   `.relationship-popup` below) — so a card reads as a raised surface sitting slightly above the
+   page background, matching the reference image's node-editor "card" look. */
+.acm-node-box {
+  fill: var(--vscode-editorWidget-background, #252526);
 }
 
-.node-box.status-added {
+/* Containers keep NO card background (see AcmEntityNode.tsx's doc comment on this decision):
+   just a dashed frame that reads as "grouping" around their children's own cards, rather than
+   competing with them as another raised surface.
+
+   FIX (visual-redesign regression): this used to be `opacity: 0.55`, which, combined with the
+   already-thin (1-1.5px) sparse dash patterns in `KIND_STYLE` ("2 4" package / "4 3" module) and
+   the fully-opaque solid leaf cards introduced by the same redesign, made the container's actual
+   boundary hard to trace against a dark theme background. The layout math in `graphLayout.ts`
+   (`measure`/`probeBoxes`, see its containment tests) always sizes a container to fully enclose
+   its children with `PAD_X`/`PAD_Y` margin on every side — but a frame this faint reads, at a
+   glance, as if children escape a "too narrow" box even though their coordinates are correct.
+   Keeping the frame legible (0.85) is the fix for that perceived-overflow bug: it does not
+   change any box coordinate, only how visible the (already-correct) boundary is. */
+.acm-node-container .acm-node-box {
+  opacity: 0.85;
+}
+
+.acm-node-divider {
+  stroke: var(--vscode-editorWidget-border, var(--vscode-panel-border, #454545));
+  stroke-width: 1;
+}
+
+/* A container's divider matches its own frame legibility fix above (see
+   `.acm-node-container .acm-node-box`); a leaf card's divider stays full-strength so its
+   header row reads as clearly separated from its (small) body. */
+.acm-node-container .acm-node-divider {
+  opacity: 0.85;
+}
+
+.acm-node-status-added .acm-node-box {
   stroke: var(--acm-status-added);
 }
 
-.node-box.status-removed {
+.acm-node-status-removed .acm-node-box {
   stroke: var(--acm-status-removed);
 }
 
-.node-box.status-modified {
+.acm-node-status-modified .acm-node-box {
   stroke: var(--acm-status-modified);
 }
 
-.node-box.status-unchanged {
+.acm-node-status-unchanged .acm-node-box {
   stroke: var(--acm-status-unchanged);
 }
 
-/* The edge line itself is outline-only (see the inline fill="none" on <path> in
-   graphView.ts); only the arrowhead marker triangle is meant to be filled. */
-.edge-import {
-  stroke: var(--acm-edge-import);
-  stroke-width: 3;
-  fill: none;
-}
-
-.arrow-import {
+/* `AcmKindEdge.tsx` (PR4, design.md §6) sets stroke/stroke-width/dasharray inline via the
+   `style` prop (CSSOM, CSP-safe) sourced from `edgeStyleConfig.ts` — only the arrowhead marker
+   triangles (`<path>` inside index.tsx's shared `<defs>`) and the particle are styled here. */
+.acm-arrow-import {
   fill: var(--acm-edge-import);
 }
 
-.edge-call {
-  stroke: var(--acm-edge-call);
-  stroke-width: 3;
-  fill: none;
-}
-
-.arrow-call {
+.acm-arrow-call {
   fill: var(--acm-edge-call);
 }
 
-.resolution-ambiguous,
-.resolution-unresolved {
-  stroke: var(--acm-edge-ambiguous);
-  stroke-width: 3;
-  fill: none;
+/* The particle `<circle>`'s r/fill are set inline by AcmKindEdge (per-kind, from
+   edgeStyleConfig.ts); this rule only keeps it non-interactive/non-hit-testable so it never
+   steals a click from the edge's own `interactionWidth` hit area. */
+.acm-particle {
+  pointer-events: none;
 }
 
-.provenance-untracked {
+/* Port dots (visual redesign, post-PR4): a small neutral connector dot at each edge's own
+   start/end point (`AcmKindEdge.tsx`'s `.acm-edge-port` circles). Deliberately uniform/neutral
+   rather than per-kind colored (unlike the stroke/particle above) — this is layout chrome
+   showing WHERE a line attaches to a card, not WHAT kind of relationship it is, matching the
+   reference image's uniform grey connector dots. Non-interactive so it never steals a click from
+   the edge's own `interactionWidth` hit area. */
+.acm-edge-port {
+  r: 2.5px;
+  fill: var(--vscode-editorWidget-background, #252526);
+  stroke: var(--vscode-descriptionForeground, #9d9d9d);
+  stroke-width: 1.25;
+  pointer-events: none;
+}
+
+.acm-node-provenance-untracked {
   fill: var(--acm-provenance-untracked);
   stroke: none;
 }
@@ -209,26 +258,50 @@ body {
 .tok-comment { color: var(--tok-comment); }
 .tok-number { color: var(--tok-number); }
 #confirmation pre, #run-output { white-space: pre-wrap; overflow-wrap: anywhere; }
-.node, .edge { cursor: pointer; }
-.node.dragging { cursor: grabbing; }
-.node text { fill: var(--vscode-editor-foreground, #ccc); font-family: var(--vscode-editor-font-family, var(--vscode-font-family, monospace)); }
+.acm-node, .acm-edge { cursor: pointer; }
+/* Hover highlight (design.md §7, D8/D9): `className` on the node/edge object (never `data`) is
+   applied by React Flow as a plain attribute update on its own `.react-flow__node`/
+   `.react-flow__edge` wrapper — the existing DOM element, never remounted — so the particle's
+   `<animateMotion>` inside `AcmKindEdge` is never re-created and its timeline never restarts
+   (D9). `.acm-dim` de-emphasizes everything NOT in the hovered connected subgraph; `.acm-hot`
+   emphasizes everything IN it. Opacity (not color/hide) per design: reversible, purely visual,
+   and never reflows the layout (hiding would trigger a `fitView` re-fit; recoloring would
+   destroy the kind-encoding exactly when the user is reading relationships). */
+.react-flow__node.acm-dim,
+.react-flow__edge.acm-dim {
+  opacity: 0.18;
+  transition: opacity 120ms;
+}
+.react-flow__node.acm-hot {
+  transition: opacity 120ms;
+}
+.react-flow__edge.acm-hot .acm-edge path {
+  stroke-width: 4;
+}
+.react-flow__edge.acm-hot .acm-particle {
+  r: 4;
+}
+/* React Flow adds `.dragging` to its own node wrapper (`.react-flow__node`), which contains
+   `AcmEntityNode`'s root `.acm-node` div — not to `.acm-node` itself. */
+.react-flow__node.dragging { cursor: grabbing; }
+.acm-node-label { fill: var(--vscode-editor-foreground, #ccc); font-family: var(--vscode-editor-font-family, var(--vscode-font-family, monospace)); }
 button, select, textarea { color: var(--vscode-input-foreground, #ccc); background: var(--vscode-input-background, #333); }
 button { margin: 4px; padding: 6px; }
 button:disabled { opacity: 0.5; }
 
-.relationship-indicator { cursor: pointer; }
-.relationship-indicator rect {
+/* The relationship-indicator badge (`AcmEntityNode.tsx`'s `.acm-node-relationship-indicator`
+   circle): EDGE_STYLE_UNRESOLVED (edgeStyleConfig.ts, D12) governs ONLY this indicator chrome,
+   never a drawn edge — ambiguous/unresolved relationships have no in-view target and are never
+   emitted as an AcmEdge. Its stroke/fill share the same `--acm-edge-ambiguous` custom property
+   as EDGE_STYLE_UNRESOLVED, so the badge and the popup it discloses read as one visual family. */
+.acm-node-relationship-indicator {
+  cursor: pointer;
   fill: var(--vscode-editor-background, #1e1e1e);
   stroke: var(--acm-edge-ambiguous);
   stroke-width: 1.5;
 }
-.relationship-indicator text {
-  fill: var(--acm-edge-ambiguous);
-  font: 11px var(--vscode-font-family, sans-serif);
-  pointer-events: none;
-}
-.relationship-indicator:focus { outline: none; }
-.relationship-indicator:focus rect {
+.acm-node-relationship-indicator:focus { outline: none; }
+.acm-node-relationship-indicator:focus {
   stroke: var(--vscode-focusBorder, #4f9cf9);
   stroke-width: 3;
 }

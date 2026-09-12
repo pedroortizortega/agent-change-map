@@ -25,7 +25,11 @@ describe("coordinated orthogonal routing", () => {
     expect(paths).toHaveLength(edges.length);
     for (const path of paths) {
       expect(path).toBeDefined();
-      expect(path).not.toMatch(/[CQ]/);
+      // Corner-rounding (visual redesign, post-PR4) legitimately introduces `Q` commands at
+      // interior turns; the router never emits a Bezier tail (`C`) for a coordinated route,
+      // only `edgePathFor`'s single-edge fallback does, so that half of the old assertion
+      // still holds unchanged.
+      expect(path).not.toMatch(/C/);
       const route = points(path!);
       for (let i = 1; i < route.length; i++) {
         expect(route[i].x === route[i - 1].x || route[i].y === route[i - 1].y).toBe(true);
