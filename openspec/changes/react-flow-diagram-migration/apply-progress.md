@@ -799,3 +799,74 @@ map for compounded `<g transform>` node placement).
 Bugfix complete: RED → GREEN → REFACTOR done, all verification green (typecheck, lint, 525/525
 unit tests, `build:webview`, `test:e2e`). Committed on `feat/react-flow-diagram-migration` on top
 of `4410fdd`. Section 5 (PR5, hover highlight) remains open and unaffected.
+
+## Visual redesign — reference-image alignment (post-PR4, pre-PR5) — COMPLETE
+
+User-directed visual pass (not a numbered PR section, folded into `tasks.md` as its own block)
+plus one confirmed functional bug fix discovered mid-pass. See `tasks.md`'s
+"Visual redesign — reference-image alignment (post-PR4, pre-PR5)" section for the itemized
+task list (1–6, all `[x]`).
+
+### TDD Cycle Evidence (Strict TDD Mode)
+
+| Task | RED | GREEN | REFACTOR |
+|---|---|---|---|
+| 4. `roundedPolylinePath`/`pathEndpoints` (edgeGeometry.ts) | Added `describe("roundedPolylinePath — ...")`/`describe("pathEndpoints")` to `test/unit/edgeGeometry.test.ts` (9 new cases: 2-point passthrough, endpoint preservation, Q-count/topology, radius clamping on a short leg, custom radius, default-radius equivalence, plain M/L endpoints, Bezier-tail endpoints, rounded-corner endpoints) | Implemented `CORNER_RADIUS`/`roundedPolylinePath`/`pathEndpoints` in `webview/edgeGeometry.ts`; `npx vitest run test/unit/edgeGeometry.test.ts` → 43/43 passed | Wired `roundedPolylinePath` into `edgePathsFor`'s single winning-path assignment only (not `edgePathFor`, not `occupied`/cost bookkeeping); re-ran full suite, no regression |
+| 4. `coordinatedRouting.test.ts` assertion update | N/A (existing test, not new behavior) — confirmed the old `not.toMatch(/[CQ]/)` assertion would now correctly fail once rounding was wired (Q is legitimately present) | Narrowed to `not.toMatch(/C/)` (the router never emits a Bezier tail itself, only `edgePathFor`'s fallback does); `npx vitest run test/unit/coordinatedRouting.test.ts` → 12/12 passed | Verified every OTHER assertion in the file (waypoint extraction, orthogonality, crossing/clearance checks) needed no changes — confirmed by full run, not just visual inspection |
+| 3. Port dots (`pathEndpoints` wiring) | Covered by `pathEndpoints`'s own RED cases above (same function) | `graphLayout.ts`'s `buildEdges` calls `pathEndpoints` once per edge; `AcmKindEdge.tsx` renders the two `<circle>`s from `data.startPoint`/`data.endPoint` | `npm run typecheck` clean (no `any`/unsafe cast needed for the new `AcmEdge.data` fields) |
+| 1/2. Background dots + card nodes | Standard mode (pure CSS/JSX presentation, no new pure-function logic to RED/GREEN) | Implemented directly, verified via `npm run typecheck`/`npm run lint`/`npm test` (no regressions in `AcmEntityNode.test.tsx`, `webviewDom.test.ts`, `relationshipDetails.test.tsx` — all pre-existing `data-node-*` attribute-contract tests) | N/A |
+| 5. Live-drag `onNodesChange` bug fix | NOT unit/DOM tested (see task 5's own "Test coverage" note in tasks.md) — genuine drag-in-progress pointer gestures are one of jsdom's known gaps (design.md's Testing Strategy section already calls this out for the related SMIL particle case) | Implemented `onNodesChange` in `webview/index.tsx`; verified via full static/type/lint/e2e gate and a manual code-level trace confirming the D14 cascade logic mirrors `onNodeDragStop`'s own (already-tested) cascade exactly | N/A — flagged explicitly as a manual/visual follow-up in tasks.md, not skipped silently |
+
+### Work Unit Evidence
+
+| Evidence | Value |
+|---|---|
+| Focused test command and exact result | `npx vitest run test/unit/edgeGeometry.test.ts test/unit/coordinatedRouting.test.ts` → 55/55 passed |
+| Runtime harness command/scenario and exact result | `npm run test:e2e` → exit 0, all 9 scenarios completed for real in this environment; `npm run build:webview` → exit 0 (bundle still builds, 1.1mb, pre-existing size-warning threshold unchanged) |
+| Rollback boundary | This work unit touches exactly: `webview/edgeGeometry.ts`, `webview/graphLayout.ts`, `webview/edges/AcmKindEdge.tsx`, `webview/nodes/AcmEntityNode.tsx`, `webview/styles.css`, `webview/index.tsx`, `test/unit/edgeGeometry.test.ts`, `test/unit/coordinatedRouting.test.ts`. No other file changed; revertable as one unit without touching PR1-PR4's committed work. |
+
+### Full Gate (run for real)
+
+`npm run typecheck` — clean. `npm run lint` — clean (`--max-warnings=0`). `npm test` — 534/534
+passed (34 test files; up from the prior 525/525 baseline, +9 new). `npm run build:webview` —
+exit 0. `npm run test:e2e` — exit 0, all 9 scenarios completed for real against the real VS Code
+Extension Development Host.
+
+### Deviations from a literal reading of the reference image / design notes (documented)
+
+1. **Container vs. leaf visual treatment**: kept `KIND_STYLE[kind].dasharray` as the
+   container/leaf distinguishing convention rather than replacing it, since the reference image
+   has no nested containment at all to compare against and this repo's real containment nesting
+   (module/package wrapping class/function/method) is load-bearing information the card look must
+   not erase. Containers get a low-opacity (`0.55`), no-fill dashed frame reading as "grouping";
+   leaf kinds get the full opaque card treatment. Both remain visually distinguishable per the
+   task's constraint.
+2. **Port dot styling**: implemented as small neutral (`--vscode-descriptionForeground`) circles,
+   uniform across edge kinds — deliberately NOT added to `edgeStyleConfig.ts`, since kind-specific
+   coloring for a per-attachment-point dot would work against the reference image's uniform grey
+   connector-dot look and would blur the distinction between "layout chrome" and "relationship
+   kind" the existing config module exists to encode.
+3. **`pathEndpoints` reads the final `d` string** rather than threading a second parallel
+   points-array return value through every `edgePathsFor`/`edgePathFor`/`routeWaypoints` call
+   site. The numbers it reads (`M`'s point, the final segment's destination point) are the exact
+   same numbers the router itself computed and already writes into the string — not a
+   re-derivation/estimate of the path's shape — but this is a narrower interpretation of "don't
+   regex-parse the `d` string" than a literal reading of that instruction; documented as a
+   deliberate, bounded compromise given this change's scope, not an oversight.
+4. **Corner-rounding is applied to `edgePathsFor`'s output only**, not to `edgePathFor`'s
+   single-edge fallback (used for missing-target dashed stubs and a few coordinated-router
+   degenerate cases). This keeps `edgePathFor`'s existing exact-string unit tests fully intact and
+   means the rare fallback-path edges render with sharp corners while the overwhelming majority of
+   real, coordinated-router edges get the rounded treatment.
+5. **Header/body divider on leaf nodes**: leaf boxes are only 32px tall (`NODE_H`), so a divider
+   at `HEADER_DIVIDER_Y=26` leaves a very short (6px) "body" strip below it — a real geometric
+   constraint from the existing layout, not something this pass could resolve without changing
+   `NODE_H`/layout math (out of scope for a visual-only pass). Chosen `y=26` to reuse
+   `edgeGeometry.ts`'s existing `routingPorts`' `belowTitle = box.y + 26` convention rather than
+   inventing an unrelated second number.
+
+### Status
+
+6/6 visual-redesign tasks complete (`[x]` in tasks.md), plus the folded-in live-drag bug fix.
+Full gate green. Section 5 (PR5, hover highlight) remains open and unaffected — no files in its
+future scope (`hoverId` state, `.acm-dim`/`.acm-hot`) were touched.
