@@ -350,3 +350,176 @@ green (32 files, 525 tests, zero regressions from PR1's baseline). `npm run type
 swap; the final `webview/index.tsx` entry point remains (expectedly) unresolved until PR2b. Diff
 size for this PR alone: 58 code-only changed lines — well within both the 200-line ledger cap and
 the 400-line review budget. Ready for verify / next PR (2b).
+
+---
+
+## PR2b-ii (base: PR2b-i) — Atomic switch: wire the React root, delete the old renderer
+
+**Mode**: Standard (this change is not under strict TDD enforcement in the orchestrator's cached
+preflight for this session; nonetheless a RED→GREEN cycle was followed for `webviewDom.test.ts`
+per task 2b-ii.4/2b-ii.5, see TDD Cycle Evidence below).
+
+### Completed Tasks
+- [x] 2b-ii.1 Created `webview/index.tsx`: `<App/>` root, `useReducer(appReducer, createInitialState())`,
+      single `window` "message" `useEffect` dispatching into the reducer, `useMemo(layoutGraph)`,
+      `<ReactFlow>` with module-level `NODE_TYPES`/`EDGE_TYPES`, `AcmEntityNode` as the sole node
+      type, a minimal inline `PlainEdge` (no per-kind styling — PR4's scope) as the sole edge type,
+      and every panel from the old `index.ts` ported with identical element ids (`#toolbar`,
+      `#filter-scope`/`#filter-status`/`#filter-kind`, `#filter-vintage`, `#oversized-consent`,
+      `#status`, `#graph`, `#source-actions`/`#source-left`/`#source-right`, `#diff-panel`,
+      `#draft-overlay-wrap`/`#draft-overlay`/`#draft-content`, `#save-draft`, `#write-snippet`,
+      `#request-run`/`#cancel-run`/`#trigger-refresh`, `#confirmation`/`#confirm-action`/
+      `#decline-action`, `#action-status`, `#run-output`, `#signature-section`/`#signature-status`/
+      `#signature-form`/`#signature-form-validity`, `#call-box`/`#call-function`/`#call-status`/
+      `#call-result`).
+- [x] 2b-ii.2 Deleted `webview/index.ts`.
+- [x] 2b-ii.3 Deleted `webview/graphView.ts` and `test/unit/graphView.test.ts` (verified nothing
+      else imported `graphView.ts` before deleting — grep showed only `webview/index.ts`, itself
+      also deleted, plus historical doc-comment mentions in `graphLayout.ts`/`edgeGeometry.ts`/
+      `AcmEntityNode.tsx` describing provenance, left as-is). Updated `tsconfig.build.json`:
+      `include` → `["src/**/*.ts", "webview/graphFilters.ts"]` (dropped `graphView.ts` and
+      `edgeGeometry.ts` — verified via grep that nothing under `src/` imports `edgeGeometry.ts`);
+      `exclude` → `webview/index.tsx`.
+- [x] 2b-ii.4 RED — rewrote `test/unit/webviewDom.test.ts` with `@testing-library/react`
+      conventions (act()-wrapped DOM interactions) + jsdom, narrowed to the task's stated scope:
+      node/edge `data-*` contract, click-to-navigate, and ported-panel id/behavior parity. Added
+      `test/unit/webviewDomSetup.ts`, a shared jsdom stub module. Confirmed RED against the
+      just-created `index.tsx` before the React Flow measurement stubs existed (every test failed
+      with "Missing [data-node-id=...]" — React Flow threw synchronously without `ResizeObserver`).
+- [x] 2b-ii.5 GREEN — all 17 `webviewDom.test.ts` cases pass against `index.tsx`/`AcmEntityNode.tsx`.
+- [x] 2b-ii.6 Verified `test/e2e/scenarios.ts` — inspected fully; it drives the extension only
+      through `session.handleIntent(...)`/`vscode.commands.executeCommand(...)` and never touches
+      webview DOM element ids at all (VS Code's public API cannot script inside a webview's HTML,
+      a constraint the file's own doc comment states). No edit needed or made; nothing in this PR
+      changes `src/webviewProtocol.ts`, `ChangeMapSession`, or any command id it depends on. Could
+      not actually run the Extension Development Host harness in this environment (no VS Code test
+      runner available here) — verified by inspection only, as the orchestrator's task explicitly
+      allows for this exact case.
+- [x] 2b-ii.7 REFACTOR — `npm run typecheck`, `npm run lint`, `npm test` (488/488), `npm run
+      build:webview`, and `npm run build` all green.
+- [x] 2b-ii.8 Final gate: all above green; committed as `2e45bd5`.
+
+### Files Changed
+| File | Action | What Was Done |
+|------|--------|---------------|
+| `webview/index.tsx` | Created | React root (see 2b-ii.1) |
+| `webview/index.ts` | Deleted | Superseded by `index.tsx` |
+| `webview/graphView.ts` | Deleted | Superseded by `graphFilters.ts` (PR1) + `graphLayout.ts` (PR1) |
+| `webview/state/appReducer.ts` | Modified | Added `LocalUiMessage` union + 10 new reducer cases for UI-originated actions (node selection, reserve/decline confirmation, active-run tracking, signature request tracking, source-actions text, action-status text) that no `HostToWebviewMessage` carries. Every pre-existing case/behavior left byte-identical; `appReducer.test.ts`'s 37 cases still pass unmodified. |
+| `webview/nodes/AcmEntityNode.tsx` | Modified | Added an invisible source+target `<Handle>` pair (React Flow requires at least one of each per node to compute edge connection points — without them every edge touching that node silently fails to render, `error008`) and `data-relationship-source`/ARIA attributes on the relationship-count badge, completing design §8's `relationshipDetails.ts` rewiring. |
+| `test/unit/graphView.test.ts` | Deleted | Superseded by `graphFilters.test.ts` + `graphLayout.test.ts` (PR1) |
+| `test/unit/webviewDom.test.ts` | Rewritten | `@testing-library/react` + jsdom, narrowed scope per task 2b-ii.4 |
+| `test/unit/webviewDomSetup.ts` | Created | Shared jsdom stubs: `ResizeObserver` (synchronous, single-entry), `DOMMatrixReadOnly` (identity matrix — jsdom 30 does not implement this class at all), `requestAnimationFrame`/`cancelAnimationFrame`, `getBoundingClientRect` (zero rect), and `offsetWidth`/`offsetHeight` (fixed positive constants — jsdom hardcodes these to 0, which silently blocks React Flow's entire handle-bounds computation and therefore every edge's render) |
+| `test/unit/relationshipDetails.test.ts` | Modified | Replaced its `renderGraphSvg`-based DOM fixture (function now deleted) with a minimal `[data-relationship-source]` indicator-only markup builder mirroring `bindRelationshipDetails`'s own eligibility filter; all 3 pre-existing test cases pass unmodified otherwise |
+| `test/unit/AcmEntityNode.test.tsx` | Modified | Wrapped every render in `<ReactFlowProvider>` (now required by the new `<Handle>` elements); all 7 pre-existing assertions pass unmodified |
+| `tsconfig.build.json` | Modified | `include` → `graphFilters.ts` only; `exclude` → `index.tsx` |
+| `tsconfig.json` | Modified | Added `jsx`/`jsxImportSource` (needed because `webviewDom.test.ts`, a `.ts` file included by this project, transitively resolves `webview/index.tsx` via `await import("../../webview/index.js")`) |
+| `scripts/build-webview.mjs` | Modified | Removed the stale "index.tsx does not exist yet" comment (2b-i-era note, no longer true) |
+| `src/webviewHost.ts` | Modified | One doc-comment fix: "graphView.ts's change-status colouring" → "graphFilters.ts's" (the function moved in PR1; the comment was stale) |
+
+### TDD Cycle Evidence (webviewDom.test.ts)
+
+| Step | Evidence |
+|---|---|
+| RED | First full run of the rewritten `webviewDom.test.ts` against the freshly created `index.tsx` failed on every one of 17 cases with `ReferenceError: ResizeObserver is not defined` (React Flow's `<Pane>`/handle-measurement effects throw synchronously without it) — confirmed before any jsdom stub existed. |
+| GREEN | Iteratively added exactly the stubs React Flow's own source required (`ResizeObserver`, `DOMMatrixReadOnly`, `requestAnimationFrame`/`cancelAnimationFrame`, `offsetWidth`/`offsetHeight`) and fixed two real `index.tsx` bugs the tests caught (a bare `instanceof HTMLInputElement` runtime check that doesn't exist as a global inside jsdom's swapped-`window` environment, and a missing `data-relationship-source` attribute on the relationship badge). All 17 cases pass; full suite (488 tests) green. |
+| REFACTOR | `npm run typecheck` / `npm run lint` / `npm test` / `npm run build:webview` / `npm run build` all green with zero warnings. |
+
+### Work Unit Evidence
+
+| Evidence | Value |
+|---|---|
+| Focused test command and exact result | `npx vitest run test/unit/webviewDom.test.ts` → 17/17 passed |
+| Runtime harness command/scenario and exact result | `test/e2e/scenarios.ts` (VS Code Extension Development Host) — **could not run** in this environment (no VS Code test runner available); verified by full-file inspection instead, per the task's own explicit fallback allowance. It addresses zero webview DOM element ids (drives `session.handleIntent`/`vscode.commands.executeCommand` only), so nothing in this PR's scope could regress it. |
+| Rollback boundary | Revert this commit (`2e45bd5`) only. PR2b-i's `appReducer.ts`/`AcmEntityNode.tsx` (before this PR's additive extensions) and PR1's `graphFilters.ts`/`graphLayout.ts` stand alone unaffected; reverting restores `webview/index.ts` and `webview/graphView.ts` from git history if a hard rollback of the whole migration were ever needed (not expected — this is a forward-only revert of the atomic-switch commit itself). |
+
+### Deviations from Design
+
+1. **`appReducer.ts` extended with a `LocalUiMessage` union**, not in design.md's original text
+   (which only specifies `(AppState, HostToWebviewMessage) => AppState`). Necessary because
+   several `AppState` fields (`selectedNodeId`, `selectedPair`, `pendingAction`, etc.) are set by
+   *user-originated* UI actions (a node click, reserving a confirmation slot) that have no
+   corresponding `HostToWebviewMessage` — `appReducer.test.ts`'s own pre-existing tests already
+   assumed these fields could be set by direct object-spread setup, confirming they were always
+   meant to be externally settable. All existing reducer cases are untouched; only new cases were
+   added, namespaced `local:` so they can never collide with a real host message type.
+2. **`positionOverrides.ts` wiring: chose the no-op/empty-overrides-map option** explicitly
+   offered by the task prompt. `layoutGraph` is called with a single stable empty `Map` for
+   `overrides`; drag persistence is entirely PR3's scope (absolute-position redesign). No
+   `onNodeDragStop` handler is wired in this PR.
+3. **No custom edge component / `edgeStyleConfig.ts`** — per explicit constraint, PR4's scope.
+   `PlainEdge`, a minimal inline component defined directly in `index.tsx` (not a separate
+   `edges/AcmKindEdge.tsx` file — that name and file are reserved for PR4), renders `data.path`
+   via `<BaseEdge>` with no dash/arrow/particle styling.
+4. **No hover highlight** — PR5's scope; not implemented.
+5. **Diff panel's cross-refresh "preserve expanded runs" nuance dropped**: the old `index.ts`
+   snapshotted `expandedRuns` into `preservedRuns` on a refresh `graphSummary` so a landing
+   refresh's diff panel kept the same collapsed/expanded state. The new `index.tsx` simply resets
+   `expandedRuns` to empty whenever `state.diffOps` changes (a plain `useEffect`). This is a minor,
+   deliberate simplification for scope control — not covered by the RED test's mandated scope
+   (data-* contract / click-to-navigate / panel parity), and not asserted by any of the 3 ported
+   `webviewDom.test.ts` cases that exercise `diffOps`. Flagging as a known, small behavior gap
+   relative to the pre-migration implementation; not blocking.
+6. **`AcmEntityNode.tsx` gained a `data-relationship-source` attribute and an invisible source/
+   target `<Handle>` pair** — not explicitly itemized in design.md's "Node output shape (exact)"
+   table, but required for (a) design §8's `relationshipDetails.ts` rewiring to function at all
+   (the popup keys off `[data-relationship-source]`, which the old SVG renderer emitted but the
+   PR2b-i-authored `AcmEntityNode.tsx` did not yet have), and (b) React Flow's own connection
+   lookup, without which every edge silently fails to render regardless of `data.path` correctness.
+   Both are minimal, additive, low-risk changes; no existing `AcmEntityNode.test.tsx` assertion
+   was invalidated (7/7 still pass, with only a `<ReactFlowProvider>` wrapper added since `<Handle>`
+   now requires one).
+7. **`tsconfig.json` (root) gained `jsx`/`jsxImportSource`** — not itemized in design.md's File
+   Changes table (which only lists `tsconfig.webview.json`). Required because `test/unit/
+   webviewDom.test.ts`, a plain `.ts` file already covered by the root `tsconfig.json`, now
+   transitively resolves `webview/index.tsx` via a dynamic `import("../../webview/index.js")` —
+   without `jsx` configured, `tsc -p tsconfig.json` cannot type-check that resolution.
+
+### Issues Found
+
+- **jsdom 30 does not implement `ResizeObserver`, `DOMMatrixReadOnly`, or a real layout engine at
+  all** (`offsetWidth`/`offsetHeight` are hardcoded to 0). React Flow's own internal handle-bounds
+  measurement pipeline (`@xyflow/system`'s `updateNodeInternals`) silently gates its *entire*
+  computation on `dimensions.width && dimensions.height` being truthy — with jsdom's hardcoded
+  zeros, no node's handle bounds are ever computed, so `getEdgePosition` always fails with
+  `error008` and **every edge silently fails to render**, with no thrown error and no console
+  warning distinguishable from normal operation (React Flow calls `onError` with a code, which
+  defaults to a `console.warn` easy to miss in a large test run). This was the single hardest bug
+  in this PR to isolate; documented at length in `webviewDomSetup.ts`'s comments so a future PR
+  (PR4/PR5, which touch edges/hover) does not have to re-discover it.
+- **A controlled React `<textarea>`'s `onChange` will not fire from a test that sets `.value =`
+  directly and dispatches a synthetic "input" event** — React's internal `_valueTracker` detects
+  that the DOM's value already matches what React expects and suppresses the change. Worked
+  around with the standard `@testing-library`-style native-property-setter technique
+  (`test/unit/webviewDom.test.ts`'s `typeInto` helper). Uncontrolled inputs (the raw-JSON
+  parameter textareas, the toolbar `<select>`s) are unaffected since they carry no `value` prop.
+- **A real (and jsdom-simulated) checkbox `click()` toggles `.checked` via the browser's default
+  action before React's `onChange` fires** — presetting `.checked` then dispatching a bare
+  "change" event never triggers React's handler; the fix is to dispatch the actual "click".
+- **`session.handleIntent(...)`-driven `post()` calls made outside `act()`** (React 18/19's
+  automatic batching does not synchronously flush a `dispatch()` triggered from a real
+  `dispatchEvent(...)` in jsdom/Node the way a real browser's event loop does) left several
+  assertions reading stale DOM immediately after a `click(...)`. Fixed by wrapping every
+  state-changing DOM interaction, and the simulated host `post` callback itself, in `act()`.
+
+### Remaining Tasks
+
+None for Section 2b-ii. Section 3 (`positionOverrides.ts` absolute redesign + container-drag
+cascade, base: PR2b-ii) is next.
+
+### Workload / PR Boundary
+
+- Mode: stacked-to-main chained PR slice (per prior session's resolved delivery decision)
+- Current work unit: PR2b-ii — "Atomic switch: wire the React root, delete the old renderer"
+- Boundary: starts from PR2b-i's tip (commit `5757031`); ends at commit `2e45bd5` (this batch)
+- **Actual diff size (PR2b-i tip → this commit): 15 files changed, +1113/-3405 (4518 total changed
+  lines)**. This is the single largest PR in the whole migration, as anticipated by design.md's own
+  "Deviation note" and by the user's earlier decision to split PR2b into 2b-i/2b-ii. The user's
+  standing instruction on this change explicitly authorizes exceeding the 400-line/200-line budget
+  for every PR in this migration and asks only for an accurate, honest report of the real number —
+  reported above. Net new authored code is smaller than the raw diff suggests: +1113 insertions
+  against -3405 deletions, and the deletions are overwhelmingly two dead files (`webview/index.ts`,
+  940 lines; `webview/graphView.ts`, 648 lines) plus their superseded test file (`test/unit/
+  graphView.test.ts`, 989 lines) — together 2577 of the 3405 deleted lines were already fully
+  superseded by PR1's `graphFilters.ts`/`graphLayout.ts` and PR2b-i's `appReducer.ts`/
+  `AcmEntityNode.tsx`, not new churn introduced by this PR.
