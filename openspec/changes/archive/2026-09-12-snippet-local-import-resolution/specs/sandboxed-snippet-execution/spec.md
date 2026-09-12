@@ -1,6 +1,42 @@
-# Delta for Sandboxed Snippet Execution
+# Sandboxed Snippet Execution Specification
 
-## MODIFIED Requirements
+## Purpose
+
+Define explicit, restricted, disposable execution and three-variant result comparison.
+
+## Requirements
+
+### Requirement: Require explicit execution
+
+The system MUST execute no snippet automatically. Each run MUST require an explicit user action after showing the selected snippet variants and applicable restrictions.
+
+#### Scenario: Inspect without running
+
+- GIVEN changed snippet content is displayed
+- WHEN the user navigates, edits, or compares it without choosing run
+- THEN no code is executed and no execution environment is created
+
+#### Scenario: Request a run
+
+- GIVEN the user has reviewed the selected variants and restrictions
+- WHEN the user explicitly chooses run
+- THEN only the displayed selected variants are scheduled for that run
+
+### Requirement: Enforce a restricted disposable environment
+
+Every run MUST use a disposable isolated container with network access disabled by default, bounded CPU, memory, and elapsed time, controlled mounts, a read-only root filesystem, and no unnecessary privileges. Enabling network MUST require a separate explicit user decision for that run.
+
+#### Scenario: Run with defaults
+
+- GIVEN a valid snippet run request with no network exception
+- WHEN execution starts
+- THEN the environment has no network and enforces declared CPU, memory, time, mount, filesystem, and privilege restrictions
+
+#### Scenario: Restriction cannot be applied
+
+- GIVEN any required restriction cannot be established
+- WHEN execution is requested
+- THEN the system MUST refuse to execute and identify the unsatisfied restriction
 
 ### Requirement: Control accessible content
 
@@ -50,8 +86,6 @@ For introspection and invocation runs specifically, the execution environment MA
 - WHEN the driver script is generated with that file included in the bundle
 - THEN the generated script contains that file's content only as a base64-alphabet literal, never as a raw substring, identically to the existing invariant already enforced for the target's own embedded source — the invariant now holds per-file across the whole bundle, not only for the target file
 
-## ADDED Requirements
-
 ### Requirement: Map a captured file path to a deterministic dotted module name
 
 Granularity note: this mapping is a small, independently-testable pure function, but it is specified here (rather than as a separate capability) because it exists solely to serve the "Control accessible content" bundling behavior above and has no meaning outside it.
@@ -83,6 +117,32 @@ Given a captured file's posixPath from a matched snapshot, the system MUST deriv
 - THEN `pkg/mod.py` is excluded from the importable bundle rather than being imported under a namespace-package-style dotted name; a target importing `pkg.mod` in this situation MUST fail with an ordinary `ModuleNotFoundError`, exactly as it would if `pkg/mod.py` had never been captured
 
 > Design note (flagged, not fully resolved here): the scenario above specifies the fallback for a directory that never has an `__init__.py` anywhere in the matched set. It intentionally leaves unresolved the exact `__path__`/partial-package construction rule for a package that IS rooted by a present `__init__.py` but whose submodule tree is only **partially** captured (e.g. `pkg/__init__.py` and `pkg/sub/mod.py` are both matched, but `pkg/sub/__init__.py` is not). This is the residual `__path__` design detail the proposal explicitly deferred to `sdd-design`; this spec only guarantees that a directory with no `__init__.py` anywhere in the set is never treated as a package.
+
+### Requirement: Compare three variant results
+
+For available original, current, and draft variants, the system MUST execute each under equivalent restrictions and MUST present each result separately with captured standard output, standard error, exit status, timeout status, and execution error. A missing variant MUST be identified rather than synthesized.
+
+#### Scenario: Compare successful and failing variants
+
+- GIVEN original, current, and draft snippets are available
+- WHEN the explicit run completes
+- THEN all three labeled results are shown and differences in output, errors, and status are identifiable
+
+#### Scenario: Variant times out or is absent
+
+- GIVEN one available variant exceeds its limit and another requested variant is unavailable
+- WHEN the run completes
+- THEN the first is reported as timed out, the second as unavailable, and completed variant results remain visible
+
+### Requirement: Clean up every run
+
+The system MUST terminate and remove run containers and ephemeral writable state after success, failure, cancellation, or timeout, while retaining only the reported result data.
+
+#### Scenario: Run ends abnormally
+
+- GIVEN an active run fails, is cancelled, or times out
+- WHEN termination completes
+- THEN its container and ephemeral writable state are removed and the termination outcome is reported
 
 ## Non-Goals (explicit exclusions)
 
