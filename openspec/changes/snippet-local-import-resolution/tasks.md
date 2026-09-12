@@ -20,7 +20,7 @@ merged). Unblocks: Slice 2 (`gatherImportBundle` needs this mapping).
 
 ### 1.1 — `mapPathsToModules` pure function
 
-- [ ] **RED**: `test/unit/pythonModuleName.test.ts` (new) — table-driven cases:
+- [x] **RED**: `test/unit/pythonModuleName.test.ts` (new) — table-driven cases:
       - flat file at root: `foo.py` → `foo` (not a package).
       - package member: `pkg/mod.py` + `pkg/__init__.py` present in the same input → `pkg.mod`,
         plus `pkg` itself as a package entry (isPackage: true).
@@ -43,7 +43,7 @@ merged). Unblocks: Slice 2 (`gatherImportBundle` needs this mapping).
       the package", "A package's own `__init__.py` maps to the package name", "File inside a
       directory missing `__init__.py` is not treated as a package member", plus the collision/
       sort/identifier rules from design.md's Interfaces section).
-- [ ] **GREEN**: `src/execution/pythonModuleName.ts` (new) — `PythonModuleEntry` interface,
+- [x] **GREEN**: `src/execution/pythonModuleName.ts` (new) — `PythonModuleEntry` interface,
       `mapPathsToModules(posixPaths)`; pure, no I/O, per design's Interfaces/Contracts section.
 
 **Slice 1 exit criteria**: the mapping function is fully covered by the design's table, including
