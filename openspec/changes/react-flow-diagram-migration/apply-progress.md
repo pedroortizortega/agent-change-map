@@ -523,3 +523,146 @@ cascade, base: PR2b-ii) is next.
   graphView.test.ts`, 989 lines) — together 2577 of the 3405 deleted lines were already fully
   superseded by PR1's `graphFilters.ts`/`graphLayout.ts` and PR2b-i's `appReducer.ts`/
   `AcmEntityNode.tsx`, not new churn introduced by this PR.
+
+## Correction to PR2b-ii: `webviewDom.test.ts` coverage restoration
+
+Not a new numbered PR in the chain — this batch corrects a scope gap in PR2b-ii's own delivery.
+PR2b-ii's RED-test task rewrote `test/unit/webviewDom.test.ts` from the pre-React-Flow suite's 45
+cases down to 17, citing "scope control," and explicitly flagged exactly one dropped scenario
+("Diff panel's cross-refresh preserve expanded runs nuance"). The user asked for the full gap to
+be audited (not just the one flagged scenario) before continuing to PR3. This batch does that:
+diffs the OLD 45-case file (`git show 5757031:test/unit/webviewDom.test.ts`) against the 17-case
+rewrite, classifies every dropped scenario as still-meaningful (restore) or
+implementation-detail-obsolete (exclude, with justification), restores the former via strict
+RED→GREEN→REFACTOR, and fixes two real production bugs the restoration work surfaced.
+
+**Before/after test count**: 17 → 31 (in `test/unit/webviewDom.test.ts`); full unit suite 33 files
+/ 502 tests, all green; `npm run typecheck`, `npm run lint`, `npm run test:e2e` all green
+(e2e run for real in this environment: "VS Code extension e2e scenarios passed", exit 0, all
+scenarios including refresh/oversized-consent/draft-save/run-stream/cancel green).
+
+### Full 45-case inventory (old `webviewDom.test.ts`, PR2b-i tip `5757031`)
+
+1. drives explicit sides, snippet draft/save, guarded write preview and run/result through DOM — **preserved** in the 17-case rewrite.
+2. declines effects and cancels using their request IDs — **preserved**.
+3. reserves the confirmation slot before a delayed write preview and rejects overlapping effects — **RESTORED** (category a: `local:reserveAction`'s `if (state.pendingAction) return state;` guard is still real and wired; test-only gap).
+4. selects a section before oversized rendering and keeps filters actionable — **preserved**.
+5. renders classified diff rows with ghost cells for the missing side — **preserved**.
+6. navigates a relationship at its exact edge span (click-contract proof) — **preserved** (as "navigates a relationship at its exact edge span when the edge is clicked").
+7. keeps both ghost columns present for a wholly one-sided (added-only) pair — **RESTORED** (category a: `DiffRow`'s ghost-cell rendering is generic and still wired; test-only gap).
+8. collapses long unchanged runs, toggles them open/closed, and resets on a new sourcePair message — **partially preserved** (collapse/toggle-open kept as "collapses long unchanged runs and toggles them open"); the "resets on a new sourcePair message" nuance (re-selecting the same node resets collapse state) was ALSO dropped in the rewrite, separately from the one scenario PR2b-ii flagged — **RESTORED** as its own case ("resets collapsed diff-panel runs on a new sourcePair message").
+9. **re-issues inspectSources for the previously selected node after a refresh landing, and preserves its expanded runs** — the one scenario PR2b-ii explicitly flagged. **RESTORED, and found a real production bug**: see "Production bugs found and fixed" below.
+10. preserves unsaved draft text across a refresh landing while clearing selection/editing — **RESTORED**, and this restoration surfaced a SECOND real production bug (see below) — writing this RED test first is what caught it.
+11. shows terminal run kinds with exit codes and timeout durations — **RESTORED** (category a: `runResultLine()` already handles `timeout`; test-only gap).
+12. renders terminal runner failures rather than leaving an indefinitely running UI — **RESTORED**, and surfaced a THIRD real production bug (see below).
+13. passes the host's untrackedPaths through to the rendered graph, marking an untracked node's provenance — **preserved** (as "marks an untracked node's provenance from the host's untrackedPaths"); the old test's specific `.provenance-untracked` CSS-class assertion is gone, but that class was renamed to `.acm-node-provenance-untracked` under the new `AcmEntityNode.tsx` — the underlying behavior is still asserted via the `data-provenance` attribute contract, so this is full coverage under a renamed selector, not a real gap.
+14. discloses unresolved relationships without selecting the node and navigates only the recorded edge span — **preserved**.
+15–24 (Cases 21–30: pointer-drag transform update, live edge re-route during pointermove, click-suppressed-by-drag / still-fires-below-threshold, container-drag descendant edge re-anchoring, dragged-position-survives-refresh, stale-override-dropped-without-error, leaf-vs-container drag gating, descendant relationship-indicator anchoring through drag, coordinated re-route after drag) — **EXCLUDED, category (b)**: see justification below.
+25–30 (viewBox-equals-width/height on first paint, wheel-zoom-toward-cursor exact numbers, ZOOM_MIN/ZOOM_MAX clamping, wheel `preventDefault` on/off `#graph`, viewBox reset after a new render) — **EXCLUDED, category (b)**: see justification below.
+31. exposes a vintage toolbar fieldset defaulting to current-only — **preserved** (merged into "exposes a vintage toolbar fieldset defaulting to current-only and posts requestGraphView accordingly").
+32. posts requestGraphView with both vintages when Removed is checked — **preserved** (merged into the same test as #31).
+33. posts requestGraphView with an empty vintages array when both are unchecked — **RESTORED** (category a: `requestView()`'s vintage filter is generic and still wired; the rewrite kept only the "checked" branch of this pair, test-only gap for the "unchecked" branch).
+34. maps each annotation kind to its expected widget: number/checkbox/text/optional/raw-json — **partially preserved**, narrower than the original (missing `float`, `dict[...]`, no-annotation, `VAR_POSITIONAL`, `VAR_KEYWORD` cases) — **RESTORED** the missing cases (category a: `widgetFor()` already handles every one of these kinds; test-only gap).
+35. blocks on invalid raw JSON and clears the error once the value parses — **preserved**.
+36. shows a disabled unavailable state with no static-AST fallback when Docker is unavailable — **preserved**.
+37. selecting a nested function does not let the click bubble to its container and clobber the selection — **EXCLUDED, category (b)**: see justification below.
+38. shows a confirm step with the exact args JSON preview before any requestCall triggers a spawn — **preserved**.
+39. performs no invocation when the call confirmation is declined — **RESTORED** (category a: `local:declineConfirmation` + `respondToConfirmation`'s decline branch are still real and wired; test-only gap).
+40. renders a successful callResult with the return repr — **preserved**.
+41. renders a failing callResult with the captured error output — **RESTORED** (category a: `callResult` reducer case + `renderCallResultText()`'s failure-kind branch are still wired; test-only gap).
+42. never renders the draft as a bare unstyled textarea/pre (overlay `textContent` === textarea value) — **RESTORED** (category a: the semantic-highlighting overlay — `highlight()`, `#draft-overlay` — is still present verbatim in `webview/index.tsx`; test-only gap).
+43. re-renders the overlay on edit, keeping the text-equality invariant — **RESTORED** (same feature, same reasoning as #42).
+44. updates token colors on a themeTokens message without requiring reselection — **RESTORED** (same feature; `themeTokens` reducer case + the CSS-custom-property effect are still wired).
+45. renders an identifier with no determinable role as plain unstyled text without breaking overlay/textarea alignment — **RESTORED** (same feature).
+
+**Tally**: 45 old cases → 14 already preserved as-is/merged in the 17-case rewrite, 17 restored in this batch (3, 7, 8's dropped nuance, 9, 10, 11, 12, 33, 34's missing widget cases, 39, 41, 42, 43, 44, 45 — several restorations extend an existing `it()` rather than adding a new one), 14 excluded as obsolete (cases 15–24, 25–30, 37) with justification below. New total: 31 cases in `test/unit/webviewDom.test.ts` (17 kept + 14 net-new/extended `it()` blocks; some restorations were added as assertions inside an already-preserved test rather than a new one, which is why 31 ≠ 17 + 17).
+
+### Category (b) exclusions — obsolete under React Flow, not restored
+
+All of these tested implementation details specific to the old hand-rolled SVG/vanilla-DOM
+renderer that has no equivalent surface under React Flow. Per `webviewDom.test.ts`'s own header
+comment (already present from PR2b-ii): "pan/zoom/drag/hover are React Flow's own built-in
+behavior now (not this codebase's to unit-test), pixel-position assertions are already covered —
+exactly and cheaply — by `graphLayout.test.ts`'s pure-data layer."
+
+- **Pointer-drag node transform update / live edge re-route during pointermove / click-suppressed-by-drag / still-fires-below-threshold** (old Cases 21–24): the old suite's bespoke `pointerdown`/`pointermove`/`pointerup` sequencing, drag-threshold math, and per-edge live-reroute-during-drag all lived in `webview/index.ts`'s own hand-rolled drag code. React Flow now owns dragging, its own internal drag-threshold-vs-click disambiguation, and live edge re-rendering from its own node-position store — there is no bespoke pointer-math code left in this codebase to unit-test at the DOM layer for any of these.
+- **Container-drag descendant edge re-anchoring / coordinated re-route after drag** (old Cases 25, 30): asserted that a per-frame drag recompute matched `routedPaths` (the coordinated batch router) rather than a naive per-edge fallback. React Flow's edges re-render from its own node-position store during drag; there is no bespoke per-edge-vs-coordinated recompute left to regress. Static coordinated routing is already covered by `coordinatedRouting.test.ts`/`graphLayout.test.ts` at the pure-data layer.
+- **Dragged-position-survives-refresh / stale-override-dropped-without-error** (old Cases 26–27): position-override persistence across a refresh is explicitly PR3's scope (`positionOverrides.ts`'s absolute-coordinate redesign, design.md D5/D6) — `webview/index.tsx` currently wires a placeholder `NO_OVERRIDES` empty map (see its own doc comment) precisely because this hasn't landed yet. Restoring these now would either fail against not-yet-built PR3 behavior or require building PR3 early, both out of this batch's bounds per the user's explicit constraint not to touch PR3/4/5 scope. These will get their own coverage when PR3 lands.
+- **Leaf-vs-container drag gating** (old Case 28): the old `isContainerKind()` gate on `pointerdown` (only container-kind nodes draggable) was bespoke SVG-nesting logic. Under React Flow, drag eligibility is PR3's redesign scope (per-node-type `draggable` prop), not something this codebase currently implements to test.
+- **Descendant relationship-indicator anchoring through container drag** (old Case 29): asserted an absolute-position accumulation formula (`translate(box.x + box.w - 34, box.y + 7)`) specific to the old nested-`<g>` SVG structure. React Flow's flat (non-DOM-nested) node model has no equivalent absolute-accumulation math to test.
+- **viewBox-equals-width/height / wheel-zoom-toward-cursor exact numbers / ZOOM_MIN/ZOOM_MAX clamping / wheel preventDefault on/off `#graph` / viewBox-reset-after-render** (old Cases 28*, 29–33 in the "zoom" section — old file reused comment number 28 for both a drag case and this section, see old file's own line 588 comment): all asserted the old renderer's raw SVG `viewBox` attribute and its own hand-rolled `ZOOM_STEP`/`ZOOM_MIN`/`ZOOM_MAX` wheel-zoom math. React Flow manages its own viewport transform internally; there is no `viewBox` attribute or bespoke zoom formula left in `webview/index.tsx` to unit-test.
+- **Selecting a nested function does not let the click bubble to its container** (old case at line 774): regression-tested `event.stopPropagation()` in the old renderer's per-node click listener, needed because the old SVG DOM nested a leaf node's `<g>` inside its container's own `<g>` (so a real click bubbles through every ancestor's identical listener). Under React Flow, nodes are flat, non-nested DOM siblings — `onNodeClick` fires exactly once per the node React Flow determines was hit, with no ancestor-container DOM bubbling path to guard against. No equivalent code exists to regress.
+
+### Production bugs found and fixed
+
+Writing the restored RED tests surfaced three real behavioral gaps in `webview/index.tsx` — not
+just test gaps — confirming the user's suspicion about the flagged scenario in particular:
+
+1. **Diff-panel "expanded runs" did not survive a refresh landing** (the scenario PR2b-ii
+   explicitly flagged). Root cause: the refresh-landing effect dispatched a full
+   `local:chooseNode` action — the same action a fresh user click sends — which unconditionally
+   resets `diffOps: []`. A separate `useEffect` unconditionally cleared `expandedRuns` on every
+   `diffOps` change, so any refresh always collapsed the diff panel back to fully-collapsed,
+   discarding whatever the user had expanded. The old `webview/index.ts` (`git show
+   5757031:webview/index.ts`, lines 796-799/870-874) had a `preservedRuns` snapshot taken at
+   `graphSummary` time specifically to survive this transition; the new port never carried that
+   mechanism over. **Fix**: added a `preservedRunsRef` (mirrors the old `preservedRuns` module
+   variable) snapshotted right before the refresh-landing `inspectSources` re-request; the
+   `diffOps`-reset effect now restores it instead of unconditionally clearing, exactly once, then
+   clears the ref.
+2. **Unsaved draft text was wiped on a refresh landing instead of being preserved** (this
+   surfaced while restoring case #10, itself adjacent to the flagged bug — same root cause).
+   `local:chooseNode` also unconditionally resets `draftContent`/`draftSourceId`, which a synced
+   `useEffect` mirrors into the local `draftText` state — so the same over-broad dispatch that
+   broke expanded-runs also silently discarded any in-progress unsaved edit on every refresh,
+   even though the reducer's own `graphSummary` case and the `pendingInspect` field (added,
+   documented, but never drained by any effect) show the ported design's actual intent was to
+   preserve it. **Fix**: replaced the refresh-landing effect's `local:chooseNode` dispatch with a
+   new minimal `local:clearPendingInspect` action that only clears `pendingInspect`, leaving
+   `draftContent`/`draftSourceId`/`diffOps` untouched — matching the old `index.ts`'s
+   refresh-landing behavior (it only set `selectedPair`+ posted `inspectSources`, never called the
+   full `choosePair`). This also removed the now-unnecessary `selectedNodeIdRef`.
+3. **"Request run" silently stopped working after the first run's terminal result (success or
+   failure)** (surfaced while restoring case #12). The "Run selected variants…" button's guard
+   (`if (activeRunId || state.pendingAction) return;`) reads a *local* `useState` copy of the
+   active run id that is only ever cleared on an explicit decline — `runResult`/`runFailed`
+   clear the *reducer's* `state.activeRun` but never synced back down to the local copy, so any
+   run after the very first one silently no-op'd forever, i.e. `#request-run` stopped producing a
+   confirmation dialog with no error and no visible feedback. **Fix**: added a `useEffect`
+   syncing local `activeRunId` from `state.activeRun`.
+
+All three fixes are minimal, additive, and scoped to `webview/index.tsx` +
+`webview/state/appReducer.ts` (one new `LocalUiMessage` case, one new ref, one new sync effect,
+one corrected effect body) — no changes to `positionOverrides.ts`, `edgeStyleConfig.ts`, or hover
+highlighting (PR3/4/5 scope, untouched).
+
+### Files changed (this correction)
+
+| File | Action | What Was Done |
+|------|--------|----------------|
+| `test/unit/webviewDom.test.ts` | Modified | 17 → 31 test cases: restored 17 scenarios/nuances (categorized above), extended the widget-mapping test with 5 more annotation kinds. |
+| `webview/index.tsx` | Modified | Fixed the three production bugs above: `preservedRunsRef` for diff-panel expanded-runs across refresh; replaced the `local:chooseNode` refresh-landing dispatch with a minimal `local:clearPendingInspect` drain (preserving unsaved draft text); added an `activeRunId`↔`state.activeRun` sync effect. |
+| `webview/state/appReducer.ts` | Modified | Added `local:clearPendingInspect` `LocalUiMessage` case (clears only `pendingInspect`). |
+
+### TDD Cycle Evidence
+
+| Scenario | RED | GREEN | REFACTOR |
+|---|---|---|---|
+| Diff-panel expanded runs preserved across refresh | Test written against current `index.tsx`; failed with stale-`localStorage`/suspended-act pollution traceable to the same unfixed bug leaking into the next test | Added `preservedRunsRef`, corrected refresh-landing effect | n/a — minimal, no further cleanup needed |
+| Unsaved draft preserved across refresh | Test written; failed `expected '' to be 'print(\'unsaved edit\')\n'` | Same refresh-landing effect fix (shared root cause) made it pass | n/a |
+| Request-run works after a terminal run result | Test written; failed — second `#request-run` click silently no-op'd, `#confirmation` stayed empty | Added `activeRunId`↔`state.activeRun` sync effect | n/a |
+| All other restored/extended scenarios (14 cases) | Test written against current `index.tsx`/`AcmEntityNode.tsx` | Passed immediately — confirmed already-wired behavior, test-only gaps | n/a |
+
+### Work Unit Evidence
+
+| Evidence | Value |
+|---|---|
+| Focused test command and exact result | `npx vitest run test/unit/webviewDom.test.ts` — 31/31 passed |
+| Runtime harness command/scenario and exact result | `npm run test:e2e` — "VS Code extension e2e scenarios passed", exit 0, all scenarios (selection, exact/stale navigation, draft save, forged-root refusal, direct save, oversized consent, refresh, run/stream, cancel) green |
+| Rollback boundary | Exactly `test/unit/webviewDom.test.ts`, `webview/index.tsx`, `webview/state/appReducer.ts` — no other files touched; revertable independently of PR2b-ii's original commit or any later PR |
+
+### Workload / PR Boundary
+
+- Mode: correction to already-landed PR2b-ii, not a new chained-PR slice
+- Diff size: 3 files changed, +310/-12 (322 total changed lines) — within the 400-line budget
+- Boundary: starts from PR2b-ii's tip (commit `2b61931`); this commit is the correction

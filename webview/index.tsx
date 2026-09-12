@@ -248,7 +248,12 @@ function App() {
   const [currentThemeColors, setCurrentThemeColors] = useState<Partial<Record<TokenRole, string>>>({ ...DEFAULT_PALETTE.dark });
   const nextId = useRef(0);
   const graphRef = useRef<HTMLDivElement>(null);
-  const selectedNodeIdRef = useRef<string | undefined>(undefined);
+  /** Snapshot of `expandedRuns` taken right before a refresh-landing re-`inspectSources` request
+   * (see the `state.pendingInspect` effect below), consumed by the `diffOps` effect so a landing
+   * refresh's diff panel re-render restores the same collapse state — mirrors the old `index.ts`'s
+   * `preservedRuns` module variable (design.md's refresh-landing behavior). `undefined` means an
+   * ordinary (non-refresh) selection change, which resets collapse state as before. */
+  const preservedRunsRef = useRef<Set<string> | undefined>(undefined);
 
   useEffect(() => {
     const onMessage = (event: MessageEvent<HostToWebviewMessage>) => dispatch(event.data);
@@ -267,28 +272,44 @@ function App() {
     if (state.themeColors) setCurrentThemeColors(state.themeColors);
   }, [state.themeColors]);
 
+  // Keeps the local `activeRunId` (read by the "Run selected variants…"/"Cancel run" button
+  // handlers below) in sync with the reducer's own `state.activeRun`. Without this, a
+  // `runResult`/`runFailed` reply clears `state.activeRun` but leaves the local copy stale,
+  // permanently disabling "Request run" after the very first run (success OR failure) — the
+  // guard `if (activeRunId || ...) return;` would silently no-op forever.
+  useEffect(() => {
+    setActiveRunId(state.activeRun);
+  }, [state.activeRun]);
+
   useEffect(() => {
     setDraftText(state.draftContent ?? "");
   }, [state.draftContent, state.draftSourceId]);
 
   useEffect(() => {
-    setExpandedRuns(new Set());
+    if (preservedRunsRef.current) {
+      setExpandedRuns(preservedRunsRef.current);
+      preservedRunsRef.current = undefined;
+    } else {
+      setExpandedRuns(new Set());
+    }
   }, [state.diffOps]);
 
-  useEffect(() => {
-    selectedNodeIdRef.current = state.selectedNodeId;
-  }, [state.selectedNodeId]);
-
   // Refresh-landing re-navigation (design §3): once a fresh "graph" snapshot lands after a
-  // refresh, if the previously selected node still exists, re-issue `inspectSources` for it
-  // so the diff panel re-renders without requiring a fresh click.
+  // refresh and the previously selected node still exists, the reducer's "graph" case has
+  // already set `pendingInspect` (without touching `selected`/`editingEnabled`/`draftContent`/
+  // `diffOps` — those stay exactly as `local:chooseNode` would have wiped them, which is
+  // wrong here: the pre-refresh SourceId only goes stale, the user's in-progress draft must
+  // not). This effect only drains that flag: re-issue `inspectSources` for the same node so the
+  // diff panel re-renders, and snapshot the current collapse state first so the incoming
+  // `sourcePair` reply's diff panel restores it instead of resetting to fully-collapsed.
   useEffect(() => {
-    const nodeId = selectedNodeIdRef.current;
-    if (state.graph && state.loadReason === "refresh" && nodeId && state.sourceIndex[nodeId]) {
-      dispatch({ type: "local:chooseNode", nodeId, pair: state.sourceIndex[nodeId] });
+    if (state.pendingInspect) {
+      const nodeId = state.pendingInspect;
+      preservedRunsRef.current = new Set(expandedRuns);
+      dispatch({ type: "local:clearPendingInspect" });
       vscode.postMessage({ type: "inspectSources", nodeId });
     }
-  }, [state.graphSeq]);
+  }, [state.pendingInspect]);
 
   const layout = useMemo(() => {
     if (!state.graph) return undefined;

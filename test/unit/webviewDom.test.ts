@@ -255,6 +255,169 @@ describe("ported panels: ids and behavior parity", () => {
     click('#vintage-removed');
     expect(intents.at(-1)).toMatchObject({ type: "requestGraphView", vintages: ["current", "removed"] });
   });
+
+  it("posts requestGraphView with an empty vintages array when both vintage checkboxes are unchecked", async () => {
+    await vi.waitFor(() => expect(element('#filter-vintage')).not.toBeNull());
+    click('#vintage-current');
+    expect(intents.at(-1)).toMatchObject({ type: "requestGraphView", vintages: [] });
+  });
+
+  it("reserves the confirmation slot before a delayed write preview and rejects overlapping effects", async () => {
+    let releasePreview: (() => void) | undefined;
+    writePreviewGate = new Promise<void>(resolve => { releasePreview = resolve; });
+    await vi.waitFor(() => expect(element('[data-node-id="module:m"]')).not.toBeNull());
+    click('[data-node-id="module:m"]');
+    click('#source-right');
+    await vi.waitFor(() => expect(element<HTMLTextAreaElement>('#draft-content').value).toBe(content));
+
+    click('#write-snippet');
+    click('#write-snippet');
+    click('#request-run');
+
+    expect(intents.filter(intent => intent.type === "requestSnippetWrite")).toHaveLength(1);
+    expect(intents.some(intent => intent.type === "requestRun")).toBe(false);
+    expect(element('#action-status').textContent).toContain("Preparing confirmation");
+
+    releasePreview?.();
+    await vi.waitFor(() => expect(element('#confirmation').textContent).toContain("/repo/m.py"));
+    click('#confirm-action');
+    await vi.waitFor(() => expect(element('#action-status').textContent).toContain("Written"));
+  });
+
+  it("keeps both ghost columns present for a wholly one-sided (added-only) pair", async () => {
+    session.loadComparison(undefined, graph, []);
+    await vi.waitFor(() => expect(element('[data-node-id="module:m"]')).not.toBeNull());
+    click('[data-node-id="module:m"]');
+    await vi.waitFor(() => expect(dom.window.document.querySelectorAll("#diff-panel .diff-row").length).toBeGreaterThan(0));
+    const rows = Array.from(dom.window.document.querySelectorAll(".diff-row.op-added"));
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      expect(row.querySelector(".side.left.ghost")).not.toBeNull();
+      expect(row.querySelector(".side.right")).not.toBeNull();
+    }
+  });
+
+  it("preserves unsaved draft text across a refresh landing while clearing selection/editing", async () => {
+    await vi.waitFor(() => expect(element('[data-node-id="module:m"]')).not.toBeNull());
+    click('[data-node-id="module:m"]');
+    click('#source-right');
+    await vi.waitFor(() => expect(element<HTMLTextAreaElement>('#draft-content').value).toBe(content));
+    typeInto('#draft-content', "print('unsaved edit')\n");
+    expect(element<HTMLButtonElement>('#save-draft').disabled).toBe(false);
+
+    session.loadComparison({ ...graph, snapshot: leftSnapshot }, graph, [], { loadReason: "refresh" });
+    await vi.waitFor(() => expect(element<HTMLButtonElement>('#save-draft').disabled).toBe(true));
+    expect(element<HTMLTextAreaElement>('#draft-content').value).toBe("print('unsaved edit')\n");
+    expect(element<HTMLButtonElement>('#write-snippet').disabled).toBe(true);
+
+    click('#save-draft');
+    expect(intents.some(m => m.type === "saveDraft")).toBe(false);
+  });
+
+  it("shows terminal run kinds with exit codes and timeout durations", async () => {
+    run.mockImplementation(async source => {
+      if (source.variant === "original") return { variant: source.variant, kind: "success", exitCode: 0, stdout: "", stderr: "" };
+      if (source.variant === "current") return { variant: source.variant, kind: "failure", exitCode: 17, stdout: "", stderr: "" };
+      return { variant: source.variant, kind: "timeout", timeoutMs: 1_500, stdout: "", stderr: "" };
+    });
+    await vi.waitFor(() => expect(element('[data-node-id="module:m"]')).not.toBeNull());
+    click('[data-node-id="module:m"]'); click('#source-right');
+    await vi.waitFor(() => expect(element<HTMLTextAreaElement>('#draft-content').value).toBe(content));
+    typeInto('#draft-content', "print('draft')\n");
+    click('#save-draft');
+    await vi.waitFor(() => expect(element('#action-status').textContent).toContain("Draft saved"));
+    click('#request-run'); click('#confirm-action');
+    await vi.waitFor(() => {
+      const output = element('#run-output').textContent;
+      expect(output).toContain("original: success (exit code 0)");
+      expect(output).toContain("current: failure (exit code 17)");
+      expect(output).toContain("draft: timeout (after 1500ms)");
+    });
+  });
+
+  it("renders terminal runner failures rather than leaving an indefinitely running UI", async () => {
+    run.mockRejectedValue(new Error("Docker is unavailable"));
+    await vi.waitFor(() => expect(element('[data-node-id="module:m"]')).not.toBeNull());
+    click('[data-node-id="module:m"]'); click('#source-right');
+    await vi.waitFor(() => expect(element<HTMLTextAreaElement>('#draft-content').value).toBe(content));
+    click('#request-run'); click('#confirm-action');
+    await vi.waitFor(() => expect(element('#run-output').textContent).toContain("Docker is unavailable"));
+    click('#request-run');
+    await vi.waitFor(() => expect(element('#confirmation').textContent).toContain("network"));
+    expect(element('#confirm-action')).not.toBeNull();
+  });
+
+  it("resets collapsed diff-panel runs on a new sourcePair message (re-selecting the same node)", async () => {
+    const bigSnapshotRight = { ...snapshot, contentDigest: "sha256:reset-right" };
+    const bigSnapshotLeft = { ...leftSnapshot, contentDigest: "sha256:reset-left" };
+    const lines = Array.from({ length: 20 }, (_, i) => `line${i + 1}`);
+    const leftLines = [...lines]; leftLines[9] = "left-line10";
+    const rightLines = [...lines]; rightLines[9] = "rght-line10";
+    const bigLeftContent = `${leftLines.join("\n")}\n`;
+    const bigRightContent = `${rightLines.join("\n")}\n`;
+    const bigStore = new SnapshotStore();
+    bigStore.store({ snapshot: bigSnapshotRight, files: [{ path: "big.py", content: bigRightContent, provenance: "tracked" }] });
+    bigStore.store({ snapshot: bigSnapshotLeft, files: [{ path: "big.py", content: bigLeftContent, provenance: "tracked" }] });
+    const bigNode = { id: "module:big", kind: "module" as const, qualifiedName: "big", span: { path: "big.py", startByte: 0, endByte: bigRightContent.length, startLine: 1, startColumn: 0, endLine: 21, endColumn: 0 } };
+    const bigGraph: AnalysisGraph = { snapshot: bigSnapshotRight, nodes: [bigNode], edges: [], diagnostics: [] };
+    session = new ChangeMapSession({ repoRoot: "/repo", store: bigStore, draftStore: new DraftStore(), openSource: vi.fn(), performWrite: vi.fn(), runSnippet: vi.fn(), post: message => act(() => { dom.window.dispatchEvent(new dom.window.MessageEvent("message", { data: message })); }) });
+    session.loadComparison({ ...bigGraph, snapshot: bigSnapshotLeft }, bigGraph, []);
+
+    await vi.waitFor(() => expect(element('[data-node-id="module:big"]')).not.toBeNull());
+    click('[data-node-id="module:big"]');
+    await vi.waitFor(() => expect(dom.window.document.querySelectorAll("#diff-panel .diff-row").length).toBeGreaterThan(0));
+    const collapsedButtons = () => Array.from(dom.window.document.querySelectorAll<HTMLButtonElement>(".diff-collapsed"));
+    expect(collapsedButtons().length).toBeGreaterThan(0);
+    const runKey = collapsedButtons()[0]!.getAttribute("data-run-key")!;
+
+    click(`[data-run-key="${runKey}"]`);
+    expect(dom.window.document.querySelector(`[data-run-key="${runKey}"]`)).toBeNull();
+
+    // A fresh selection of the SAME node (a new sourcePair reply, not a refresh landing) must
+    // reset collapse state back to the default — expanding a run is scoped to the diff panel's
+    // current content, not persisted indefinitely across ordinary re-selection.
+    click('[data-node-id="module:big"]');
+    await vi.waitFor(() => expect(dom.window.document.querySelectorAll("#diff-panel .diff-row").length).toBeGreaterThan(0));
+    expect(collapsedButtons().some(button => button.getAttribute("data-run-key") === runKey)).toBe(true);
+  });
+
+  it("re-issues inspectSources for the previously selected node after a refresh landing, and preserves its expanded runs", async () => {
+    const bigSnapshotRight = { ...snapshot, contentDigest: "sha256:refresh-right" };
+    const bigSnapshotLeft = { ...leftSnapshot, contentDigest: "sha256:refresh-left" };
+    const lines = Array.from({ length: 20 }, (_, i) => `line${i + 1}`);
+    const leftLines = [...lines]; leftLines[9] = "left-line10";
+    const rightLines = [...lines]; rightLines[9] = "rght-line10";
+    const bigLeftContent = `${leftLines.join("\n")}\n`;
+    const bigRightContent = `${rightLines.join("\n")}\n`;
+    const bigStore = new SnapshotStore();
+    bigStore.store({ snapshot: bigSnapshotRight, files: [{ path: "big.py", content: bigRightContent, provenance: "tracked" }] });
+    bigStore.store({ snapshot: bigSnapshotLeft, files: [{ path: "big.py", content: bigLeftContent, provenance: "tracked" }] });
+    const bigNode = { id: "module:big", kind: "module" as const, qualifiedName: "big", span: { path: "big.py", startByte: 0, endByte: bigRightContent.length, startLine: 1, startColumn: 0, endLine: 21, endColumn: 0 } };
+    const bigGraph: AnalysisGraph = { snapshot: bigSnapshotRight, nodes: [bigNode], edges: [], diagnostics: [] };
+    session = new ChangeMapSession({ repoRoot: "/repo", store: bigStore, draftStore: new DraftStore(), openSource: vi.fn(), performWrite: vi.fn(), runSnippet: vi.fn(), post: message => act(() => { dom.window.dispatchEvent(new dom.window.MessageEvent("message", { data: message })); }) });
+    session.loadComparison({ ...bigGraph, snapshot: bigSnapshotLeft }, bigGraph, []);
+
+    await vi.waitFor(() => expect(element('[data-node-id="module:big"]')).not.toBeNull());
+    click('[data-node-id="module:big"]');
+    await vi.waitFor(() => expect(dom.window.document.querySelectorAll("#diff-panel .diff-row").length).toBeGreaterThan(0));
+    const collapsedButtons = () => Array.from(dom.window.document.querySelectorAll<HTMLButtonElement>(".diff-collapsed"));
+    expect(collapsedButtons().length).toBeGreaterThan(0);
+    const runKey = collapsedButtons()[0]!.getAttribute("data-run-key")!;
+    click(`[data-run-key="${runKey}"]`);
+    expect(dom.window.document.querySelector(`[data-run-key="${runKey}"]`)).toBeNull();
+    const inspectCountBeforeRefresh = intents.filter(m => m.type === "inspectSources").length;
+    expect(inspectCountBeforeRefresh).toBe(1);
+
+    // A landing refresh for the same selection/content: a fresh graphSummary+graph arrives
+    // with loadReason "refresh", without any node click in between. The webview must
+    // automatically re-issue "inspectSources" for the previously selected node so the diff
+    // panel re-renders, and the run that was expanded before the refresh must stay expanded.
+    act(() => { session.loadComparison({ ...bigGraph, snapshot: bigSnapshotLeft }, bigGraph, [], { loadReason: "refresh" }); });
+    await vi.waitFor(() => expect(intents.filter(m => m.type === "inspectSources").length).toBe(inspectCountBeforeRefresh + 1));
+    await vi.waitFor(() => expect(dom.window.document.querySelectorAll("#diff-panel .diff-row").length).toBeGreaterThan(0));
+    expect(dom.window.document.querySelector(`[data-run-key="${runKey}"]`)).toBeNull();
+    expect(dom.window.document.querySelectorAll("#diff-panel .diff-row.op-unchanged").length).toBeGreaterThan(6);
+  });
 });
 
 describe("signature introspection parameter form", () => {
@@ -287,20 +450,30 @@ describe("signature introspection parameter form", () => {
   it("maps each annotation kind to its expected widget: number/checkbox/text/optional/raw-json", async () => {
     withIntrospection([
       { name: "count", kind: "POSITIONAL_OR_KEYWORD", annotation: "int", required: true },
+      { name: "ratio", kind: "POSITIONAL_OR_KEYWORD", annotation: "float", required: true },
       { name: "flag", kind: "POSITIONAL_OR_KEYWORD", annotation: "bool", required: true },
       { name: "label", kind: "POSITIONAL_OR_KEYWORD", annotation: "str", required: true },
       { name: "maybe", kind: "POSITIONAL_OR_KEYWORD", annotation: "Optional[int]", required: false },
       { name: "items", kind: "POSITIONAL_OR_KEYWORD", annotation: "list[int]", required: true },
+      { name: "mapping", kind: "POSITIONAL_OR_KEYWORD", annotation: "dict[str, int]", required: true },
+      { name: "unknown", kind: "POSITIONAL_OR_KEYWORD", annotation: null, required: true },
+      { name: "args", kind: "VAR_POSITIONAL", annotation: null, required: false },
+      { name: "kwargs", kind: "VAR_KEYWORD", annotation: null, required: false },
     ]);
     await vi.waitFor(() => expect(element('[data-node-id="function:f"]')).not.toBeNull());
     click('[data-node-id="function:f"]');
     await vi.waitFor(() => expect(dom.window.document.querySelector('[data-param="count"]')).not.toBeNull());
 
     expect(element<HTMLInputElement>('[data-param="count"]').type).toBe("number");
+    expect(element<HTMLInputElement>('[data-param="ratio"]').type).toBe("number");
     expect(element<HTMLInputElement>('[data-param="flag"]').type).toBe("checkbox");
     expect(element<HTMLInputElement>('[data-param="label"]').type).toBe("text");
     expect(dom.window.document.querySelector('[data-param-toggle="maybe"]')).not.toBeNull();
     expect(element<HTMLTextAreaElement>('[data-param="items"]').tagName).toBe("TEXTAREA");
+    expect(element<HTMLTextAreaElement>('[data-param="mapping"]').tagName).toBe("TEXTAREA");
+    expect(element<HTMLTextAreaElement>('[data-param="unknown"]').tagName).toBe("TEXTAREA");
+    expect(element<HTMLTextAreaElement>('[data-param="args"]').tagName).toBe("TEXTAREA");
+    expect(element<HTMLTextAreaElement>('[data-param="kwargs"]').tagName).toBe("TEXTAREA");
   });
 
   it("blocks on invalid raw JSON and clears the error once the value parses", async () => {
@@ -389,5 +562,105 @@ describe("call function box", () => {
 
     await vi.waitFor(() => expect(element('#call-result').textContent).toContain("5"));
     expect(call).toHaveBeenCalledTimes(1);
+  });
+
+  it("performs no invocation when the call confirmation is declined", async () => {
+    const { call } = withIntrospectionAndCall([{ name: "x", kind: "POSITIONAL_OR_KEYWORD", annotation: "int", required: true }]);
+    await vi.waitFor(() => expect(element('[data-node-id="function:f"]')).not.toBeNull());
+    click('[data-node-id="function:f"]');
+    await vi.waitFor(() => expect(dom.window.document.querySelector('[data-param="x"]')).not.toBeNull());
+
+    element<HTMLInputElement>('[data-param="x"]').value = "5";
+    click('#call-function');
+    await vi.waitFor(() => expect(element('#confirmation').textContent).toContain('"x"'));
+    click('#decline-action');
+
+    expect(call).not.toHaveBeenCalled();
+    expect(intents.some(m => m.type === "confirmCall" && (m as { confirmed: boolean }).confirmed === true)).toBe(false);
+  });
+
+  it("renders a failing callResult with the captured error output", async () => {
+    const call = vi.fn().mockResolvedValue({ result: { variant: "current", kind: "failure", exitCode: 1, stdout: "", stderr: "boom" } });
+    withIntrospectionAndCall([{ name: "x", kind: "POSITIONAL_OR_KEYWORD", annotation: "int", required: true }], call);
+    await vi.waitFor(() => expect(element('[data-node-id="function:f"]')).not.toBeNull());
+    click('[data-node-id="function:f"]');
+    await vi.waitFor(() => expect(dom.window.document.querySelector('[data-param="x"]')).not.toBeNull());
+
+    element<HTMLInputElement>('[data-param="x"]').value = "5";
+    click('#call-function');
+    await vi.waitFor(() => expect(element('#confirmation').textContent).toContain('"x"'));
+    click('#confirm-action');
+
+    await vi.waitFor(() => expect(element('#call-result').textContent).toContain("boom"));
+  });
+});
+
+describe("semantic highlighting overlay (D6/D7/D8)", () => {
+  const highlightedContent = "def go(self):\n    return self.value\n";
+  const secondSelfOffset = highlightedContent.indexOf("self", highlightedContent.indexOf("self") + 1);
+
+  function highlightedGraph(): AnalysisGraph {
+    return {
+      snapshot,
+      nodes: [{
+        id: "function:go",
+        kind: "function",
+        qualifiedName: "go",
+        span: { path: "m.py", startByte: 0, endByte: highlightedContent.length, startLine: 1, startColumn: 0, endLine: 2, endColumn: 0 },
+        identifierRoles: [{ start: secondSelfOffset, end: secondSelfOffset + 4, role: "self" }],
+      }],
+      edges: [],
+      diagnostics: [],
+    };
+  }
+
+  beforeEach(() => {
+    const store = new SnapshotStore();
+    store.store({ snapshot, files: [{ path: "m.py", content: highlightedContent, provenance: "tracked" }] });
+    session = new ChangeMapSession({ repoRoot: "/repo", store, draftStore: new DraftStore(), openSource: vi.fn(), performWrite: vi.fn(), runSnippet: vi.fn(), post: message => act(() => { dom.window.dispatchEvent(new dom.window.MessageEvent("message", { data: message })); }) });
+    session.loadComparison(undefined, highlightedGraph(), []);
+  });
+
+  it("never renders the draft as a bare unstyled textarea/pre: the overlay pre's textContent equals the textarea's value", async () => {
+    await vi.waitFor(() => expect(element('[data-node-id="function:go"]')).not.toBeNull());
+    click('[data-node-id="function:go"]'); click('#source-right');
+    await vi.waitFor(() => expect(element<HTMLTextAreaElement>('#draft-content').value).toBe(highlightedContent));
+    const overlay = element('#draft-overlay');
+    expect(overlay.textContent).toBe(highlightedContent);
+    expect(overlay.innerHTML).toContain("<span");
+  });
+
+  it("re-renders the overlay on edit, keeping the text-equality invariant", async () => {
+    await vi.waitFor(() => expect(element('[data-node-id="function:go"]')).not.toBeNull());
+    click('[data-node-id="function:go"]'); click('#source-right');
+    await vi.waitFor(() => expect(element<HTMLTextAreaElement>('#draft-content').value).toBe(highlightedContent));
+    typeInto('#draft-content', "def go(self):\n    return 1 + 2\n");
+    expect(element('#draft-overlay').textContent).toBe(element<HTMLTextAreaElement>('#draft-content').value);
+  });
+
+  it("updates token colors on a themeTokens message without requiring reselection", async () => {
+    // The CSP forbids inline `style="..."` (see webview/highlight.ts's module doc), so the
+    // overlay's HTML always carries the same `class="tok-self"` regardless of the actual color —
+    // only the `--tok-self` CSS custom property on the document root changes.
+    await vi.waitFor(() => expect(element('[data-node-id="function:go"]')).not.toBeNull());
+    click('[data-node-id="function:go"]'); click('#source-right');
+    await vi.waitFor(() => expect(element<HTMLTextAreaElement>('#draft-content').value).toBe(highlightedContent));
+    expect(element('#draft-overlay').innerHTML).toContain('class="tok-self"');
+    act(() => { dom.window.dispatchEvent(new dom.window.MessageEvent("message", { data: { type: "themeTokens", kind: "dark", colors: { self: "#123456" } } })); });
+    await vi.waitFor(() => expect(dom.window.document.documentElement.style.getPropertyValue("--tok-self")).toBe("#123456"));
+    expect(element('#draft-overlay').innerHTML).not.toContain("style=");
+  });
+
+  it("renders an identifier with no determinable role as plain unstyled text without breaking overlay/textarea alignment", async () => {
+    const plainContent = "plain_local_variable = 1\n";
+    const store = new SnapshotStore();
+    store.store({ snapshot, files: [{ path: "m.py", content: plainContent, provenance: "tracked" }] });
+    session = new ChangeMapSession({ repoRoot: "/repo", store, draftStore: new DraftStore(), openSource: vi.fn(), performWrite: vi.fn(), runSnippet: vi.fn(), post: message => act(() => { dom.window.dispatchEvent(new dom.window.MessageEvent("message", { data: message })); }) });
+    session.loadComparison(undefined, { snapshot, nodes: [{ id: "module:m", kind: "module", qualifiedName: "m", span: { path: "m.py", startByte: 0, endByte: plainContent.length, startLine: 1, startColumn: 0, endLine: 2, endColumn: 0 } }], edges: [], diagnostics: [] }, []);
+    await vi.waitFor(() => expect(element('[data-node-id="module:m"]')).not.toBeNull());
+    click('[data-node-id="module:m"]'); click('#source-right');
+    await vi.waitFor(() => expect(element<HTMLTextAreaElement>('#draft-content').value).toBe(plainContent));
+    const overlay = element('#draft-overlay');
+    expect(overlay.textContent).toBe(plainContent);
   });
 });

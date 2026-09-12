@@ -119,6 +119,7 @@ function runResultLine(result: RunResult): string {
  */
 export type LocalUiMessage =
   | { type: "local:chooseNode"; nodeId: string; pair: { left?: SourceId; right?: SourceId } | undefined }
+  | { type: "local:clearPendingInspect" }
   | { type: "local:reserveAction"; action: PendingAction }
   | { type: "local:clearPendingAction"; requestId: string }
   | { type: "local:declineConfirmation" }
@@ -155,6 +156,9 @@ export function appReducer(state: AppState, message: HostToWebviewMessage | Loca
         signatureUnavailableReason: undefined,
         sourceActionsText: undefined,
       };
+
+    case "local:clearPendingInspect":
+      return { ...state, pendingInspect: undefined };
 
     case "local:reserveAction":
       if (state.pendingAction) return state;
