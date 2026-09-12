@@ -398,8 +398,8 @@ describe("computeLiveDragUpdate", () => {
     });
 
     expect(update).toBeDefined();
-    expect(update!.position).toEqual(livePosition);
-    expect(update!.position).not.toEqual({ x: before.x, y: before.y });
+    expect(update!.positions.get("function:pkg.f")).toEqual(livePosition);
+    expect(update!.positions.get("function:pkg.f")).not.toEqual({ x: before.x, y: before.y });
   });
 
   it("re-anchors edges touching the dragged node against the LIVE position, not the stale committed box", () => {
@@ -459,5 +459,39 @@ describe("computeLiveDragUpdate", () => {
       movedDescendantIds: [],
     });
     expect(update).toBeUndefined();
+  });
+
+  /** Cascade regression: dragging a CONTAINER must carry every cascaded descendant's live
+   * position along with it during the gesture itself — not just the dragged node's own box.
+   * Before this fix, `computeLiveDragUpdate` only ever returned a single `{nodeId, position}`
+   * pair; `movedDescendantIds` were consulted solely to re-anchor their EDGES, so a dragged
+   * container's children visually stayed frozen at their pre-drag spot mid-drag (exactly the
+   * "container box moved away from its stranded children" symptom reported via screenshot),
+   * only snapping to their correct cascaded position on drop (`onNodeDragStop`, unchanged). */
+  it("carries every cascaded descendant's live position along with the dragged container, offset by the same dx/dy", () => {
+    const layout = layoutGraph({ graph: nestedGraph(), diff: [], untrackedPaths: [], overrides: new Map() });
+    const draggedId = "module:pkg.a";
+    const descendantIds = ["class:pkg.a.C", "method:pkg.a.C.m", "function:pkg.a.f"];
+    const before = layout.boxes.get(draggedId)!;
+    const livePosition = { x: before.x + 120, y: before.y + 80 };
+    const dx = livePosition.x - before.x;
+    const dy = livePosition.y - before.y;
+
+    const update = computeLiveDragUpdate({
+      layout,
+      overrides: new Map(),
+      nodeId: draggedId,
+      position: livePosition,
+      movedDescendantIds: descendantIds,
+    });
+
+    expect(update).toBeDefined();
+    expect(update!.positions.get(draggedId)).toEqual(livePosition);
+    for (const descendantId of descendantIds) {
+      const preDragBox = layout.boxes.get(descendantId)!;
+      expect(update!.positions.get(descendantId)).toEqual({ x: preDragBox.x + dx, y: preDragBox.y + dy });
+    }
+    // Exactly the dragged node plus its descendants — no stray/extra entries.
+    expect(update!.positions.size).toBe(1 + descendantIds.length);
   });
 });

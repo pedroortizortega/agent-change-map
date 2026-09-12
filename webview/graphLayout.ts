@@ -453,8 +453,14 @@ function buildEdges(edges: readonly Edge[], boxes: Map<string, Rect>, overrides:
 }
 
 export interface LiveDragUpdate {
-  nodeId: string;
-  position: Position;
+  /** Live absolute positions for the DRAGGED node AND every one of its cascaded descendants
+   * (D14, mirroring `onNodeDragStop`'s own cascade — see `movedDescendantIds` below), each keyed
+   * by node id. Regression fix: this used to be a single `{nodeId, position}` pair covering only
+   * the directly-dragged node, which left a container's descendants visually frozen at their
+   * pre-drag spot mid-drag while only the container itself tracked the pointer (the "container
+   * moved away from its stranded children" symptom). Every id in `movedDescendantIds`, plus
+   * `nodeId` itself, is guaranteed to have an entry here (when a box exists for it in `layout`). */
+  positions: Map<string, Position>;
   edgeOverrides: Map<number, { path: string; startPoint: Point; endPoint: Point }>;
 }
 
@@ -498,9 +504,13 @@ export function computeLiveDragUpdate(input: {
   if (!draggedBox) return undefined;
   liveBoxes.set(nodeId, { ...draggedBox, x: position.x, y: position.y });
   const movedIds = new Set<string>([nodeId, ...movedDescendantIds]);
+  const positions = new Map<string, Position>([[nodeId, position]]);
   for (const descendantId of movedDescendantIds) {
     const box = liveBoxes.get(descendantId);
-    if (box) liveBoxes.set(descendantId, { ...box, x: box.x + dx, y: box.y + dy });
+    if (!box) continue;
+    const livePosition = { x: box.x + dx, y: box.y + dy };
+    liveBoxes.set(descendantId, { ...box, ...livePosition });
+    positions.set(descendantId, livePosition);
   }
 
   const edgeOverrides = new Map<number, { path: string; startPoint: Point; endPoint: Point }>();
@@ -512,7 +522,7 @@ export function computeLiveDragUpdate(input: {
     edgeOverrides.set(edge.data.edgeIndex, { path, startPoint: start, endPoint: end });
   }
 
-  return { nodeId, position, edgeOverrides };
+  return { positions, edgeOverrides };
 }
 
 /** THE entry point index.tsx calls. */

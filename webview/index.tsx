@@ -306,19 +306,26 @@ function App() {
     // `overrideSeq` is the drag-commit trigger (see `onNodeDragStop`); `positionOverrides` is a stable ref.
   }, [state.graph, state.diff, state.untrackedPaths, overrideSeq]);
 
-  /** Live drag-preview position for the node currently being dragged (regression fix — see
-   * `computeLiveDragUpdate`'s doc comment in `graphLayout.ts` for the full root cause). `nodes`
-   * below is derived from `layout`, which only reflects COMMITTED `positionOverrides` (written
-   * on drop); without merging this live position in, the array passed to
-   * `<ReactFlow nodes={...}>` never changes reference during the gesture, so the box visually
-   * snaps back to its pre-drag spot on every re-render mid-drag. Cleared on `onNodeDragStop`,
-   * once the committed `positionOverrides` + `layoutGraph` re-run takes over as authoritative. */
-  const [liveDrag, setLiveDrag] = useState<{ nodeId: string; position: Position } | undefined>(undefined);
+  /** Live drag-preview positions for the node currently being dragged AND every one of its
+   * cascaded descendants (regression fix — see `computeLiveDragUpdate`'s doc comment in
+   * `graphLayout.ts` for the full root cause). `nodes` below is derived from `layout`, which only
+   * reflects COMMITTED `positionOverrides` (written on drop); without merging these live
+   * positions in, the array passed to `<ReactFlow nodes={...}>` never changes reference during
+   * the gesture, so the box(es) visually snap back to their pre-drag spot on every re-render
+   * mid-drag. Keyed by node id, one entry per dragged node plus each cascaded descendant — a
+   * single-entry map (only the directly-dragged node) used to leave a dragged container's
+   * descendants visually frozen while the container itself tracked the pointer. Cleared on
+   * `onNodeDragStop`, once the committed `positionOverrides` + `layoutGraph` re-run takes over as
+   * authoritative. */
+  const [liveDrag, setLiveDrag] = useState<Map<string, Position> | undefined>(undefined);
 
   const nodes = useMemo(() => {
     const base = layout?.nodes ?? [];
-    if (!liveDrag) return base;
-    return base.map((node) => (node.id === liveDrag.nodeId ? { ...node, position: liveDrag.position } : node));
+    if (!liveDrag || liveDrag.size === 0) return base;
+    return base.map((node) => {
+      const livePosition = liveDrag.get(node.id);
+      return livePosition ? { ...node, position: livePosition } : node;
+    });
   }, [layout, liveDrag]);
 
   /** Live edge-path preview during an in-progress drag (design.md §4, "Live re-routing during a
@@ -380,10 +387,12 @@ function App() {
         movedDescendantIds: descendantsOf(dragChange.id, layout), // D14 cascade, mirrored for the live preview
       });
       if (!update) return;
-      // Merging BOTH the node's own live position and its edges' re-anchored paths from the
-      // SAME `update` is exactly what keeps the box and its lines moving together in sync with
-      // the pointer — see `computeLiveDragUpdate`'s doc comment for the regression this fixes.
-      setLiveDrag({ nodeId: update.nodeId, position: update.position });
+      // Merging BOTH the dragged node's (and its cascaded descendants') live positions and the
+      // edges' re-anchored paths from the SAME `update` is exactly what keeps every moved box and
+      // its lines moving together in sync with the pointer — see `computeLiveDragUpdate`'s doc
+      // comment for the regression this fixes (a container's descendants used to stay frozen
+      // mid-drag because only the directly-dragged node's position was ever tracked here).
+      setLiveDrag(update.positions);
       setLiveEdgeOverrides(update.edgeOverrides);
     },
     [layout],

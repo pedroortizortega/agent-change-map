@@ -1041,3 +1041,74 @@ and passing. The floating-arrowhead symptom remains unconfirmed/unfixed and need
 check. No coordinate/math bug was found or "fixed" in `graphLayout.ts` because none could be
 reproduced — this is reported transparently rather than fabricating a change to code that was
 proven correct.
+
+## Live-drag cascade fix: descendants no longer stranded during an in-progress drag
+
+**Trigger**: user screenshot showing a container box (green-circled) visually pulled away from its
+child boxes (red-circled) while mid-drag — the drop-time cascade was already correct, but the live
+preview during the gesture itself was not.
+
+### Root cause (confirmed by direct code reading, not re-litigated)
+
+`webview/index.tsx` (pre-fix, lines ~303-410):
+- `liveDrag` state was typed `{ nodeId: string; position: Position } | undefined` — a SINGLE
+  node/position pair.
+- The `nodes` `useMemo` (~318-322) only patched that one node's position:
+  `base.map((node) => (node.id === liveDrag.nodeId ? { ...node, position: liveDrag.position } : node))`.
+- `onNodesChange` (~367-390) DID correctly compute `movedDescendantIds` via
+  `descendantsOf(dragChange.id, layout)` and passed them into `computeLiveDragUpdate` — but
+  `computeLiveDragUpdate` (`webview/graphLayout.ts`, confirmed by reading its full body and its
+  existing test suite in `test/unit/graphLayout.test.ts`) only ever used `movedDescendantIds` to
+  re-anchor those descendants' EDGES (via a locally patched `liveBoxes` clone fed into
+  `edgePathFor`) — it never surfaced the descendants' own live positions in its return value,
+  which was `{ nodeId, position, edgeOverrides }`, a single node/position pair plus the edge map.
+- Net effect: during an active drag of a container, only the directly-dragged node's box visually
+  tracked the pointer; every cascaded descendant stayed rendered at its stale pre-drag position
+  while its edges got redrawn against a position that no box was actually showing — exactly the
+  reported "container moved away from stranded children" symptom. `onNodeDragStop` (~392-409)
+  already applied the full D14 cascade correctly ON DROP (`positionOverrides.set` for every
+  descendant using `box.x + dx, box.y + dy`); that path was untouched and remains correct — this
+  bug was specific to the live preview before drop.
+
+### TDD Cycle Evidence
+
+| Task | RED | GREEN | REFACTOR |
+|---|---|---|---|
+| Extend `computeLiveDragUpdate` to return live positions for the dragged node + every cascaded descendant | Added `test/unit/graphLayout.test.ts` → `computeLiveDragUpdate > carries every cascaded descendant's live position along with the dragged container, offset by the same dx/dy` (drags `module:pkg.a` in the existing `nestedGraph()` fixture, asserts `update.positions` contains the dragged node plus `class:pkg.a.C`/`method:pkg.a.C.m`/`function:pkg.a.f`, each offset by the same dx/dy as their pre-drag box). Ran `npx vitest run … -t computeLiveDragUpdate` → failed with `Cannot read properties of undefined (reading 'get')` (no `.positions` on the old return shape) — confirmed RED against the pre-fix single-node implementation. | Changed `LiveDragUpdate.position`/`nodeId` → `positions: Map<string, Position>` in `webview/graphLayout.ts`; `computeLiveDragUpdate` now populates one entry per `nodeId` + `movedDescendantIds`, each descendant offset by the same `dx`/`dy` already computed for edge re-routing (reusing the existing `liveBoxes` cascade, just also recording it into the new `positions` map). Updated the two pre-existing single-node tests (`update!.position` → `update!.positions.get(nodeId)`) to the new shape. Re-ran the full `computeLiveDragUpdate` describe block → 5/5 passed. | Wired the new `positions` map through `webview/index.tsx`: `liveDrag` state retyped `Map<string, Position> | undefined`; the `nodes` `useMemo` now applies a position override for EVERY node id present in the map (`liveDrag.get(node.id)`) instead of comparing against a single `nodeId`; `onNodesChange` now does `setLiveDrag(update.positions)`; `onNodeDragStop`'s existing `setLiveDrag(undefined)` clear and its own drop-time D14 cascade were left unchanged (already correct). Updated inline doc comments on both the `LiveDragUpdate` interface and the `liveDrag` state to describe the cascade explicitly. |
+
+### Files changed
+
+| File | Action | What was done |
+|---|---|---|
+| `webview/graphLayout.ts` | Modified | `LiveDragUpdate` interface: `position`/`nodeId` → `positions: Map<string, Position>`. `computeLiveDragUpdate` now records a live position for the dragged node AND every `movedDescendantIds` entry (offset by the same `dx`/`dy` used for edge re-anchoring), not just the dragged node alone. |
+| `webview/index.tsx` | Modified | `liveDrag` state retyped from a single `{nodeId, position}` to `Map<string, Position>`; `nodes` `useMemo` applies the live override per-id across the whole map; `onNodesChange` passes `update.positions` straight through. `onNodeDragStop`'s drop-time cascade (already correct) untouched. |
+| `test/unit/graphLayout.test.ts` | Modified | Added the new cascade regression test (see RED above, using the existing `nestedGraph()` three-level containment fixture: `module:pkg.a` dragged, descendants `class:pkg.a.C` / `method:pkg.a.C.m` / `function:pkg.a.f`). Updated the two pre-existing single-node `computeLiveDragUpdate` tests to read `update!.positions.get(nodeId)` instead of the removed `update!.position`. |
+
+### Work Unit Evidence
+
+| Evidence | Value |
+|---|---|
+| Focused test command and exact result | `npx vitest run test/unit/graphLayout.test.ts -t "computeLiveDragUpdate"` → 5/5 passed (1 new cascade test + 4 pre-existing, 2 of which were updated to the new return shape) |
+| Runtime harness command/scenario and exact result | `npm run test:e2e` (`scripts/vscode-harness.mjs`, real Extension Development Host launch) → all scenarios passed, exit code 0. **Explicit limitation, unchanged from prior entries**: this harness does not simulate a real mouse-drag pointer gesture inside the webview (jsdom/VS Code test harness cannot drive React Flow's native drag interaction), so it cannot directly observe "does the child box visually follow the container mid-drag." The state-logic invariant that CAUSES that visual behavior (`computeLiveDragUpdate` returning correct cascaded positions) is what the new unit test proves instead — this is exactly the class of bug a unit test can and should catch, per the task instructions, while true pixel-level drag-feel remains a manual/visual check. |
+| Rollback boundary | Two files (`webview/graphLayout.ts`, `webview/index.tsx`) plus one test file (`test/unit/graphLayout.test.ts`); revertible independently of all prior fixes in this log (CSS opacity fix, edge-routing fix, visual redesign, first single-node live-drag fix) — no shared lines touched. |
+
+### Full gate results (this fix)
+
+- `npm run typecheck` → clean
+- `npm run lint` → clean (`--max-warnings=0`)
+- `npm run test` → 540/540 passed (34 files, +1 new test net; 2 existing tests updated to new shape, not counted as new)
+- `npm run test:e2e` → all scenarios passed, exit code 0
+- `npm run build:webview` → succeeds (bundle size unchanged in kind, still the pre-existing `1.1mb` warning, not a regression from this change)
+
+### Deviations from design
+
+None — this directly implements design.md §4 ("Live re-routing during a drag") extended to also
+cover live re-positioning of cascaded descendants, matching the pattern `onNodeDragStop` already
+used for the committed/drop-time cascade.
+
+### Status
+
+Fixed and verified. Dragging a container will now visually carry its children along with it
+DURING the drag gesture itself (not just after releasing the mouse) — the same `dx`/`dy` offset
+`onNodeDragStop` already applied on drop is now also computed and applied live, per descendant, on
+every pointer-move frame. Base commit for this fix: `1df5201`.
