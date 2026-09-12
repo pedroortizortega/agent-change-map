@@ -170,6 +170,13 @@ body {
   line-height: 1.4;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  /* Design D6: the textarea shows its own native scrollbar once content overflows; the
+     overlay (overflow: hidden below) never paints one. Without reserving the same gutter on
+     both, the overlay wraps text at a few pixels wider than the textarea, so every wrapped
+     line after the first drifts out of alignment with the real caret/text underneath.
+     scrollbar-gutter: stable locks both elements to the same content-box width regardless of
+     whether a scrollbar is actually needed at a given moment. */
+  scrollbar-gutter: stable;
 }
 #draft-overlay-wrap #draft-content {
   position: relative;
