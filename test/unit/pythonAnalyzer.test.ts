@@ -139,7 +139,7 @@ describe("Python AST analyzer", () => {
   it("leaves unsupported instance-binding shapes unresolved", async () => {
     const graph = await analyze([{ path: "local.py", content: "class Route:\n    def get_info(self): pass\n\ndef factory():\n    return Route()\n\nclass Holder:\n    def __init__(self):\n        self.route = Route()\n    def run(self):\n        return self.route.get_info()\n\ndef chained():\n    return factory().get_info()\n\ndef tupled():\n    a, b = Route(), Route()\n    return a.get_info()\n\ndef rebound():\n    r = Route()\n    s = r\n    return s.get_info()\n\ndef chain_assigned():\n    p = q = Route()\n    return p.get_info()\n" }]);
     const callAt = (line: number) => graph.edges.find((edge) => edge.kind === "call" && edge.span.startLine === line);
-    for (const line of [14, 18, 23, 27]) {
+    for (const line of [18, 23, 27]) {
       expect(callAt(line)?.resolution).toEqual({ kind: "unresolved" });
     }
   });
@@ -250,6 +250,85 @@ describe("Python AST analyzer", () => {
     const callAt = (line: number) => graph.edges.find((edge) => edge.kind === "call" && edge.span.startLine === line);
     const method = graph.nodes.find((node) => node.qualifiedName === "local.Other.go");
     expect(callAt(12)?.resolution).toEqual({ kind: "resolved", target: method?.id });
+  });
+
+  it("resolves a chained call through an explicit return annotation", async () => {
+    const graph = await analyze([{ path: "local.py", content: "class Route:\n    def go(self): pass\n\ndef get_route() -> Route:\n    pass\n\ndef use():\n    return get_route().go()\n" }]);
+    const callAt = (line: number) => graph.edges.find((edge) => edge.kind === "call" && edge.span.startLine === line);
+    const method = graph.nodes.find((node) => node.qualifiedName === "local.Route.go");
+    expect(callAt(8)?.resolution).toEqual({ kind: "resolved", target: method?.id });
+  });
+
+  it("resolves a chained call through an inferred constructor return", async () => {
+    const graph = await analyze([{ path: "local.py", content: "class Route:\n    def go(self): pass\n\ndef get_route():\n    return Route()\n\ndef use():\n    return get_route().go()\n" }]);
+    const callAt = (line: number) => graph.edges.find((edge) => edge.kind === "call" && edge.span.startLine === line);
+    const method = graph.nodes.find((node) => node.qualifiedName === "local.Route.go");
+    expect(callAt(8)?.resolution).toEqual({ kind: "resolved", target: method?.id });
+  });
+
+  it("resolves a chained call through a returned self attribute", async () => {
+    const graph = await analyze([{ path: "local.py", content: "class Route:\n    def go(self): pass\n\nclass Holder:\n    def __init__(self):\n        self.route = Route()\n    def get_route(self):\n        return self.route\n    result = get_route().go()\n" }]);
+    const callAt = (line: number) => graph.edges.find((edge) => edge.kind === "call" && edge.span.startLine === line);
+    const method = graph.nodes.find((node) => node.qualifiedName === "local.Route.go");
+    expect(callAt(9)?.resolution).toEqual({ kind: "resolved", target: method?.id });
+  });
+
+  it("resolves a chained call through a returned local variable", async () => {
+    const graph = await analyze([{ path: "local.py", content: "class Route:\n    def go(self): pass\n\ndef get_route():\n    r = Route()\n    return r\n\ndef use():\n    return get_route().go()\n" }]);
+    const callAt = (line: number) => graph.edges.find((edge) => edge.kind === "call" && edge.span.startLine === line);
+    const method = graph.nodes.find((node) => node.qualifiedName === "local.Route.go");
+    expect(callAt(9)?.resolution).toEqual({ kind: "resolved", target: method?.id });
+  });
+
+  it("reports ambiguous candidates for a function returning different classes", async () => {
+    const graph = await analyze([{ path: "local.py", content: "class A:\n    def go(self): pass\n\nclass B:\n    def go(self): pass\n\ndef get_route(flag):\n    if flag:\n        return A()\n    return B()\n\ndef use():\n    return get_route(True).go()\n" }]);
+    const callAt = (line: number) => graph.edges.find((edge) => edge.kind === "call" && edge.span.startLine === line);
+    const goA = graph.nodes.find((node) => node.qualifiedName === "local.A.go");
+    const goB = graph.nodes.find((node) => node.qualifiedName === "local.B.go");
+    expect(callAt(13)?.resolution).toEqual({ kind: "ambiguous", candidates: [goA?.id, goB?.id].sort() });
+  });
+
+  it("prefers an explicit return annotation over an inferred return body", async () => {
+    const graph = await analyze([{ path: "local.py", content: "class Base:\n    def go(self): pass\n\nclass Derived(Base):\n    def go(self): pass\n\ndef f() -> Base:\n    return Derived()\n\ndef use():\n    return f().go()\n" }]);
+    const callAt = (line: number) => graph.edges.find((edge) => edge.kind === "call" && edge.span.startLine === line);
+    const baseGo = graph.nodes.find((node) => node.qualifiedName === "local.Base.go");
+    expect(callAt(11)?.resolution).toEqual({ kind: "resolved", target: baseGo?.id });
+  });
+
+  it("ignores returns owned by a nested definition", async () => {
+    const graph = await analyze([{ path: "local.py", content: "class Route:\n    def go(self): pass\n\ndef outer():\n    def inner():\n        return Route()\n    return 1\n\ndef use():\n    return outer().go()\n" }]);
+    const callAt = (line: number) => graph.edges.find((edge) => edge.kind === "call" && edge.span.startLine === line);
+    expect(callAt(10)?.resolution).toEqual({ kind: "unresolved" });
+  });
+
+  it("terminates on mutually recursive returns with no base case", async () => {
+    const started = Date.now();
+    const graph = await analyze([{ path: "local.py", content: "class Route:\n    def go(self): pass\n\ndef a():\n    return b()\n\ndef b():\n    return a()\n\ndef use():\n    return a().go()\n" }]);
+    expect(Date.now() - started).toBeLessThan(5000);
+    const callAt = (line: number) => graph.edges.find((edge) => edge.kind === "call" && edge.span.startLine === line);
+    expect(callAt(11)?.resolution).toEqual({ kind: "unresolved" });
+  });
+
+  it("propagates a return class through a chain of forwarding functions", async () => {
+    const graph = await analyze([{ path: "local.py", content: "class Route:\n    def go(self): pass\n\ndef c():\n    return Route()\n\ndef b():\n    return c()\n\ndef a():\n    return b()\n\ndef use():\n    return a().go()\n" }]);
+    const callAt = (line: number) => graph.edges.find((edge) => edge.kind === "call" && edge.span.startLine === line);
+    const method = graph.nodes.find((node) => node.qualifiedName === "local.Route.go");
+    expect(callAt(14)?.resolution).toEqual({ kind: "resolved", target: method?.id });
+  });
+
+  it("leaves chained calls unresolved for undecidable return expressions", async () => {
+    const graph = await analyze([
+      { path: "mod.py", content: "class Route:\n    def go(self): pass\n" },
+      {
+        path: "local.py",
+        content:
+          "import mod\nclass Route:\n    def go(self): pass\n\ndef bare():\n    return\n\ndef literal():\n    return 1\n\ndef listed():\n    return [Route()]\n\ndef qualified():\n    return mod.Route()\n\ndef chained_call():\n    return bare().go()\n\ndef use():\n    bare().go()\n    literal().go()\n    listed().go()\n    qualified().go()\n    chained_call().b().c()\n",
+      },
+    ]);
+    const callAt = (line: number) => graph.edges.find((edge) => edge.kind === "call" && edge.span.path === "local.py" && edge.span.startLine === line);
+    for (const line of [21, 22, 23, 24, 25]) {
+      expect(callAt(line)?.resolution).toEqual({ kind: "unresolved" });
+    }
   });
 
   it("carries an addressable module path and qualified name for a top-level function", async () => {

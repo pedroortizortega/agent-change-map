@@ -63,6 +63,10 @@ class FileVisitor(ast.NodeVisitor):
         self.local_bindings: list[tuple[str, str, str]] = []
         self.attribute_bindings: list[tuple[str, str, str]] = []
         self.self_scopes: set[str] = set()
+        self.return_annotations: list[tuple[str, str]] = []   # (function_scope, annotation_name)
+        self.return_names: list[tuple[str, str]] = []          # (function_scope, returned_callee_name)
+        self.return_attributes: list[tuple[str, str]] = []     # (function_scope, "Class.attr" key)
+        self.return_locals: list[tuple[str, str]] = []          # (function_scope, returned_local_var_name)
         self.stack: list[tuple[str, str, str]] = [(root_id, module, "module")]
         # Populated by `_prescan` before the main visit (design D9 / identifierRoles): every
         # class/function/imported name declared anywhere in this file, used to tag identifier
@@ -178,6 +182,15 @@ class FileVisitor(ast.NodeVisitor):
         for parameter in parameters:
             if isinstance(parameter.annotation, ast.Name):
                 self.local_bindings.append((scope, parameter.arg, parameter.annotation.id))
+        if isinstance(node.returns, ast.Name):
+            self.return_annotations.append((scope, node.returns.id))
+        for statement in _own_returns(node):
+            if isinstance(statement.value, ast.Call) and isinstance(statement.value.func, ast.Name):
+                self.return_names.append((scope, statement.value.func.id))
+            elif isinstance(statement.value, ast.Attribute) and isinstance(statement.value.value, ast.Name) and statement.value.value.id == "self" and scope in self.self_scopes:
+                self.return_attributes.append((scope, f"{self.current_qualified_name}.{statement.value.attr}"))
+            elif isinstance(statement.value, ast.Name):
+                self.return_locals.append((scope, statement.value.id))
 
     def visit_Import(self, node: ast.Import) -> None:
         for alias in node.names:
@@ -234,6 +247,20 @@ class FileVisitor(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         self.calls.append((self.current_id, self.current_qualified_name, node))
         self.generic_visit(node)
+
+
+def _own_returns(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.Return]:
+    """Every `return` lexically owned by this definition; nested definitions own their own."""
+    found: list[ast.Return] = []
+    pending: list[ast.AST] = list(node.body)
+    while pending:
+        current = pending.pop()
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        if isinstance(current, ast.Return):
+            found.append(current)
+        pending.extend(ast.iter_child_nodes(current))
+    return found
 
 
 def analyze(request: dict[str, Any]) -> dict[str, Any]:
@@ -308,6 +335,41 @@ def analyze(request: dict[str, Any]) -> dict[str, Any]:
                 continue
             _extend(attribute_classes.setdefault(f"{scope.rpartition('.')[0]}.{attribute}", []), class_names)
 
+    function_return_classes: dict[str, list[str]] = {}   # function qualified name -> class qualified names
+    return_dependencies: dict[str, list[str]] = {}       # function qualified name -> function qualified names
+    annotated_returns: set[str] = set()
+    for visitor in visitors:
+        for scope, name in visitor.return_annotations:
+            annotated_returns.add(scope)
+            _extend(function_return_classes.setdefault(scope, []), _class_names(name, scope, visitor.module, by_qualified_name, alias_targets, qualified_by_id))
+    for visitor in visitors:
+        for scope, name in visitor.return_names:
+            if scope in annotated_returns:
+                continue
+            _extend(function_return_classes.setdefault(scope, []), _class_names(name, scope, visitor.module, by_qualified_name, alias_targets, qualified_by_id))
+            for identifier in _lexical_candidates(name, scope, visitor.module, by_qualified_name, alias_targets):
+                if identifier.startswith(("function:", "method:")):
+                    _extend(return_dependencies.setdefault(scope, []), [qualified_by_id[identifier]])
+        for scope, key in visitor.return_attributes:
+            if scope in annotated_returns:
+                continue
+            _extend(function_return_classes.setdefault(scope, []), attribute_classes.get(key, []))
+        for scope, var in visitor.return_locals:
+            if scope in annotated_returns:
+                continue
+            _extend(function_return_classes.setdefault(scope, []), variable_classes.get(f"{scope}.{var}", []))
+
+    for _ in range(len(return_dependencies) + 1):
+        changed = False
+        for scope, dependencies in return_dependencies.items():
+            for dependency in dependencies:
+                inherited = [name for name in function_return_classes.get(dependency, []) if name not in function_return_classes.get(scope, [])]
+                if inherited:
+                    _extend(function_return_classes.setdefault(scope, []), inherited)
+                    changed = True
+        if not changed:
+            break
+
     for visitor in visitors:
         for source_id, scope, call in visitor.calls:
             resolution: dict[str, Any] = {"kind": "unresolved"}
@@ -320,6 +382,17 @@ def analyze(request: dict[str, Any]) -> dict[str, Any]:
                     class_names = variable_classes.get(f"{scope}.{receiver.id}", [])
                 elif isinstance(receiver, ast.Attribute) and isinstance(receiver.value, ast.Name) and receiver.value.id == "self" and scope in visitor.self_scopes:
                     class_names = attribute_classes.get(f"{scope.rpartition('.')[0]}.{receiver.attr}", [])
+                elif isinstance(receiver, ast.Call) and isinstance(receiver.func, ast.Name):
+                    # N8: the `Name` and `self.attr` branches above *rebind* `class_names` to the
+                    # list object already stored inside `variable_classes` / `attribute_classes`;
+                    # this branch instead *mutates* the fresh `[]` from its own initializer above.
+                    # The three branches are mutually exclusive today, so `_extend` here never
+                    # mutates a fold's shared stored list - but any future `_extend(class_names, ...)`
+                    # added after one of the first two branches would corrupt that fold's output
+                    # for every other call site referencing the same variable/attribute.
+                    for identifier in _lexical_candidates(receiver.func.id, scope, visitor.module, by_qualified_name, alias_targets):
+                        if identifier.startswith(("function:", "method:")):
+                            _extend(class_names, function_return_classes.get(qualified_by_id[identifier], []))
                 candidates: list[str] = []
                 for class_name in class_names:
                     candidates.extend(by_qualified_name.get(f"{class_name}.{call.func.attr}", []))
