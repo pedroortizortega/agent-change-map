@@ -476,6 +476,30 @@ describe("ChangeMapSession signature introspection cache", () => {
     expect(posted.at(-1)).toMatchObject({ type: "signatureUnavailable", requestId: "s1", targetId: "function:f" });
     expect((posted.at(-1) as { reason: string }).reason).toEqual(expect.any(String));
   });
+
+  it("passes the whole file, not just the method's own span, to the introspection driver (nested-method regression)", async () => {
+    // Every other test in this describe block builds its sourceId over the entity's FULL
+    // content (span = [0, content.length]), which happens to equal the whole file - exactly
+    // why this bug shipped unnoticed through the whole slice-2/3 test suite. Here the entity's
+    // own span is only its method body, nested inside a class the entity's slice alone omits.
+    const nestedContent = "class Outer:\n    def method(self):\n        return 1\n";
+    const store = new SnapshotStore();
+    store.store({ snapshot: rightSnapshot, files: [{ path: "m.py", content: nestedContent, provenance: "tracked" }] });
+    const methodStart = nestedContent.indexOf("    def method");
+    const nestedSourceId = createSourceId(rightSnapshot, "m.py", nestedContent, methodStart, nestedContent.length);
+    const runIntrospection = vi.fn().mockResolvedValue({ kind: "signatureResult", parameters: [] });
+    const { session, posted } = makeDeps(store, { runIntrospection });
+    session.loadComparison(undefined, { snapshot: rightSnapshot, nodes: [targetEntity("method:Outer.method", "Outer.method", "Outer.method")], edges: [], diagnostics: [] }, []);
+
+    await session.handleIntent({ type: "requestSignature", requestId: "s1", sourceId: nestedSourceId, targetId: "method:Outer.method" });
+
+    expect(runIntrospection).toHaveBeenCalledTimes(1);
+    const driverText = (runIntrospection.mock.calls[0]![0] as SnippetSource).content;
+    const base64Match = /_SRC = base64\.b64decode\("([^"]+)"\)/.exec(driverText);
+    expect(base64Match).not.toBeNull();
+    expect(Buffer.from(base64Match![1]!, "base64").toString("utf8")).toContain("class Outer");
+    expect(posted.at(-1)).toMatchObject({ type: "signatureResult", requestId: "s1" });
+  });
 });
 
 describe("ChangeMapSession call function", () => {

@@ -3,7 +3,7 @@ import type { AnalysisGraph, Edge, Entity, SourceId } from "./protocol.js";
 import type { EdgeVintage } from "../webview/graphView.js";
 import type { SnapshotStore } from "./snapshots/snapshotStore.js";
 import type { CorrelatedDiffEntry } from "./navigation/sourceProvider.js";
-import { computeContentHash, createSourceId, resolveSource, StaleSourceError } from "./navigation/sourceProvider.js";
+import { computeContentHash, createSourceId, resolveModuleSource, resolveSource, StaleSourceError } from "./navigation/sourceProvider.js";
 import type { DraftStore } from "./editing/draftStore.js";
 import type { DirectWriteRequest, WriteEffectPreview, WriteReceipt } from "./editing/writeGuard.js";
 import { WriteConfirmationDeclinedError, WriteGuardError } from "./editing/writeGuard.js";
@@ -427,7 +427,7 @@ export class ChangeMapSession {
     }
     let content: string;
     try {
-      content = this.deps.draftStore.get(sourceId)?.content ?? resolveSource(this.deps.store, sourceId);
+      content = resolveModuleSource(this.deps.store, sourceId, this.deps.draftStore.get(sourceId)?.content);
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       this.deps.post({ type: "signatureUnavailable", requestId, targetId, reason });
@@ -480,7 +480,7 @@ export class ChangeMapSession {
     }
     let content: string;
     try {
-      content = this.deps.draftStore.get(sourceId)?.content ?? resolveSource(this.deps.store, sourceId);
+      content = resolveModuleSource(this.deps.store, sourceId, this.deps.draftStore.get(sourceId)?.content);
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       this.deps.post({ type: "error", message: reason });

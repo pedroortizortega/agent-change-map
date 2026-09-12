@@ -40,6 +40,16 @@ export const entityTargetSchema = z.object({
   callableKind: z.enum(["function", "class"]),
 });
 
+/** AST-derived roles a snippet-draft identifier may carry, consumed by the highlighting
+ * overlay (design D7/D9) to color occurrences using the active theme's token colors. Offsets
+ * are relative to the owning entity's own `span.startByte` (i.e. relative to the exact text
+ * the draft view renders for that entity), not absolute file byte offsets. */
+export const identifierRoleSchema = z.object({
+  start: z.number().int().nonnegative(),
+  end: z.number().int().nonnegative(),
+  role: z.enum(["self", "parameter", "className", "functionName", "importedName", "builtin"]),
+}).refine((role) => role.end >= role.start, "Identifier role span must be ordered");
+
 export const entitySchema = z.object({
   id: boundedString(DTO_LIMITS.maxIdentifierLength),
   kind: z.enum(["package", "module", "class", "function", "method"]),
@@ -47,6 +57,7 @@ export const entitySchema = z.object({
   containerId: boundedString(DTO_LIMITS.maxIdentifierLength).optional(),
   span: sourceSpanSchema,
   target: entityTargetSchema.optional(),
+  identifierRoles: z.array(identifierRoleSchema).optional(),
 });
 
 export const edgeResolutionSchema = z.discriminatedUnion("kind", [
@@ -95,6 +106,7 @@ export type SnapshotId = z.infer<typeof snapshotIdSchema>;
 export type SourceSpan = z.infer<typeof sourceSpanSchema>;
 export type Entity = z.infer<typeof entitySchema>;
 export type EntityTarget = z.infer<typeof entityTargetSchema>;
+export type IdentifierRole = z.infer<typeof identifierRoleSchema>;
 export type EdgeResolution = z.infer<typeof edgeResolutionSchema>;
 export type Edge = z.infer<typeof edgeSchema>;
 export type Diagnostic = z.infer<typeof diagnosticSchema>;

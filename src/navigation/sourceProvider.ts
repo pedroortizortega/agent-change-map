@@ -49,6 +49,34 @@ export function resolveSource(store: SnapshotStore, sourceId: SourceId): string 
 }
 
 /**
+ * Resolves a SourceId to the FULL content of its containing file, with the same staleness
+ * verification as {@link resolveSource} (byte span within bounds, content hash unchanged),
+ * but returning the whole module rather than just the entity's own slice.
+ *
+ * Signature introspection and function/class invocation need the whole file: a method's or
+ * nested class's own byte span alone omits the `class ...:` line (and any sibling members)
+ * that defines the surrounding scope the driver navigates through by dotted name - running
+ * just the entity's own slice in isolation defines a bare top-level function/class with no
+ * enclosing class, so `getattr(module, "OuterClass")` raises `AttributeError` before the
+ * driver ever reaches `inspect.signature()` or the call itself.
+ *
+ * `draftContent`, when provided, replaces the entity's own span within that whole-file content
+ * (mirroring `requestSnippetWrite`'s splice) so a user's unsaved edit to the snippet draft is
+ * honored without losing the surrounding class/module context.
+ */
+export function resolveModuleSource(store: SnapshotStore, sourceId: SourceId, draftContent?: string): string {
+  const validated = sourceIdSchema.parse(sourceId);
+  const content = store.getFileContent(validated.snapshot, validated.posixPath);
+  if (content === undefined) throw new StaleSourceError(`Source file not found in snapshot: ${validated.posixPath}`);
+  const buffer = Buffer.from(content, "utf8");
+  if (validated.endByte > buffer.length) throw new StaleSourceError(`Source span exceeds captured content for ${validated.posixPath}`);
+  const slice = buffer.subarray(validated.startByte, validated.endByte).toString("utf8");
+  if (computeContentHash(slice) !== validated.contentHash) throw new StaleSourceError(`Source content changed for ${validated.posixPath}`);
+  if (draftContent === undefined) return content;
+  return buffer.subarray(0, validated.startByte).toString("utf8") + draftContent + buffer.subarray(validated.endByte).toString("utf8");
+}
+
+/**
  * Correlates a file-level snapshot diff with analyzable entities from both states.
  * Files without corresponding entities in either state keep a file-level diagnostic
  * instead of being discarded.

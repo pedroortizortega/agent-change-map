@@ -6,6 +6,8 @@ import type { HostToWebviewMessage, WebviewToHostMessage } from "../src/webviewP
 import type { AnalysisGraph, Entity, SourceId } from "../src/protocol.js";
 import type { IntrospectionParameter, RunResult, SnippetVariant } from "../src/execution/dockerRunner.js";
 import type { DiffOp } from "../src/diff/lineDiff.js";
+import { DEFAULT_PALETTE, type TokenRole } from "../src/theme/tokenPalette.js";
+import { highlight, type RoleSpan } from "./highlight.js";
 
 /** Consecutive `unchanged` ops at or above this length collapse behind a click-to-expand summary. */
 const COLLAPSE_MIN_RUN = 6;
@@ -35,6 +37,31 @@ const invalidRawJsonParams = new Set<string>();
 /** The parameters of the currently rendered signature form, used to gather call args by
  * name/widget shape when the "Call function" button is clicked. */
 let currentParameters: IntrospectionParameter[] = [];
+/** Design D6/D7/D9 (slice 3b): the currently selected entity's AST-derived `identifierRoles`,
+ * offsets relative to the exact draft text (same slice the textarea/overlay render). Reset on
+ * every new selection; not re-derived on edit (design's "approximate by contract" - only the
+ * pure lexer keeps working live as the user types, per D7). */
+let currentIdentifierRoles: RoleSpan[] = [];
+/** The active theme's per-role colors (design D8), posted via `themeTokens` on activation and
+ * on theme/config change. Seeded with the dark default palette so the draft renders colored
+ * text immediately (spec: never a bare unstyled textarea/pre) even before the host's first
+ * `themeTokens` message lands; replaced wholesale once it does. */
+let currentThemeColors: Partial<Record<TokenRole, string>> = { ...DEFAULT_PALETTE.dark };
+
+/**
+ * Pushes each role's resolved color into a `--tok-ROLE` CSS custom property on the document
+ * root via the CSSOM (`element.style.setProperty`), which `webview/styles.css`'s `.tok-ROLE`
+ * classes read from. This is the CSP-safe way to apply per-role color: direct CSSOM writes are
+ * exempt from the webview's `style-src` restriction (no `unsafe-inline`), unlike an HTML-parsed
+ * `style="..."` attribute, which the browser silently drops. A role missing from `colors` falls
+ * back to the dark default palette rather than leaving a custom property unset/stale.
+ */
+function applyThemeColors(colors: Partial<Record<TokenRole, string>>): void {
+  for (const role of Object.keys(DEFAULT_PALETTE.dark) as TokenRole[]) {
+    document.documentElement.style.setProperty(`--tok-${role}`, colors[role] ?? DEFAULT_PALETTE.dark[role]);
+  }
+}
+applyThemeColors(currentThemeColors);
 
 function byId<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -50,6 +77,16 @@ function button(id: string, text: string, action: () => void): HTMLButtonElement
 }
 function sameSource(a: SourceId | undefined, b: SourceId): boolean {
   return !!a && JSON.stringify(a) === JSON.stringify(b);
+}
+/** Design D6: the draft view is never a bare unstyled `<textarea>`/`<pre>` (spec Requirement
+ * "Color draft text..."). Re-renders the synchronized `<pre>` overlay from the textarea's
+ * current value, the selected entity's AST-derived `identifierRoles`, and the active theme's
+ * colors. A stale/out-of-range role span (e.g. after an edit shifts offsets) is filtered out by
+ * `highlight()` itself rather than throwing, so an edit never breaks rendering. */
+function renderDraftOverlay(): void {
+  const overlay = byId<HTMLPreElement>("draft-overlay");
+  const text = byId<HTMLTextAreaElement>("draft-content").value;
+  overlay.innerHTML = highlight(text, currentIdentifierRoles, currentThemeColors);
 }
 function setEditingEnabled(enabled: boolean): void {
   editingEnabled = enabled;
@@ -586,6 +623,8 @@ function choosePair(nodeId: string): void {
   byId("diff-panel").textContent = "";
   byId("source-actions").textContent = "";
   byId<HTMLTextAreaElement>("draft-content").value = "";
+  currentIdentifierRoles = [];
+  renderDraftOverlay();
   for (const side of ["left", "right"] as const) {
     const sourceId = selectedPair?.[side];
     const control = button(`source-${side}`, `${side === "left" ? "Left" : "Right"} source${sourceId ? `: ${sourceId.posixPath}` : " unavailable"}`, () => {
@@ -634,7 +673,16 @@ function initialize(): void {
   byId("toolbar").append(vintage);
   const actions = document.createElement("section"); actions.id = "source-actions";
   const editorLabel = document.createElement("label"); editorLabel.htmlFor = "draft-content"; editorLabel.textContent = "Snippet draft (does not write to disk)";
+  // Design D6: a transparent-text `<textarea>` layered over a synchronized `<pre>` overlay -
+  // not `contenteditable`, not a bundled editor - so undo/IME/a11y and every existing
+  // `#draft-content` behavior (saveDraft, write-snippet, run variants) are untouched; this is
+  // purely additive rendering on top of the same textarea element and content model.
+  const overlayWrap = document.createElement("div"); overlayWrap.id = "draft-overlay-wrap";
+  const overlay = document.createElement("pre"); overlay.id = "draft-overlay"; overlay.setAttribute("aria-hidden", "true");
   const editor = document.createElement("textarea"); editor.id = "draft-content"; editor.rows = 10;
+  editor.addEventListener("input", renderDraftOverlay);
+  editor.addEventListener("scroll", () => { overlay.scrollTop = editor.scrollTop; overlay.scrollLeft = editor.scrollLeft; });
+  overlayWrap.append(overlay, editor);
   const save = button("save-draft", "Save draft", () => {
     if (selected) vscode.postMessage({ type: "saveDraft", sourceId: selected, content: editor.value });
   });
@@ -689,7 +737,7 @@ function initialize(): void {
   const callStatus = document.createElement("p"); callStatus.id = "call-status"; callStatus.setAttribute("role", "status");
   const callResult = document.createElement("pre"); callResult.id = "call-result"; callResult.setAttribute("aria-live", "polite");
   callSection.append(callButton, callStatus, callResult);
-  document.body.append(actions, editorLabel, editor, save, write, variants, run, cancel, confirmation, status, output, signatureSection, callSection);
+  document.body.append(actions, editorLabel, overlayWrap, save, write, variants, run, cancel, confirmation, status, output, signatureSection, callSection);
   setEditingEnabled(false);
   vscode.postMessage({ type: "ready" });
 }
@@ -765,7 +813,17 @@ function handleHostMessage(message: HostToWebviewMessage): void {
       byId("graph").innerHTML = renderGraphSvg(graph, message.diff, message.untrackedPaths);
       byId("status").textContent = `${graph.nodes.length} nodes / ${graph.edges.length} edges shown`;
       for (const node of Array.from(byId("graph").querySelectorAll<SVGGElement>("[data-node-id]"))) {
-        node.addEventListener("click", () => {
+        node.addEventListener("click", (event) => {
+          // Nested containers (module > class > method) mean a click on an inner node's SVG
+          // element bubbles up through every ancestor container's own [data-node-id] element,
+          // each of which has this exact same listener - without stopping propagation here,
+          // selecting a leaf immediately re-fires this handler for every ancestor too, and the
+          // last (outermost) call always wins, silently overwriting the correct selection's
+          // state (currentTargetId, selectedPair, the in-flight signature request, etc.) with
+          // the container's own - the introspection request the user actually wanted then
+          // arrives correctly, but gets dropped as stale because currentTargetId no longer
+          // matches by the time the response lands.
+          event.stopPropagation();
           if (suppressNextClick) return;
           choosePair(node.getAttribute("data-node-id")!);
         });
@@ -824,6 +882,10 @@ function handleHostMessage(message: HostToWebviewMessage): void {
       }
       selected = message.sourceId;
       byId<HTMLTextAreaElement>("draft-content").value = message.draftContent ?? message.content;
+      // Design D9: `identifierRoles` are relative to the selected entity's own span start,
+      // which is exactly what `message.content`/`draftContent` slices - so they apply as-is.
+      currentIdentifierRoles = (graph?.nodes.find((candidate) => candidate.id === selectedNodeId)?.identifierRoles ?? []) as RoleSpan[];
+      renderDraftOverlay();
       byId("action-status").textContent = `Selected ${selected.posixPath}; worktree target: ${selected.posixPath}. Only this byte span will be replaced; the rest of the captured file is preserved. External changes cause refusal.`;
       setEditingEnabled(true); break;
     }
@@ -863,6 +925,13 @@ function handleHostMessage(message: HostToWebviewMessage): void {
       byId("confirmation").textContent = "";
       renderCallResult(message.result, message.returnRepr);
       updateEffectActionAvailability();
+      break;
+    case "themeTokens":
+      // Design D8/D6 (spec scenario "Theme change updates rendered colors"): re-renders with
+      // the same text/roles and the new palette, without requiring the node to be reselected.
+      currentThemeColors = message.colors;
+      applyThemeColors(currentThemeColors);
+      renderDraftOverlay();
       break;
   }
 }

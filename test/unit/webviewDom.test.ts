@@ -770,6 +770,48 @@ describe("signature introspection parameter form", () => {
     await vi.waitFor(() => expect(element('#signature-status').textContent).toContain("unavailable"));
     expect(dom.window.document.querySelectorAll('#signature-form input, #signature-form textarea')).toHaveLength(0);
   });
+
+  it("selecting a nested function does not let the click bubble to its container and clobber the selection", async () => {
+    // Regression test: a click on a leaf node's SVG element bubbles (native DOM behavior) up
+    // through every ancestor container's own [data-node-id] element, each carrying this exact
+    // same click listener. Without stopPropagation, selecting `function:f` (nested inside
+    // `module:m`) immediately re-fires choosePair for `module:m` too - the module has no
+    // `target`, so requestSignatureFor's early-return clears currentTargetId right after the
+    // function's own selection set it, and the eventually-arriving signatureResult gets
+    // dropped as stale (its requestId/targetId no longer match). The user saw this as the
+    // parameter form and "Call function" button never activating for any function they picked.
+    const introspection = vi.fn().mockResolvedValue({ kind: "signatureResult", parameters: [{ name: "count", kind: "POSITIONAL_OR_KEYWORD", annotation: "int", required: true }] });
+    session = new ChangeMapSession({
+      repoRoot: "/repo",
+      store: new SnapshotStore(),
+      draftStore: new DraftStore(),
+      openSource: vi.fn(),
+      performWrite: vi.fn(),
+      runSnippet: vi.fn(),
+      runIntrospection: introspection,
+      post: message => dom.window.dispatchEvent(new dom.window.MessageEvent("message", { data: message })),
+    });
+    (session as unknown as { deps: { store: SnapshotStore } }).deps.store.store({ snapshot, files: [{ path: "m.py", content: "def f():\n    return 1\n", provenance: "tracked" }] });
+    const nestedGraph: AnalysisGraph = {
+      snapshot,
+      nodes: [
+        { id: "module:m", kind: "module", qualifiedName: "m", span: node.span },
+        { id: "function:f", kind: "function", qualifiedName: "m.f", containerId: "module:m", span: node.span, target: { module: "m", dottedName: "f", callableKind: "function" } },
+      ],
+      edges: [],
+      diagnostics: [],
+    };
+    session.loadComparison(undefined, nestedGraph, []);
+
+    // A bubbling click event, matching real SVG nesting - the `click` helper already dispatches
+    // with `bubbles: true`; asserting the nested structure exists is the precondition for the
+    // bubbling path to even be exercised.
+    expect(element('[data-node-id="module:m"]').contains(element('[data-node-id="function:f"]'))).toBe(true);
+    click('[data-node-id="function:f"]');
+
+    await vi.waitFor(() => expect(dom.window.document.querySelector('[data-param="count"]')).not.toBeNull());
+    expect(element('#call-function').hasAttribute("disabled")).toBe(false);
+  });
 });
 
 describe("call function box", () => {
@@ -860,5 +902,73 @@ describe("call function box", () => {
     click('#confirm-action');
 
     await vi.waitFor(() => expect(element('#call-result').textContent).toContain("boom"));
+  });
+});
+
+describe("semantic highlighting overlay (D6/D7/D8 — slice 3b)", () => {
+  const highlightedContent = "def go(self):\n    return self.value\n";
+  const secondSelfOffset = highlightedContent.indexOf("self", highlightedContent.indexOf("self") + 1);
+
+  function highlightedGraph(): AnalysisGraph {
+    return {
+      snapshot,
+      nodes: [{
+        id: "function:go",
+        kind: "function",
+        qualifiedName: "go",
+        span: { path: "m.py", startByte: 0, endByte: highlightedContent.length, startLine: 1, startColumn: 0, endLine: 2, endColumn: 0 },
+        identifierRoles: [{ start: secondSelfOffset, end: secondSelfOffset + 4, role: "self" }],
+      }],
+      edges: [],
+      diagnostics: [],
+    };
+  }
+
+  beforeEach(() => {
+    const store = new SnapshotStore();
+    store.store({ snapshot, files: [{ path: "m.py", content: highlightedContent, provenance: "tracked" }] });
+    session = new ChangeMapSession({ repoRoot: "/repo", store, draftStore: new DraftStore(), openSource: vi.fn(), performWrite: vi.fn(), runSnippet: vi.fn(), post: message => dom.window.dispatchEvent(new dom.window.MessageEvent("message", { data: message })) });
+    session.loadComparison(undefined, highlightedGraph(), []);
+  });
+
+  it("never renders the draft as a bare unstyled textarea/pre: the overlay pre's textContent equals the textarea's value", async () => {
+    click('[data-node-id="function:go"]'); click('#source-right');
+    await vi.waitFor(() => expect(element<HTMLTextAreaElement>('#draft-content').value).toBe(highlightedContent));
+    const overlay = element('#draft-overlay');
+    expect(overlay.textContent).toBe(highlightedContent);
+    expect(overlay.innerHTML).toContain("<span");
+  });
+
+  it("re-renders the overlay on edit, keeping the text-equality invariant", async () => {
+    click('[data-node-id="function:go"]'); click('#source-right');
+    await vi.waitFor(() => expect(element<HTMLTextAreaElement>('#draft-content').value).toBe(highlightedContent));
+    const draft = element<HTMLTextAreaElement>('#draft-content');
+    draft.value = "def go(self):\n    return 1 + 2\n";
+    draft.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    expect(element('#draft-overlay').textContent).toBe(draft.value);
+  });
+
+  it("updates token colors on a themeTokens message without requiring reselection", async () => {
+    // The CSP forbids inline `style="..."` (see webview/highlight.ts's module doc), so the
+    // overlay's HTML always carries the same `class="tok-self"` regardless of the actual color -
+    // only the `--tok-self` CSS custom property on the document root changes.
+    click('[data-node-id="function:go"]'); click('#source-right');
+    await vi.waitFor(() => expect(element<HTMLTextAreaElement>('#draft-content').value).toBe(highlightedContent));
+    expect(element('#draft-overlay').innerHTML).toContain('class="tok-self"');
+    dom.window.dispatchEvent(new dom.window.MessageEvent("message", { data: { type: "themeTokens", kind: "dark", colors: { self: "#123456" } } }));
+    await vi.waitFor(() => expect(dom.window.document.documentElement.style.getPropertyValue("--tok-self")).toBe("#123456"));
+    expect(element('#draft-overlay').innerHTML).not.toContain("style=");
+  });
+
+  it("renders an identifier with no determinable role as plain unstyled text without breaking overlay/textarea alignment", async () => {
+    const plainContent = "plain_local_variable = 1\n";
+    const store = new SnapshotStore();
+    store.store({ snapshot, files: [{ path: "m.py", content: plainContent, provenance: "tracked" }] });
+    session = new ChangeMapSession({ repoRoot: "/repo", store, draftStore: new DraftStore(), openSource: vi.fn(), performWrite: vi.fn(), runSnippet: vi.fn(), post: message => dom.window.dispatchEvent(new dom.window.MessageEvent("message", { data: message })) });
+    session.loadComparison(undefined, { snapshot, nodes: [{ id: "module:m", kind: "module", qualifiedName: "m", span: { path: "m.py", startByte: 0, endByte: plainContent.length, startLine: 1, startColumn: 0, endLine: 2, endColumn: 0 } }], edges: [], diagnostics: [] }, []);
+    click('[data-node-id="module:m"]'); click('#source-right');
+    await vi.waitFor(() => expect(element<HTMLTextAreaElement>('#draft-content').value).toBe(plainContent));
+    const overlay = element('#draft-overlay');
+    expect(overlay.textContent).toBe(plainContent);
   });
 });

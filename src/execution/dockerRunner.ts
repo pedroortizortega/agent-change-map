@@ -418,9 +418,24 @@ function isIntrospectionFrame(value: unknown): value is { ok: true; parameters: 
   );
 }
 
+const MAX_REASON_DETAIL_LENGTH = 500;
+
+/** Formats a non-success `RunResult` as a `reason` string that carries actual diagnostic
+ * detail (the sandboxed process's own stderr/stdout, truncated) rather than just its bare
+ * `kind` ("failure"/"timeout"/"cancelled") - the earlier bare-kind reason gave the UI (and
+ * whoever is debugging it) no way to tell an ImportError from a syntax error from a genuine
+ * timeout. */
+function describeRunFailure(result: Exclude<RunResult, { kind: "success" }>): string {
+  if (result.kind === "unavailable") return result.kind;
+  const detail = (result.stderr || result.stdout).trim();
+  if (!detail) return result.kind;
+  const truncated = detail.length > MAX_REASON_DETAIL_LENGTH ? `${detail.slice(0, MAX_REASON_DETAIL_LENGTH)}…` : detail;
+  return `${result.kind}: ${truncated}`;
+}
+
 function toIntrospectionOutcome(result: RunResult): IntrospectionOutcome {
   if (result.kind !== "success") {
-    return { kind: "signatureUnavailable", reason: result.kind };
+    return { kind: "signatureUnavailable", reason: describeRunFailure(result) };
   }
   const frame = parseAcmFrame(result.stdout);
   if (!isIntrospectionFrame(frame)) {

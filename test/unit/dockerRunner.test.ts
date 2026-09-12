@@ -171,6 +171,23 @@ describe("runIntrospection", () => {
     await expect(pending).resolves.toEqual({ kind: "signatureUnavailable", reason: expect.any(String) });
   });
 
+  it("carries the sandboxed process's own stderr in the reason, not just a bare 'failure'/'timeout' label", async () => {
+    // Regression: an earlier version reported `reason: result.kind` verbatim - a lone word
+    // like "failure" with no indication of *why* (an ImportError vs. a syntax error vs.
+    // something else). RunResult already carries stdout/stderr on every non-success kind;
+    // this asserts that detail actually reaches the UI-facing reason string.
+    const child = makeChild();
+    spawn.mockReturnValue(child);
+
+    const pending = runIntrospection({ variant: "current", path: "m.py", content: "import nonexistent_module" });
+    child.stderr.emit("data", Buffer.from("Traceback (most recent call last):\nModuleNotFoundError: No module named 'nonexistent_module'\n"));
+    child.emit("close", 1);
+
+    const outcome = await pending;
+    expect(outcome.kind).toBe("signatureUnavailable");
+    expect((outcome as { reason: string }).reason).toContain("ModuleNotFoundError");
+  });
+
   it("rejects a non-.py target before any container spawn", async () => {
     spawn.mockClear();
 

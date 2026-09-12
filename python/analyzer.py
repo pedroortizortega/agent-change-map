@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import ast
+import builtins
 import json
 import sys
 from dataclasses import dataclass
 from typing import Any
+
+BUILTIN_NAMES = frozenset(dir(builtins))
 
 
 def entity_id(kind: str, qualified_name: str, start_byte: int | None = None) -> str:
@@ -61,6 +64,64 @@ class FileVisitor(ast.NodeVisitor):
         self.attribute_bindings: list[tuple[str, str, str]] = []
         self.self_scopes: set[str] = set()
         self.stack: list[tuple[str, str, str]] = [(root_id, module, "module")]
+        # Populated by `_prescan` before the main visit (design D9 / identifierRoles): every
+        # class/function/imported name declared anywhere in this file, used to tag identifier
+        # *usages* by role. Deliberately whole-file rather than lexically-scoped - an
+        # approximation acceptable per the spec's "no determinable role -> simply absent"
+        # fallback contract.
+        self.class_names: set[str] = set()
+        self.function_names: set[str] = set()
+        self.imported_names: set[str] = set()
+
+    def prescan(self, tree: ast.AST) -> None:
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                self.class_names.add(node.name)
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                self.function_names.add(node.name)
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    self.imported_names.add((alias.asname or alias.name).split(".")[0])
+            elif isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    if alias.name != "*":
+                        self.imported_names.add(alias.asname or alias.name)
+
+    def _collect_identifier_roles(self, node: ast.AST, entity_start_byte: int, self_scope: bool, parameter_names: set[str]) -> list[dict[str, Any]]:
+        """Walks `node`'s full subtree for `ast.Name` *usages* (`Load` context - assignment
+        targets carry no role) and tags each with a role, offsets relative to
+        `entity_start_byte` (the owning entity's own span start, matching the draft view's
+        rendered text). Precedence: self > parameter > class name > function name > imported
+        name > builtin. A name matching none of these is simply omitted (design D9 / spec
+        "Unresolvable identifier role falls back gracefully")."""
+        roles: list[dict[str, Any]] = []
+        for child in ast.walk(node):
+            if not isinstance(child, ast.Name) or not isinstance(child.ctx, ast.Load):
+                continue
+            name = child.id
+            role: str | None = None
+            if self_scope and name == "self":
+                role = "self"
+            elif name in parameter_names:
+                role = "parameter"
+            elif name in self.class_names:
+                role = "className"
+            elif name in self.function_names:
+                role = "functionName"
+            elif name in self.imported_names:
+                role = "importedName"
+            elif name in BUILTIN_NAMES:
+                role = "builtin"
+            if role is None:
+                continue
+            name_span = self.source.span(child)
+            # Decorator expressions (e.g. `@staticmethod`) lexically precede the definition's
+            # own span start (per Python's `lineno` convention), so a `Name` inside one would
+            # otherwise produce a negative offset; skip anything outside the entity's own span.
+            if name_span["startByte"] < entity_start_byte:
+                continue
+            roles.append({"start": name_span["startByte"] - entity_start_byte, "end": name_span["endByte"] - entity_start_byte, "role": role})
+        return roles
 
     @property
     def current_id(self) -> str:
@@ -79,7 +140,18 @@ class FileVisitor(ast.NodeVisitor):
         dotted_name = qualified_name[len(module_prefix):] if module_prefix and qualified_name.startswith(module_prefix) else qualified_name
         callable_kind = "class" if kind == "class" else "function"
         target = {"module": self.module, "dottedName": dotted_name, "callableKind": callable_kind}
-        self.nodes.append({"id": identifier, "kind": actual_kind, "qualifiedName": qualified_name, "containerId": self.current_id, "span": span, "target": target})
+        self_scope = qualified_name in self.self_scopes
+        parameter_names: set[str] = set()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            parameter_names = {parameter.arg for parameter in node.args.posonlyargs + node.args.args + node.args.kwonlyargs}
+            if node.args.vararg:
+                parameter_names.add(node.args.vararg.arg)
+            if node.args.kwarg:
+                parameter_names.add(node.args.kwarg.arg)
+            if self_scope:
+                parameter_names.discard("self")
+        identifier_roles = self._collect_identifier_roles(node, span["startByte"], self_scope, parameter_names)
+        self.nodes.append({"id": identifier, "kind": actual_kind, "qualifiedName": qualified_name, "containerId": self.current_id, "span": span, "target": target, "identifierRoles": identifier_roles})
         self.edges.append({"kind": "contains", "source": self.current_id, "resolution": {"kind": "resolved", "target": identifier}, "span": span})
         self.stack.append((identifier, qualified_name, actual_kind))
         self.generic_visit(node)
@@ -201,6 +273,7 @@ def analyze(request: dict[str, Any]) -> dict[str, Any]:
             diagnostics.append(diagnostic)
             continue
         visitor = FileVisitor(source, module, root_id, known_modules, is_package)
+        visitor.prescan(tree)
         visitor.visit(tree)
         nodes.extend(visitor.nodes)
         edges.extend(visitor.edges)

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { DTO_LIMITS, sourceIdSchema, type AnalysisGraph, type SourceId } from "./protocol.js";
-import type { TokenRole } from "./theme/themeResolver.js";
+import type { TokenRole } from "./theme/tokenPalette.js";
 import type { CorrelatedDiffEntry } from "./navigation/sourceProvider.js";
 import type { IntrospectionParameter, RunResult, SnippetVariant } from "./execution/dockerRunner.js";
 import type { WriteEffectPreview } from "./editing/writeGuard.js";
