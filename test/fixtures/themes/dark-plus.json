@@ -1,0 +1,16 @@
+{
+  "name": "Dark+-style fixture, includes dark-vs base",
+  "include": "./dark-vs.json",
+  "tokenColors": [
+    {
+      "scope": ["entity.name.type.class", "entity.name.type"],
+      "settings": { "foreground": "#4EC9B0FF" }
+    }
+  ],
+  "semanticTokenColors": {
+    "newOperator": { "foreground": "#C586C0" },
+    "stringLiteral": { "foreground": "#CE9178" },
+    "customLiteral": { "foreground": "#4EC9B0" },
+    "numberLiteral": { "foreground": "#B5CEA8" }
+  }
+}

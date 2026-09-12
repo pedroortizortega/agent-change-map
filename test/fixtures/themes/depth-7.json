@@ -1,0 +1,3 @@
+{
+  "tokenColors": [{ "scope": "should.never.be.reached", "settings": { "foreground": "#FFFFFF" } }]
+}

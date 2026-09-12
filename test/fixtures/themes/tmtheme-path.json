@@ -1,0 +1,4 @@
+{
+  "name": "Theme fixture whose tokenColors is a plist path string, not an array",
+  "tokenColors": "./some-theme.tmTheme"
+}

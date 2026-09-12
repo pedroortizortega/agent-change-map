@@ -1,0 +1,12 @@
+{
+  "name": "theme-defaults",
+  "contributes": {
+    "themes": [
+      {
+        "id": "Dark Modern",
+        "label": "%darkPlusColorThemeLabel%",
+        "path": "./dark-modern.json"
+      }
+    ]
+  }
+}
