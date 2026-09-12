@@ -1,0 +1,4 @@
+# TODOs
+
+- [ ] `super()` calls (`super().method()`) always resolve as `unresolved` — the analyzer's call-resolution branch (`python/analyzer.py`) has no case for an `ast.Call` receiver, only `ast.Name` and `self.attr`. Folded into the relationship-indicator badge count instead of a drawn edge, per `webview/graphView.ts:377-378`. Candidate for a future SDD change.
+- [ ] Refresh drops the active graph filter, not just a UI desync: `ChangeMapSession.loadComparison` (`src/webviewHost.ts:193`) calls `sendGraph()` with no filter on a `"refresh"` load, and `sendGraph` without an argument defaults to `{ vintages: DEFAULT_VINTAGES }` — scope/relationshipKinds/changeStatuses are lost. The webview's `filter-kind` dropdown then shows the stale selection while the actual render is unfiltered. Fix: have `ChangeMapSession` retain the last-applied `GraphFilter` and reapply it in `loadComparison`'s refresh path.
