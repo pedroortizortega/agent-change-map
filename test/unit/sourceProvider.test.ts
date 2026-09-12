@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createSourceId, resolveModuleSource, resolveSource, StaleSourceError } from "../../src/navigation/sourceProvider.js";
+import { createSourceId, gatherImportBundle, resolveModuleSource, resolveSource, StaleSourceError } from "../../src/navigation/sourceProvider.js";
 import { SnapshotStore } from "../../src/snapshots/snapshotStore.js";
 
 const snapshot = { repoId: "repo", kind: "worktree" as const, contentDigest: "sha256:x" };
@@ -47,5 +47,77 @@ describe("resolveModuleSource", () => {
     store.store({ snapshot, files: [{ path: "m.py", content: nestedContent.replace("return 1", "return 999"), provenance: "tracked" }] });
 
     expect(() => resolveModuleSource(store, sourceId)).toThrow(StaleSourceError);
+  });
+});
+
+describe("gatherImportBundle", () => {
+  it("excludes the target's own posixPath (exact-equality exclusion, applied after mapping)", () => {
+    const store = new SnapshotStore();
+    store.store({
+      snapshot,
+      files: [
+        { path: "target.py", content: "TARGET = 1\n", provenance: "tracked" },
+        { path: "helper.py", content: "HELPER = 2\n", provenance: "tracked" },
+      ],
+    });
+
+    const bundle = gatherImportBundle(store, snapshot, "target.py");
+
+    expect(bundle.some((entry) => entry.dottedName === "target")).toBe(false);
+    expect(bundle).toEqual([{ dottedName: "helper", source: "HELPER = 2\n", isPackage: false }]);
+  });
+
+  it("detects packages over the full file set, with isPackage set correctly on each entry", () => {
+    const store = new SnapshotStore();
+    store.store({
+      snapshot,
+      files: [
+        { path: "target.py", content: "TARGET = 1\n", provenance: "tracked" },
+        { path: "pkg/__init__.py", content: "", provenance: "tracked" },
+        { path: "pkg/mod.py", content: "VALUE = 3\n", provenance: "tracked" },
+      ],
+    });
+
+    const bundle = gatherImportBundle(store, snapshot, "target.py");
+
+    expect(bundle).toEqual([
+      { dottedName: "pkg", source: "", isPackage: true },
+      { dottedName: "pkg.mod", source: "VALUE = 3\n", isPackage: false },
+    ]);
+  });
+
+  it("returns an empty array for an unknown snapshot instead of throwing", () => {
+    const store = new SnapshotStore();
+
+    expect(gatherImportBundle(store, snapshot, "target.py")).toEqual([]);
+  });
+
+  it("reads the `path` field of captured files, not a non-existent `posixPath` field", () => {
+    const store = new SnapshotStore();
+    store.store({
+      snapshot,
+      files: [{ path: "helper.py", content: "HELPER = 1\n", provenance: "tracked" }],
+    });
+
+    const bundle = gatherImportBundle(store, snapshot, "target.py");
+
+    expect(bundle).toEqual([{ dottedName: "helper", source: "HELPER = 1\n", isPackage: false }]);
+  });
+
+  it("applies no second matcher/extension filter of its own, trusting upstream capture-time filtering", () => {
+    const store = new SnapshotStore();
+    store.store({
+      snapshot,
+      files: [
+        { path: "helper.py", content: "HELPER = 1\n", provenance: "tracked" },
+        { path: "notes.txt", content: "not python", provenance: "tracked" },
+      ],
+    });
+
+    const bundle = gatherImportBundle(store, snapshot, "target.py");
+
+    // notes.txt is simply not a valid Python module path, so mapPathsToModules already
+    // excludes it - no additional filtering logic is exercised by the gatherer itself.
+    expect(bundle).toEqual([{ dottedName: "helper", source: "HELPER = 1\n", isPackage: false }]);
   });
 });

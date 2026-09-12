@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { mapPathsToModules } from "../execution/pythonModuleName.js";
 import type { SnapshotDiff } from "../snapshots/snapshotStore.js";
 import type { SnapshotStore } from "../snapshots/snapshotStore.js";
 import { sourceIdSchema, type AnalysisGraph, type Entity, type SnapshotId, type SourceId } from "../protocol.js";
@@ -74,6 +75,39 @@ export function resolveModuleSource(store: SnapshotStore, sourceId: SourceId, dr
   if (computeContentHash(slice) !== validated.contentHash) throw new StaleSourceError(`Source content changed for ${validated.posixPath}`);
   if (draftContent === undefined) return content;
   return buffer.subarray(0, validated.startByte).toString("utf8") + draftContent + buffer.subarray(validated.endByte).toString("utf8");
+}
+
+export interface BundledModule {
+  readonly dottedName: string;
+  readonly source: string;
+  readonly isPackage: boolean;
+}
+
+/**
+ * Gathers every same-repo Python module captured in `snapshot`, mapped to a dotted module
+ * name and its source, for the sandboxed driver's import bootstrap - excluding the target's
+ * own file so it is never double-embedded (the driver already carries the target's content
+ * separately).
+ *
+ * An unknown snapshot degrades to an empty bundle rather than throwing: the target's own
+ * resolution already raises {@link StaleSourceError} for a missing/stale snapshot, so the
+ * gatherer must not duplicate that failure mode.
+ *
+ * Maps over the FULL `files` list before excluding the target's own path, so package
+ * detection (`mapPathsToModules`) still sees the target's `__init__.py` when computing
+ * ancestor package membership for its siblings. No second matcher/extension filter is
+ * applied here: `CapturedState.files[]` is already matcher-filtered at capture time.
+ */
+export function gatherImportBundle(store: SnapshotStore, snapshot: SnapshotId, excludePosixPath: string): BundledModule[] {
+  const state = store.get(snapshot);
+  if (state === undefined) return [];
+
+  const contentByPath = new Map(state.files.map((file) => [file.path, file.content]));
+  const entries = mapPathsToModules(state.files.map((file) => file.path));
+
+  return entries
+    .filter((entry) => entry.posixPath !== excludePosixPath)
+    .map((entry) => ({ dottedName: entry.dottedName, source: contentByPath.get(entry.posixPath)!, isPackage: entry.isPackage }));
 }
 
 /**
