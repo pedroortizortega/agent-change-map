@@ -50,23 +50,28 @@ body {
   margin-bottom: 8px;
 }
 
-.node-box {
-  fill: none;
+/* `AcmEntityNode.tsx` (PR2b-i/ii) emits `acm-node-box` on its `<rect>`, not the pre-migration
+   `node-box` name — these selectors were dead against the React-rendered DOM (the box rendered
+   with the SVG default black fill and no status stroke) until this fix. Container fill is set
+   inline (`fill={data.container ? "none" : undefined}`), so a leaf box needs an explicit fill
+   here too, since an unset SVG `fill` defaults to black, not transparent. */
+.acm-node-box {
+  fill: var(--vscode-editor-background, #1e1e1e);
 }
 
-.node-box.status-added {
+.acm-node-status-added .acm-node-box {
   stroke: var(--acm-status-added);
 }
 
-.node-box.status-removed {
+.acm-node-status-removed .acm-node-box {
   stroke: var(--acm-status-removed);
 }
 
-.node-box.status-modified {
+.acm-node-status-modified .acm-node-box {
   stroke: var(--acm-status-modified);
 }
 
-.node-box.status-unchanged {
+.acm-node-status-unchanged .acm-node-box {
   stroke: var(--acm-status-unchanged);
 }
 
@@ -88,7 +93,7 @@ body {
   pointer-events: none;
 }
 
-.provenance-untracked {
+.acm-node-provenance-untracked {
   fill: var(--acm-provenance-untracked);
   stroke: none;
 }
@@ -205,9 +210,11 @@ body {
 .tok-comment { color: var(--tok-comment); }
 .tok-number { color: var(--tok-number); }
 #confirmation pre, #run-output { white-space: pre-wrap; overflow-wrap: anywhere; }
-.node, .edge { cursor: pointer; }
-.node.dragging { cursor: grabbing; }
-.node text { fill: var(--vscode-editor-foreground, #ccc); font-family: var(--vscode-editor-font-family, var(--vscode-font-family, monospace)); }
+.acm-node, .acm-edge { cursor: pointer; }
+/* React Flow adds `.dragging` to its own node wrapper (`.react-flow__node`), which contains
+   `AcmEntityNode`'s root `.acm-node` div — not to `.acm-node` itself. */
+.react-flow__node.dragging { cursor: grabbing; }
+.acm-node-label { fill: var(--vscode-editor-foreground, #ccc); font-family: var(--vscode-editor-font-family, var(--vscode-font-family, monospace)); }
 button, select, textarea { color: var(--vscode-input-foreground, #ccc); background: var(--vscode-input-background, #333); }
 button { margin: 4px; padding: 6px; }
 button:disabled { opacity: 0.5; }
