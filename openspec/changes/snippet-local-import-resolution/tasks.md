@@ -104,7 +104,7 @@ decision, though logically it will be wired to Slice 2's output in Slice 4.
 
 ### 3.1 — `buildBundleBootstrap` + optional `bundle` param on both builders
 
-- [ ] **RED**: `test/unit/callDriver.test.ts` (modify) — add cases:
+- [x] **RED**: `test/unit/callDriver.test.ts` (modify) — add cases:
       - bundle literal round-trip: given a `bundle` with one or more `BundledModule` entries,
         extract the `_BUNDLE = json.loads(base64.b64decode("..."))` literal via a regex (mirroring
         the existing `extractBundleLiteral`-style helper pattern already used for `_SRC`/`_ARGS`),
@@ -128,7 +128,7 @@ decision, though logically it will be wired to Slice 2's output in Slice 4.
       content" — scenario "Bundled file content still cannot escape its embedding envelope"
       (adversarial case); design's Threat Matrix row "Code injection via embedded content"; design
       Architecture Decision "Builder signatures" (empty-bundle byte-identity).
-- [ ] **GREEN**: `src/execution/callDriver.ts` (modify) — private `buildBundleBootstrap(bundle)`
+- [x] **GREEN**: `src/execution/callDriver.ts` (modify) — private `buildBundleBootstrap(bundle)`
       returning `""` for an empty bundle, else the `_BUNDLE`/`_AcmLoader`/`_AcmFinder`/
       `sys.meta_path.insert` text from design.md's "Driver bootstrap" section, inserted after the
       existing `import` line and before `_m = types.ModuleType(...)`, identically in both
