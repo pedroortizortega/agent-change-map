@@ -1,0 +1,300 @@
+:root {
+  --acm-status-added: #2ea043;
+  --acm-status-removed: #f85149;
+  --acm-status-modified: #d29922;
+  --acm-status-unchanged: #6e7681;
+  --acm-edge-import: #4f9cf9;
+  --acm-edge-call: #c586c0;
+  --acm-edge-ambiguous: #f0883e;
+  --acm-provenance-untracked: #a371f7;
+}
+
+body {
+  margin: 0;
+  padding: 8px;
+  font-family: var(--vscode-font-family, sans-serif);
+  color: var(--vscode-editor-foreground, #ccc);
+  background: var(--vscode-editor-background, #1e1e1e);
+}
+
+#toolbar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+#toolbar fieldset {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--vscode-panel-border, #333);
+  padding: 2px 8px;
+  margin: 0;
+}
+
+#toolbar fieldset legend {
+  padding: 0 4px;
+  font-size: 0.85em;
+}
+
+#oversized-consent {
+  border: 1px solid var(--vscode-inputValidation-warningBorder, #b89500);
+  padding: 8px;
+  margin-bottom: 8px;
+}
+
+.node-box {
+  fill: none;
+}
+
+.node-box.status-added {
+  stroke: var(--acm-status-added);
+}
+
+.node-box.status-removed {
+  stroke: var(--acm-status-removed);
+}
+
+.node-box.status-modified {
+  stroke: var(--acm-status-modified);
+}
+
+.node-box.status-unchanged {
+  stroke: var(--acm-status-unchanged);
+}
+
+/* The edge line itself is outline-only (see the inline fill="none" on <path> in
+   graphView.ts); only the arrowhead marker triangle is meant to be filled. */
+.edge-import {
+  stroke: var(--acm-edge-import);
+  stroke-width: 3;
+  fill: none;
+}
+
+.arrow-import {
+  fill: var(--acm-edge-import);
+}
+
+.edge-call {
+  stroke: var(--acm-edge-call);
+  stroke-width: 3;
+  fill: none;
+}
+
+.arrow-call {
+  fill: var(--acm-edge-call);
+}
+
+.resolution-ambiguous,
+.resolution-unresolved {
+  stroke: var(--acm-edge-ambiguous);
+  stroke-width: 3;
+  fill: none;
+}
+
+.provenance-untracked {
+  fill: var(--acm-provenance-untracked);
+  stroke: none;
+}
+
+#diff-panel {
+  font-family: var(--vscode-editor-font-family, monospace);
+  border-top: 1px solid var(--vscode-panel-border, #444);
+  margin-top: 8px;
+  padding-top: 8px;
+}
+
+#toolbar { flex-wrap: wrap; }
+
+.diff {
+  display: grid;
+  grid-template-columns: auto 1fr auto 1fr;
+  column-gap: 8px;
+  row-gap: 0;
+  overflow-x: auto;
+}
+.diff-row {
+  display: contents;
+}
+.diff-row .ln {
+  text-align: right;
+  opacity: 0.6;
+  user-select: none;
+  padding: 0 4px;
+}
+.diff-row .side {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 0 4px;
+}
+.diff-row .side.ghost {
+  background: transparent;
+}
+.diff-row.op-added .side.right {
+  background: rgba(46, 160, 67, 0.2);
+}
+.diff-row.op-removed .side.left {
+  background: rgba(248, 81, 73, 0.2);
+}
+.diff-row.op-unchanged.muted {
+  opacity: 0.7;
+}
+.diff-collapsed {
+  grid-column: 1 / -1;
+  text-align: left;
+  background: transparent;
+  border: 1px dashed var(--vscode-panel-border, #444);
+  cursor: pointer;
+  opacity: 0.8;
+  padding: 4px 8px;
+  margin: 2px 0;
+}
+#source-actions { margin: 12px 0; }
+/* Design D6: a transparent-text `<textarea>` layered over a synchronized `<pre>` overlay.
+   Both children share identical box metrics (font, size, padding, border, line-height) so the
+   overlay's rendered spans land exactly under the textarea's own glyphs/caret. */
+#draft-overlay-wrap {
+  position: relative;
+  width: calc(100% - 16px);
+}
+#draft-overlay-wrap #draft-content,
+#draft-overlay-wrap #draft-overlay {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  margin: 0;
+  padding: 4px;
+  border: 1px solid var(--vscode-panel-border, #444);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 1em;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  /* Design D6: the textarea shows its own native scrollbar once content overflows; the
+     overlay (overflow: hidden below) never paints one. Without reserving the same gutter on
+     both, the overlay wraps text at a few pixels wider than the textarea, so every wrapped
+     line after the first drifts out of alignment with the real caret/text underneath.
+     scrollbar-gutter: stable locks both elements to the same content-box width regardless of
+     whether a scrollbar is actually needed at a given moment. */
+  scrollbar-gutter: stable;
+}
+#draft-overlay-wrap #draft-content {
+  position: relative;
+  z-index: 1;
+  color: transparent;
+  background: transparent;
+  caret-color: var(--vscode-editor-foreground, #ccc);
+  resize: vertical;
+}
+#draft-overlay-wrap #draft-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  color: var(--vscode-editor-foreground, #ccc);
+}
+/* Design D8/D6: per-role token colors. The webview's CSP forbids inline `style="..."`
+   attributes, so `highlight()` only ever emits `class="tok-ROLE"`; the actual color values are
+   pushed into these `--tok-ROLE` custom properties from JS (`applyThemeColors` in
+   webview/index.ts), which the CSP permits since CSSOM writes bypass style-src entirely. */
+.tok-self { color: var(--tok-self); }
+.tok-parameter { color: var(--tok-parameter); }
+.tok-className { color: var(--tok-className); }
+.tok-functionName { color: var(--tok-functionName); }
+.tok-importedName { color: var(--tok-importedName); }
+.tok-builtin { color: var(--tok-builtin); }
+.tok-keyword { color: var(--tok-keyword); }
+.tok-string { color: var(--tok-string); }
+.tok-comment { color: var(--tok-comment); }
+.tok-number { color: var(--tok-number); }
+#confirmation pre, #run-output { white-space: pre-wrap; overflow-wrap: anywhere; }
+.node, .edge { cursor: pointer; }
+.node.dragging { cursor: grabbing; }
+.node text { fill: var(--vscode-editor-foreground, #ccc); font-family: var(--vscode-editor-font-family, var(--vscode-font-family, monospace)); }
+button, select, textarea { color: var(--vscode-input-foreground, #ccc); background: var(--vscode-input-background, #333); }
+button { margin: 4px; padding: 6px; }
+button:disabled { opacity: 0.5; }
+
+.relationship-indicator { cursor: pointer; }
+.relationship-indicator rect {
+  fill: var(--vscode-editor-background, #1e1e1e);
+  stroke: var(--acm-edge-ambiguous);
+  stroke-width: 1.5;
+}
+.relationship-indicator text {
+  fill: var(--acm-edge-ambiguous);
+  font: 11px var(--vscode-font-family, sans-serif);
+  pointer-events: none;
+}
+.relationship-indicator:focus { outline: none; }
+.relationship-indicator:focus rect {
+  stroke: var(--vscode-focusBorder, #4f9cf9);
+  stroke-width: 3;
+}
+.relationship-popup {
+  position: fixed;
+  z-index: 10;
+  box-sizing: border-box;
+  width: min(340px, calc(100vw - 16px));
+  max-height: min(360px, calc(100vh - 16px));
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--vscode-widget-border, #6e7681);
+  border-radius: 6px;
+  color: var(--vscode-editorWidget-foreground, #ccc);
+  background: var(--vscode-editorWidget-background, #252526);
+  box-shadow: 0 4px 16px #0006;
+  overflow-wrap: anywhere;
+}
+.relationship-popup > strong { display: block; padding-right: 24px; }
+.relationship-popup-close { position: absolute; top: 6px; right: 6px; }
+.relationship-popup ol { padding-left: 22px; margin-bottom: 0; }
+.relationship-popup li + li { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--vscode-widget-border, #444); }
+.relationship-popup p { margin: 6px 0; }
+.relationship-location { font-family: var(--vscode-editor-font-family, monospace); opacity: 0.85; }
+
+#signature-section {
+  border-top: 1px solid var(--vscode-panel-border, #444);
+  margin-top: 8px;
+  padding-top: 8px;
+}
+#signature-form .param-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 4px 0;
+}
+#signature-form .param-row label {
+  min-width: 8em;
+}
+#signature-form textarea.raw-json {
+  font-family: var(--vscode-editor-font-family, monospace);
+  min-width: 16em;
+  min-height: 3em;
+}
+#signature-form .param-error {
+  margin: 0;
+  color: var(--acm-status-removed);
+  min-height: 1em;
+}
+#signature-form[data-state="unavailable"] {
+  opacity: 0.6;
+}
+#signature-status[aria-disabled="true"],
+#signature-form[data-state="unavailable"] {
+  font-style: italic;
+}
+#signature-form-validity:not(:empty) {
+  color: var(--acm-status-removed);
+}
+
+#call-box {
+  border-top: 1px solid var(--vscode-panel-border, #444);
+  margin-top: 8px;
+  padding-top: 8px;
+}
+#call-result {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

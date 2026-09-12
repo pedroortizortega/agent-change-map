@@ -1,0 +1,4 @@
+{
+  "name": "Nested fixture sibling of parent.json, reached via child's relative include",
+  "tokenColors": [{ "scope": "marker.from.sibling", "settings": { "foreground": "#333333" } }]
+}

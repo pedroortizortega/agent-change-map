@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "out"
+  },
+  "include": ["src/**/*.ts", "webview/graphView.ts", "webview/edgeGeometry.ts"],
+  "exclude": ["test/**", "webview/index.ts"]
+}

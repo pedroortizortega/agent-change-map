@@ -1,0 +1,4 @@
+{
+  "name": "Dark Modern-style fixture, defines no colors of its own",
+  "include": "./dark-plus.json"
+}

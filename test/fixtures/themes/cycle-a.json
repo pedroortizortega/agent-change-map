@@ -1,0 +1,4 @@
+{
+  "name": "Cycle fixture A, includes B",
+  "include": "./cycle-b.json"
+}

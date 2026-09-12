@@ -20,6 +20,9 @@ coverage/
 test-results/
 playwright-report/
 
+# Downloaded VS Code build used by @vscode/test-electron for e2e tests
+.vscode-test/
+
 # Python caches and virtual environments
 __pycache__/
 *.py[cod]
@@ -49,6 +52,9 @@ venv/
 *.temp
 .cache/
 tmp/
+
+# Personal reference material (not part of the project)
+docs/
 
 # Editor-local files
 .idea/
