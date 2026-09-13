@@ -743,6 +743,27 @@ function graphEdgeIdsAlong(graph: RoutingGraph, points: readonly Point[]): numbe
 }
 
 /**
+ * PR4 shared shape between the full pass (`edgePathsFor`/`edgeRoutesFor`) and the scoped pass
+ * (`scopedEdgePathsFor`): raw per-edge waypoints (pre-rounding) alongside the rendered path
+ * strings, keyed by the edge's position in the `edges` array passed to `coordinateRoutes` — NOT
+ * necessarily the caller's own original edge index; `graphLayout.ts`'s `routedPaths` owns that
+ * translation for its own (filtered) `visible` list.
+ */
+export interface CoordinatedRoutes {
+  paths: (string | undefined)[];
+  routes: Map<number, Point[]>;
+}
+
+/** PR4 scoped-reroute input: `movedIds` identifies which edges must be genuinely re-solved via
+ * `routeOne` (any edge whose source or target is a moved node); every other edge's PREVIOUS raw
+ * waypoints (`previousRoutes`, from an earlier `coordinateRoutes` call's own `routes` output) are
+ * carried forward byte-identical instead of being re-searched. */
+interface RerouteScope {
+  movedIds: ReadonlySet<string>;
+  previousRoutes: ReadonlyMap<number, readonly Point[]>;
+}
+
+/**
  * Coordinates all visible relationships over ONE shared visibility graph (`buildRoutingGraph`,
  * built once per call) and ONE shared `OccupancyIndex`: each edge is routed independently by
  * `routeOne` (A* + D-5 occupancy penalty + D-3b container-tag admission). Port-side search is
@@ -750,14 +771,32 @@ function graphEdgeIdsAlong(graph: RoutingGraph, points: readonly Point[]): numbe
  * pairing first, escalating to the full 4-sides x 3-depths search only when that pairing doesn't
  * clear obstacles/labels/the ancestor-gutter rule; containment edges (one endpoint nested inside
  * the other) always search their own small, fixed port set. Whichever tier finds a candidate,
- * `edgePathsFor` keeps the cheapest one that also clears every unrelated box's `ROUTE_CLEARANCE`
+ * this keeps the cheapest one that also clears every unrelated box's `ROUTE_CLEARANCE`
  * margin, every label row, and (preferentially, degrading when unavoidable - see the doc comments
  * on `clearsContainerLanes` and `crossesAny`) the D-3 container-lane rule and transversal-crossing
  * avoidance. When no candidate for an edge both routes AND clears obstacles/labels at all, the
  * edge falls back to the existing, unchanged `edgePathFor` (D-2) — exactly today's "no candidate
- * clears" behavior.
+ * clears" behavior — UNLESS `scope` is set (PR4), in which case that failure instead aborts the
+ * whole call (`undefined`), signalling the caller to run a real, unscoped full pass rather than
+ * silently degrading one edge from a deliberately partial (scoped) occupancy/candidate context.
+ *
+ * PR4 design note (see apply-progress.md's PR4 section for the real measurement): is it safe to
+ * skip rebuilding `RoutingGraph` for a scoped pass? Measured `buildRoutingGraph` at ~9ms at
+ * `{300,600}` — under 0.2% of a full pass's ~4.7s there — so the answer is "rebuild every time, it
+ * is not the expensive part". Skipping the rebuild would also be WRONG: the moved node's new
+ * position must be reflected in the shared lane grid, or its own ports would dock against stale
+ * geometry. The real O(E) cost this function exists to let a scoped caller skip is the per-edge
+ * `routeOne` candidate search below — a scoped call still builds a fresh graph, but skips the
+ * candidate search entirely for every edge `scope` says is untouched, reusing its previous raw
+ * route unchanged and re-deriving which graph edges it now occupies via coordinate-matching
+ * (`graphEdgeIdsAlong`), which still works correctly even though a fresh build renumbers every
+ * graph edge id.
  */
-export function edgePathsFor(boxes: ReadonlyMap<string, Rect>, edges: readonly RoutingEdge[]): (string | undefined)[] {
+function coordinateRoutes(
+  boxes: ReadonlyMap<string, Rect>,
+  edges: readonly RoutingEdge[],
+  scope?: RerouteScope,
+): CoordinatedRoutes | undefined {
   const graph = buildRoutingGraph(boxes);
   const occ = createOccupancyIndex();
   // Reserve the full label row, independent of font metrics/name length. Ancestor and
@@ -779,6 +818,7 @@ export function edgePathsFor(boxes: ReadonlyMap<string, Rect>, edges: readonly R
   const used = new Map<string, number>();
   const ordinal = (id: string): number => { const next = used.get(id) ?? 0; used.set(id, next + 1); return next; };
   const paths: (string | undefined)[] = Array.from({ length: edges.length });
+  const routes = new Map<number, Point[]>();
   const ordered = edges.map((edge, index) => {
     const resolved = boxes.has(edge.source) && edge.target !== undefined && boxes.has(edge.target);
     return { edge, index, sourceSlot: resolved ? ordinal(edge.source) : 0, targetSlot: resolved ? ordinal(edge.target!) : 0 };
@@ -788,10 +828,35 @@ export function edgePathsFor(boxes: ReadonlyMap<string, Rect>, edges: readonly R
   ordered.sort((a, b) => span(a.edge) - span(b.edge) || a.index - b.index);
   const acceptedRoutes: Point[][] = [];
 
+  const isTouched = (edge: RoutingEdge): boolean =>
+    !scope || scope.movedIds.has(edge.source) || (edge.target !== undefined && scope.movedIds.has(edge.target));
+
   for (const { edge, index, sourceSlot, targetSlot } of ordered) {
+    // PR4 scoped fast-path: an edge neither endpoint of which moved keeps its exact previous
+    // geometry — re-derive which graph edges it occupies on the FRESH graph purely by coordinate
+    // match (never by reusing old edge ids, which a rebuilt graph renumbers), so touched edges
+    // still see it as occupied, without paying for a `routeOne` call at all.
+    if (scope && !isTouched(edge)) {
+      const previous = scope.previousRoutes.get(index);
+      if (previous && previous.length > 0) {
+        occ.claim(graphEdgeIdsAlong(graph, previous), graph);
+        acceptedRoutes.push(collapseCollinear(previous));
+        routes.set(index, [...previous]);
+        paths[index] = roundedPolylinePath(previous);
+        continue;
+      }
+      // No cached route for this untouched edge (e.g. it fell back to `edgePathFor` last pass, or
+      // is genuinely new since the previous pass) — fall through and solve it normally below,
+      // exactly like a touched edge.
+    }
+
     const source = boxes.get(edge.source);
     const target = edge.target ? boxes.get(edge.target) : undefined;
-    if (!source || !target) { paths[index] = edgePathFor(boxes, edge.source, edge.target); continue; }
+    if (!source || !target) {
+      if (scope) return undefined;
+      paths[index] = edgePathFor(boxes, edge.source, edge.target);
+      continue;
+    }
 
     const sourceContainsTarget = source !== target && rectFullyInside(target, source);
     const targetContainsSource = source !== target && rectFullyInside(source, target);
@@ -906,14 +971,65 @@ export function edgePathsFor(boxes: ReadonlyMap<string, Rect>, edges: readonly R
       ?? candidates[0];
 
     // No candidate both found a path AND cleared every geometric guarantee — fall back to the
-    // unchanged single-edge router exactly as today's "no candidate clears" path does (D-2).
-    if (!bestCandidate) { paths[index] = edgePathFor(boxes, edge.source, edge.target); continue; }
+    // unchanged single-edge router exactly as today's "no candidate clears" path does (D-2), UNLESS
+    // this is a scoped (PR4) pass, in which case a touched edge failing outright means the scoped
+    // pass's own necessarily-partial context isn't trustworthy for this edge — abort to `undefined`
+    // and let the caller run a real full re-route instead (never a crash, never a silently
+    // unrouted edge).
+    if (!bestCandidate) {
+      if (scope) return undefined;
+      paths[index] = edgePathFor(boxes, edge.source, edge.target);
+      continue;
+    }
     const best = bestCandidate.route;
     acceptedRoutes.push(bestCandidate.collapsed);
     occ.claim(graphEdgeIdsAlong(graph, best), graph);
+    routes.set(index, best);
     // Corner-rounding (visual redesign, post-PR4) is applied to the final rendered string only;
     // occupancy bookkeeping above keeps using the sharp-cornered `best` waypoints.
     paths[index] = roundedPolylinePath(best);
   }
-  return paths;
+  return { paths, routes };
+}
+
+/**
+ * Coordinates all visible relationships over one shared visibility graph and occupancy index
+ * (see `coordinateRoutes`'s own doc comment for the full algorithm). Signature and behavior are
+ * UNCHANGED from PR3a/3b — this remains the rollback seam design.md calls out — now implemented
+ * as a thin wrapper over the shared `coordinateRoutes` engine `edgeRoutesFor`/`scopedEdgePathsFor`
+ * (PR4) also use.
+ */
+export function edgePathsFor(boxes: ReadonlyMap<string, Rect>, edges: readonly RoutingEdge[]): (string | undefined)[] {
+  // `scope` is omitted, so `coordinateRoutes` can never return `undefined` here (see its own doc
+  // comment: the `undefined` early-outs are exclusively scoped-pass behavior).
+  return coordinateRoutes(boxes, edges)!.paths;
+}
+
+/** PR4: same full coordinated pass as `edgePathsFor`, but also exposes each edge's raw
+ * (pre-rounding) waypoints so a later drag-commit can carry an untouched edge's geometry forward
+ * via `scopedEdgePathsFor` instead of re-running `routeOne` for it. */
+export function edgeRoutesFor(boxes: ReadonlyMap<string, Rect>, edges: readonly RoutingEdge[]): CoordinatedRoutes {
+  return coordinateRoutes(boxes, edges)!;
+}
+
+/**
+ * PR4: the scoped drag-drop re-route (design.md Block F, GATE VERDICT: KEEP — measured
+ * 1.6x-18x over the 250ms budget for a full re-route at every decision-relevant size on the
+ * realistic flat geometry, see apply-progress.md's PR0 gate / Addendum 3). Only edges touching
+ * `movedIds` (the dragged node plus its D14 cascade) are genuinely re-solved via `routeOne`; every
+ * other edge keeps its exact previous path, carried forward from `previousRoutes` (keyed by the
+ * SAME positional index as `edges`).
+ *
+ * Returns `undefined` when a touched edge can't be routed at all — the caller (`graphLayout.ts`'s
+ * `routedPaths`) must then run a full, unscoped `edgeRoutesFor` pass instead of leaving that edge
+ * degraded, since a scoped pass's occupancy context only reflects the edges it actually revisited,
+ * not the full picture a real full pass has.
+ */
+export function scopedEdgePathsFor(
+  boxes: ReadonlyMap<string, Rect>,
+  edges: readonly RoutingEdge[],
+  movedIds: ReadonlySet<string>,
+  previousRoutes: ReadonlyMap<number, readonly Point[]>,
+): CoordinatedRoutes | undefined {
+  return coordinateRoutes(boxes, edges, { movedIds, previousRoutes });
 }

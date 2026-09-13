@@ -8,7 +8,10 @@ import {
   layoutGraph,
   measure,
   orderSiblings,
+  routedPaths,
+  type DragCommitScope,
 } from "../../webview/graphLayout.js";
+import type { Rect } from "../../webview/edgeGeometry.js";
 import type { AnalysisGraph, Edge, Entity } from "../../src/protocol.js";
 
 const snapshot = { repoId: "repo", kind: "worktree" as const, contentDigest: "sha256:x" };
@@ -494,6 +497,124 @@ describe("computeLiveDragUpdate", () => {
     // Exactly the dragged node plus its descendants — no stray/extra entries.
     expect(update!.positions.size).toBe(1 + descendantIds.length);
   });
+});
+
+/**
+ * PR4: the scoped drag-drop re-route itself (design.md Block F, GATE VERDICT: KEEP — measured
+ * 1.6x-18x over the 250ms budget for a FULL re-route at every decision-relevant size, see
+ * apply-progress.md's PR0 gate / Addendum 3, and this PR's own section for the implemented-router
+ * numbers). `onNodeDragStop`'s real committed re-route now goes through `routedPaths`'s `scope`
+ * parameter (`DragCommitScope`) rather than an unconditional full `edgeRoutesFor` pass; these
+ * tests exercise `routedPaths` directly (already exported, already the layer `onNodeDragStop`'s
+ * `layoutGraph` call bottoms out at) with hand-built `Rect` maps, so the exact geometric scenarios
+ * this PR cares about (an untouched edge, a genuinely unroutable touched edge) are fully
+ * controlled rather than reverse-engineered from `layoutGraph`'s own containment placement math.
+ */
+describe("routedPaths — PR4 scoped drag re-route", () => {
+  const box = (x: number, y: number, w: number, h: number): Rect => ({ x, y, w, h });
+
+  it("keeps an edge that does not touch the moved node byte-identical to the prior full pass, and re-solves only the touched edge", () => {
+    const boxes = new Map<string, Rect>([
+      ["a", box(0, 0, 20, 20)],
+      ["b", box(300, 0, 20, 20)],
+      ["c", box(0, 300, 20, 20)],
+      ["d", box(300, 300, 20, 20)],
+    ]);
+    const edges: Edge[] = [
+      { kind: "call", source: "a", resolution: { kind: "resolved", target: "b" }, span },
+      { kind: "call", source: "c", resolution: { kind: "resolved", target: "d" }, span },
+    ];
+    const before = routedPaths(edges, boxes);
+    expect(before.paths.get(0)).toBeDefined();
+    expect(before.paths.get(1)).toBeDefined();
+
+    // Simulate a drag-drop commit: node "a" moved, "c"/"d" (and the edge between them) untouched.
+    const movedBoxes = new Map(boxes);
+    movedBoxes.set("a", box(200, 200, 20, 20));
+    const scope: DragCommitScope = { movedIds: new Set(["a"]), previousRoutes: before.routes };
+    const after = routedPaths(edges, movedBoxes, scope);
+
+    // Untouched edge (neither endpoint moved): byte-identical to the prior full pass, not just
+    // geometrically equivalent — this is the actual "reuse, don't rebuild" contract.
+    expect(after.paths.get(1)).toBe(before.paths.get(1));
+    // Touched edge: re-solved against the NEW box position, so it must differ from the pre-drag path.
+    expect(after.paths.get(0)).toBeDefined();
+    expect(after.paths.get(0)).not.toBe(before.paths.get(0));
+  });
+
+  it("falls back to a full re-route (not a crash, not an unrouted edge) when the moved edge cannot be routed at all", () => {
+    // Identical shape to `coordinatedRouting.test.ts`'s own "no viable graph path" fixture:
+    // "source" walled in on all four sides thicker than every escape depth, so no port/side/depth
+    // candidate clears regardless of tier — the real, measured D-2 (`edgePathFor`) fallback
+    // trigger, reused here to force `scopedEdgePathsFor`'s own scope-failure path.
+    const boxed = new Map<string, Rect>([
+      ["source", box(200, 200, 20, 20)],
+      ["top", box(150, 150, 120, 50)],
+      ["bottom", box(150, 220, 120, 50)],
+      ["left", box(150, 150, 50, 120)],
+      ["right", box(220, 150, 50, 120)],
+      ["target", box(600, 600, 20, 20)],
+      ["other-a", box(700, 0, 20, 20)],
+      ["other-b", box(700, 300, 20, 20)],
+    ]);
+    const edges: Edge[] = [
+      { kind: "call", source: "source", resolution: { kind: "resolved", target: "target" }, span },
+      { kind: "call", source: "other-a", resolution: { kind: "resolved", target: "other-b" }, span },
+    ];
+    const before = routedPaths(edges, boxed);
+    // "source" itself is the moved node (position unchanged here — what matters is it's unroutable).
+    const scope: DragCommitScope = { movedIds: new Set(["source"]), previousRoutes: before.routes };
+    const scoped = routedPaths(edges, boxed, scope);
+    const fullReroute = routedPaths(edges, boxed); // a genuine, independent full pass over the SAME boxes
+
+    expect(scoped.paths.get(0)).toBeDefined(); // never undefined/crash — D-2's own fallback still applies
+    expect(scoped.paths.get(0)).toBe(fullReroute.paths.get(0));
+    expect(scoped.paths.get(1)).toBe(fullReroute.paths.get(1)); // the whole call degrades to a REAL full pass
+  });
+
+  /** Flat function nodes (worst case for the router — see the sibling perf-probe describe below
+   * for why), reused at a size at/near `OVERSIZED_THRESHOLDS` ({300,600}) to prove the scoped path
+   * genuinely avoids the full pass's cost rather than merely being "a bit faster". */
+  function flatGraph(nodeCount: number, edgeCount: number): AnalysisGraph {
+    const nodes: Entity[] = Array.from({ length: nodeCount }, (_, i) => ({
+      id: `function:f${i}`,
+      kind: "function" as const,
+      qualifiedName: `f${i}`,
+      span,
+    }));
+    const edges: Edge[] = Array.from({ length: edgeCount }, (_, i) => {
+      const source = nodes[i % nodeCount]!.id;
+      const target = nodes[(i * 7 + 3) % nodeCount]!.id;
+      return { kind: "call" as const, source, resolution: { kind: "resolved" as const, target }, span };
+    });
+    return { snapshot, nodes, edges, diagnostics: [] };
+  }
+
+  it("completes a drag-commit re-route comfortably under 500ms at {nodes:300, edges:600} (OVERSIZED_THRESHOLDS), even though a full re-route there measures ~4.7s (see apply-progress.md's PR0 gate)", () => {
+    // Note: the 15s test timeout below covers building the BASELINE full layout (~4.7s, itself
+    // an unavoidable, un-optimized fixture-setup cost this test measures nothing about) plus the
+    // scoped re-route the assertion below actually times — not a relaxation of the 500ms bound.
+    const graph = flatGraph(300, 600);
+    const baseline = layoutGraph({ graph, diff: [], untrackedPaths: [], overrides: new Map() });
+
+    const movedId = "function:f0";
+    const before = baseline.boxes.get(movedId)!;
+    const overrides = new Map([[movedId, { x: before.x + 300, y: before.y + 300 }]]);
+
+    const start = performance.now();
+    const scoped = layoutGraph({
+      graph,
+      diff: [],
+      untrackedPaths: [],
+      overrides,
+      dragCommit: { movedIds: new Set([movedId]), previousRoutes: baseline.edgeRoutes },
+    });
+    const elapsedMs = performance.now() - start;
+
+    expect(scoped.edges.length).toBe(baseline.edges.length); // every edge still has a path, nothing dropped
+    console.log(`[perf-probe] scoped drag-commit re-route at {nodes:300, edges:600} took ${elapsedMs.toFixed(2)}ms`);
+    expect(elapsedMs).toBeLessThan(500);
+  }, 15_000);
 });
 
 /**

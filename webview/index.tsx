@@ -15,7 +15,8 @@ import {
   type NodeTypes,
 } from "@xyflow/react";
 import { bindRelationshipDetails } from "./relationshipDetails.js";
-import { computeLiveDragUpdate, layoutGraph, type AcmEdge, type Position } from "./graphLayout.js";
+import { computeLiveDragUpdate, layoutGraph, type AcmEdge, type DragCommitScope, type Position } from "./graphLayout.js";
+import type { Point } from "./edgeGeometry.js";
 import { AcmEntityNode } from "./nodes/AcmEntityNode.js";
 import { AcmKindEdge } from "./edges/AcmKindEdge.js";
 import { PositionOverrides, descendantsOf } from "./positionOverrides.js";
@@ -241,6 +242,15 @@ function App() {
   const graphRef = useRef<HTMLDivElement>(null);
   const positionOverrides = useRef(new PositionOverrides()).current;
   const [overrideSeq, setOverrideSeq] = useState(0);
+  /** PR4 scoped drag-drop re-route bookkeeping. `edgeRoutesRef` mirrors the MOST RECENT
+   * `layout.edgeRoutes` (updated by the effect below), so `onNodeDragStop` always has the prior
+   * pass's raw per-edge waypoints to hand a scoped re-route as its carry-forward baseline.
+   * `pendingDragCommitRef` is a one-shot signal: `onNodeDragStop` sets it just before bumping
+   * `overrideSeq`, the `layout` memo below reads it for that ONE recompute, and the effect after
+   * it clears it immediately afterward so a later, non-drag `layout` recompute (e.g. a fresh
+   * `state.graph` snapshot landing) never accidentally replays a stale scope. */
+  const edgeRoutesRef = useRef<Map<number, Point[]>>(new Map());
+  const pendingDragCommitRef = useRef<DragCommitScope | undefined>(undefined);
   /** Snapshot of `expandedRuns` taken right before a refresh-landing re-`inspectSources` request
    * (see the `state.pendingInspect` effect below), consumed by the `diffOps` effect so a landing
    * refresh's diff panel re-render restores the same collapse state — mirrors the old `index.ts`'s
@@ -306,9 +316,24 @@ function App() {
 
   const layout = useMemo(() => {
     if (!state.graph) return undefined;
-    return layoutGraph({ graph: state.graph, diff: state.diff, untrackedPaths: state.untrackedPaths, overrides: new Map(positionOverrides.entries()) });
+    return layoutGraph({
+      graph: state.graph,
+      diff: state.diff,
+      untrackedPaths: state.untrackedPaths,
+      overrides: new Map(positionOverrides.entries()),
+      dragCommit: pendingDragCommitRef.current, // PR4: set only for the ONE recompute a drop triggers
+    });
     // `overrideSeq` is the drag-commit trigger (see `onNodeDragStop`); `positionOverrides` is a stable ref.
   }, [state.graph, state.diff, state.untrackedPaths, overrideSeq]);
+
+  // PR4: mirror the freshly-computed routes for the NEXT drag-commit's scoped re-route, then
+  // one-shot-clear the pending scope so a later, non-drag recompute never replays it.
+  useEffect(() => {
+    if (layout) edgeRoutesRef.current = layout.edgeRoutes;
+  }, [layout]);
+  useEffect(() => {
+    pendingDragCommitRef.current = undefined;
+  }, [overrideSeq]);
 
   /** Live drag-preview positions for the node currently being dragged AND every one of its
    * cascaded descendants (regression fix — see `computeLiveDragUpdate`'s doc comment in
@@ -468,14 +493,22 @@ function App() {
       const before = layout.boxes.get(node.id); // pre-drag absolute box
       const dx = node.position.x - (before?.x ?? node.position.x);
       const dy = node.position.y - (before?.y ?? node.position.y);
+      const movedIds = new Set<string>([node.id]); // PR4: fed to the scoped re-route below
       positionOverrides.set(node.id, { x: node.position.x, y: node.position.y }); // the dragged node itself
       for (const descendantId of descendantsOf(node.id, layout)) {
         // D14 — cascade
+        movedIds.add(descendantId);
         const box = layout.boxes.get(descendantId);
         if (box) positionOverrides.set(descendantId, { x: box.x + dx, y: box.y + dy });
       }
-      setLiveDrag(undefined); // the drop below re-runs the full coordinated layout, which is now authoritative
-      setLiveEdgeOverrides(undefined); // the drop below re-runs the full coordinated router
+      // PR4 (design.md Block F, KEEP — measured 1.6x-18x over the 250ms budget for a full
+      // re-route, see apply-progress.md's PR0 gate): only `movedIds`' own edges get genuinely
+      // re-solved by the upcoming `layoutGraph` call below; every other edge carries its previous
+      // raw waypoints (`edgeRoutesRef.current`, kept in sync by the effect above) forward
+      // unchanged instead of being re-routed from scratch.
+      pendingDragCommitRef.current = { movedIds, previousRoutes: edgeRoutesRef.current };
+      setLiveDrag(undefined); // the drop below re-runs the (now scoped) coordinated layout
+      setLiveEdgeOverrides(undefined); // the drop below re-runs the coordinated router
       setOverrideSeq((s) => s + 1); // re-run layoutGraph
     },
     [layout],
