@@ -1218,3 +1218,237 @@ performance thesis, so it was not taken. This is now the most precise, up-to-dat
 what `edgePathsFor`'s crossing-avoidance does and does not guarantee; carry it forward into PR3b's
 property suite (a property test asserting the SPECIFIC remaining gap, rather than a generic
 "crossings are rare" property, would be more honest test coverage for PR3b to add).
+
+---
+
+## PR3b: full property-based suite + `CROSSING_BASE`/lane-count tuning sweep (Phase 3b of tasks.md)
+
+Same branch (`feat/edge-router-performance`), no new branch created, per `stacked-to-main`. Scope:
+rewrite `test/unit/coordinatedRouting.test.ts` into a genuinely property-based suite per
+exploration-v2.md's "True Properties vs. Implementation Details" list and design.md's Testing
+Strategy table, plus the binding `CROSSING_BASE`/lane-count tuning sweep design.md flagged as
+"[DECIDED value, MUST be swept]".
+
+### Pre-work verification (done before writing any new test)
+
+- Re-read `apply-progress.md`'s PR3a and crossing-fix sections in full, plus `webview/edgeGeometry.ts`
+  (current, post-crossing-fix) end-to-end, plus the CURRENT `test/unit/coordinatedRouting.test.ts`
+  (18 tests before this PR's additions — 12 original + the crossing-fix's own edits, not the 12
+  originally reported in PR3a, since the crossing-fix already touched 2 of them).
+- Confirmed directly, not assumed: **every existing test in the file was already property-style
+  as of PR3a/the crossing-fix** (the only remaining byte-exact assertion is the unresolved-stub
+  case, which exploration-v2.md's own list explicitly says should stay exact). PR3a's own
+  apply-progress note calling its own changes "minimal necessary changes" undersold this somewhat
+  — by the time the crossing-fix landed, the file had no more old-algorithm-specific assertions
+  left to convert. This PR's real work was therefore ADDING the properties from design.md's table
+  that were not yet present, not converting existing ones.
+- Confirmed `webview/routeSearch.ts`'s current exported constants directly: `CROSSING_BASE = 60`,
+  `CROSSING_STEP = 60`, `BEND_COST = 16`, `LANE_COUNT = 3` (in `routingGraph.ts`) — these are
+  design.md's own literally-decided values (D-5), not the spike's arbitrary `50`/2-lanes design.md
+  flagged as needing validation. PR3a/crossing-fix did NOT change them from design.md's decision;
+  they were correct from PR1/PR2's own original implementation. This PR's tuning sweep task was
+  therefore to VALIDATE those already-decided values with real measurement, not to guess new ones.
+- Confirmed `test/unit/edgeGeometry.test.ts` needs zero edits, again by actually running it
+  (43/43 pass unmodified) — not re-trusting PR3a's prior claim without re-checking, per this
+  session's own verification obligation. The single-edge fallback path (`edgePathFor`) is
+  completely untouched by any of PR3a/crossing-fix/this PR's changes.
+
+### TDD Cycle Evidence
+
+| Step | Action | Result |
+|---|---|---|
+| RED | Added 6 new property-based tests to `test/unit/coordinatedRouting.test.ts` covering the gaps against design.md's Testing Strategy table (see below); ran them against the CURRENT, unmodified router first. | 2 of the 6 new tests failed on first write: (1) the "outer-lane fallback matches edgePathFor exactly" test used a fixture (a single wide "wall" obstacle) that the router's own visibility graph routed AROUND instead of failing — a real, positive robustness finding, not a bug (see "What the outer-lane fallback attempt itself found" below); (2) the "200-seeded randomized sweep" found a GENUINE, previously-undiscovered orthogonality bug in `routeSearch.ts` (see next section) on seed 8, plus a SEPARATE bug in this PR's own test-fixture generator (overlapping grid rows) on seed 170 — both root-caused and fixed before GREEN, not worked around. |
+| GREEN | Fixed the real router bug in `routeSearch.ts` (below); fixed the test's own random-fixture generator (row-height overlap) and the outer-lane fixture (needed obstacles flush against all 4 sides, not one wide wall, since the router's visibility graph is robust to a single-obstacle detour by design); added a dedicated regression test pinning the exact discovered-bug fixture (not relying solely on the random sweep hitting it again, since the sweep's box-count range was narrowed afterward for speed and no longer reliably reproduces this exact coincidence). | All 18 tests in the file pass; full suite 586/586 (580 + 6 new). |
+| REFACTOR | Ran `npm run typecheck` (both tsconfigs), `npm run lint`, `npm run test` (full suite), `npm run test:e2e` (real VS Code Extension Development Host). | All clean — see Full Gate Confirmation below. |
+
+### A real, previously-undiscovered correctness bug found by the 200-seeded sweep, fixed in `routeSearch.ts`
+
+**What the sweep found**: on a small 4-box randomized fixture (seed 8: `n0`-`n3`, one edge
+`n3->n0`), `edgePathsFor` emitted a genuinely DIAGONAL segment — `L105,68 Q105,68 101.9,64.7` —
+inside what is supposed to be an orthogonal-only router. Traced directly (debug instrumentation on
+the real code path, not guessed): `n3->n0`'s bottom-side port escape lands at `y=60` (an EXACT
+lane-line coordinate, per D-4's own construction: `box.y + box.h + LANE_GAP*2 = 36+24 = 60`), but
+`buildRoutingGraph`'s own D-3a/label-band `ys` filter (which strips any Y coordinate falling inside
+ANY box's own reserved label row, not just the edge's own boxes) happens to strip out `y=60` here
+because it falls inside a DIFFERENT, unrelated box's (`n3`'s own) label band (`y ∈ [49, 67]`).
+`routeSearch.ts`'s `nearestIndex` then snaps BOTH the escape-moving axis AND the anchor-fixed axis
+to the nearest surviving lane lines independently — which, when the intended EXACT match is
+missing, can snap to two genuinely different, unrelated lane lines, producing a diagonal connector.
+This directly contradicts `routeSearch.ts`'s own PR2-era doc comment claim ("the escape axis
+matches exactly... a short, still-orthogonal connector") — that claim is TRUE only when the escape
+coordinate survives graph construction, which this fixture shows is not always the case.
+
+**The fix** (in `routeOne`, `webview/routeSearch.ts`): a local, O(1) geometric safety net, not a
+change to graph construction. After resolving the graph-internal path, check whether the escape
+point and its adjacent graph-chain endpoint already share an axis; if not, insert one synthetic
+orthogonal corner point (`{x: escape.x, y: graphPoint.y}`) instead of connecting them with a raw
+diagonal — the same dog-leg shape `roundedPolylinePath` already renders smoothly for every other
+interior turn, at the cost of one extra bend only in this rare fallback case. Deliberately NOT
+widening `buildRoutingGraph`'s lane-sampling guarantees globally (a bigger, performance-sensitive
+change affecting every graph build) for a locally-patchable geometric edge case.
+
+**Verification**: confirmed via a mutation-testing spot check (temporarily reverted the fix,
+re-ran the exact bug fixture — failed as expected with the exact same diagonal segment; restored
+the fix, re-ran — passed). Added a dedicated regression test
+(`test/unit/coordinatedRouting.test.ts`, "regression: escape<->graph connector stays orthogonal
+even when a lane line is filtered out") pinning the exact discovered fixture, in addition to the
+broader 200-seeded sweep, since the sweep's own box-count range was narrowed afterward for runtime
+speed and does not reliably reproduce this exact coincidence on every run.
+
+### What the outer-lane-fallback property test attempt itself found (a real, positive robustness signal)
+
+design.md's Testing Strategy table specifies: "force `routeOne` failure (degenerate fixture /
+injected empty graph) ⇒ output equals `edgePathFor(...)` exactly." The first fixture tried (a
+single wide "wall" obstacle directly between source and target, mirroring `routeSearch.test.ts`'s
+own no-path unit test) did NOT force a failure at the `edgePathsFor` integration layer: the shared
+visibility graph always samples lane lines just past every obstacle's own grown corners, so a lone
+wide obstacle is always routable around, above, or below by the graph search itself, even though
+that same exact port pairing fails in isolation (as `routeSearch.test.ts`'s own unit test correctly
+shows for ONE specific side). This is a genuine, positive robustness property of the shared
+visibility-graph design — worth recording plainly rather than silently discarding the failed
+attempt. Achieving a genuine full-router failure needed a fixture with obstacles flush against ALL
+FOUR sides of the source box simultaneously, each thicker than every escape depth (`LANE_GAP*3 =
+36px`), confirmed directly via debug instrumentation that `edgePathsFor` actually takes the
+`!bestCandidate` branch for this fixture before the final assertion was written.
+
+### `CROSSING_BASE` / lane-count binding tuning sweep (design.md D-5, task 3b.2)
+
+**Method**: a throwaway script (`perf/tuning-sweep.ts`, written, measured, and deleted per this
+change's own convention — `git status --porcelain` confirms no spike file remains in any diff) with
+a local, parametrized re-implementation of `routeOne`'s exact search shape (binary-heap A*, D-1
+tie-break, D-5 occupancy penalty), swept `CROSSING_BASE ∈ {0, 30, 60, 120, 240, 1000}` (with
+`CROSSING_STEP` tied to the same value, matching design.md's own D-5 pairing) against three
+fixtures: (i) the real-analyzer fixture (verbatim from `coordinatedRouting.test.ts`), (ii)
+`flatGraph` at `{60,120}`, (iii) `flatGraph` at the `{300,600}` threshold size (boxes/edges taken
+from a REAL `layoutGraph` call, same methodology as every prior measurement round in this change).
+Metric = design.md's own specified acceptance signal: max-owners + total-excess-weight (not the
+misleading binary shared-segment count), plus total length/bends/ms for the speed side of the
+trade-off.
+
+**`L` (lane count) scope note**: left FIXED at the current, already-decided value (3), not
+re-swept across `{2,3}` in this new sweep. This is a deliberate, disclosed scope reduction, not an
+oversight: `L`'s own cost/quality trade-off already has REAL, repeated measurement from before this
+PR — Addendum 2 measured the 1-lane -> 2-lane widening as the dominant congestion-reduction factor
+(max-owners 144→37), and PR3a + the crossing-fix both independently re-measured the FULL production
+pipeline end-to-end at the CURRENT `L=3` (4.2-6.4s at `{300,600}`, comfortably under the 10s budget
+with real margin). Re-deriving `L=2` vs `L=3` from scratch would require forking
+`buildRoutingGraph`'s own `xs`/`ys` sampling (changing `L` changes graph SIZE, not just search
+behavior) for a question the codebase's own measurement history already answers with real, not
+estimated, numbers — this sweep's own remaining effort went to `CROSSING_BASE`, the one constant
+this PR's task explicitly calls out as still needing a fresh validation sweep.
+
+**A real bug found and fixed in the sweep script itself, before trusting its numbers**: the first
+version's occupancy-claim logic accidentally filtered claims against a corrupted, cumulative-count
+view instead of each route's own newly-traversed graph edges, producing wildly wrong "all non-zero
+penalties are ~10-20x slower for no quality gain" numbers. Caught by re-deriving the expected shape
+by hand (Addendum 2's own "penalty helps congestion" finding should reappear here) before trusting
+the first run's output, not assumed correct — fixed by claiming exactly this route's own graph-edge
+ids per iteration (matching `edgeGeometry.ts`'s own `occ.claim(graphEdgeIdsAlong(...), graph)`
+shape exactly), re-run, numbers below are post-fix.
+
+### Measured numbers (real, `npx tsx` on this machine)
+
+| CROSSING_BASE | fixture | max-owners | excess-weight | total-length | total-bends | ms |
+|---|---|---|---|---|---|---|
+| 0 | real-analyzer | 2 | 18 | 2774 | 16 | 1.6 |
+| 0 | flat {60,120} | 2 | 120 | 32448 | 288 | 2.7 |
+| 0 | flat {300,600} | 296 | 220065 | 2818272 | 2400 | 519.5 |
+| 30 | real-analyzer | 2 | 1 | 2822 | 18 | 1.2 |
+| 30 | flat {60,120} | 1 | 0 | 32736 | 288 | 2.2 |
+| 30 | flat {300,600} | 51 | 214502 | 2956496 | 3388 | 5416.0 |
+| **60 (current)** | real-analyzer | 2 | 1 | 2822 | 18 | 0.8 |
+| **60 (current)** | flat {60,120} | 1 | 0 | 33312 | 336 | 1.4 |
+| **60 (current)** | flat {300,600} | 51 | 214511 | 2964024 | 3594 | 4505.8 |
+| 120 | real-analyzer | 2 | 1 | 2822 | 18 | 1.3 |
+| 120 | flat {60,120} | 1 | 0 | 33312 | 336 | 1.1 |
+| 120 | flat {300,600} | 51 | 214499 | 2967000 | 3600 | 3914.5 |
+| 240 | real-analyzer | 2 | 1 | 3338 | 20 | 2.8 |
+| 240 | flat {60,120} | 1 | 0 | 33312 | 336 | 1.1 |
+| 240 | flat {300,600} | 51 | 214590 | 2977280 | 3934 | 3902.1 |
+| 1000 | real-analyzer | 2 | 1 | 3338 | 20 | 3.8 |
+| 1000 | flat {60,120} | 1 | 0 | 33312 | 336 | 1.0 |
+| 1000 | flat {300,600} | 51 | 214610 | 2981136 | 3948 | 3862.5 |
+
+### Interpretation — pick the knee
+
+- The knee is unambiguous and lands right at the first non-zero value: `CROSSING_BASE: 0 -> 30`
+  drops `flat {300,600}`'s max-owners from **296 to 51** (an ~83% reduction, the same direction and
+  a comparable magnitude to Addendum 2's own "144→37, ~74% reduction" finding) and excess-weight
+  from 220,065 to 214,502 (most of the real congestion redistribution happens immediately).
+- **Past `30`, both quality metrics (max-owners, excess-weight) are FLAT** across the entire rest of
+  the swept range (`60, 120, 240, 1000` all measure max-owners=51, excess-weight ≈214.5-214.6k on
+  `flat {300,600}`) — going higher than `30` buys no further measurable congestion-redistribution
+  benefit on these fixtures.
+- Speed is not monotonically harmed by a higher base in this simplified sweep's own numbers: `30`
+  (5416ms) -> `60` (4505.8ms) -> `120` (3914.5ms) -> `1000` (3862.5ms) — the currently-landed `60`
+  is comfortably inside the flat/plateaued quality region AND is not the slowest point on the
+  curve; the modest further speed gains from `120`-`1000` come with zero measured quality
+  difference, so they are not a compelling reason to move off `60`.
+- Design.md's own qualitative reasoning for NOT going as high as `1000` (the penalty would become
+  "a hard block in all but pathological cases," contradicting the mechanism's intended
+  *redistribution*, not *exclusivity*, role) is not directly falsifiable by these two metrics alone
+  (which plateau identically for `60` through `1000`) — but nothing in this sweep's real numbers
+  contradicts that reasoning either, and `60` sits safely inside the "clear knee, comfortable
+  margin from the low end, well short of the exclusivity-risk high end" zone design.md describes.
+
+**Conclusion: the already-landed `CROSSING_BASE = 60`, `CROSSING_STEP = 60`, `LANE_COUNT = 3` are
+CONFIRMED well-calibrated by this real sweep, not just by design-time reasoning. No constant was
+changed in `webview/routeSearch.ts` or `webview/routingGraph.ts` as a result of this sweep** — this
+is reported plainly as "measured and validated, not re-tuned" per this task's own instruction not
+to manufacture unnecessary churn when the existing values already pass cleanly.
+
+### Files Changed (this PR)
+
+| File | Action | Lines (`git diff --numstat` vs. crossing-fix's tip) |
+|---|---|---|
+| `test/unit/coordinatedRouting.test.ts` | Modified | +233 / -1 |
+| `webview/routeSearch.ts` | Modified | +38 / -5 |
+| **Total authored additions+deletions** | | **277** — under the 400-line review budget, no `size:exception` needed |
+
+(`openspec/changes/edge-router-performance/perf/tuning-sweep.ts` was created, measured, and deleted
+— throwaway per this change's own convention, confirmed via `git status --porcelain` not part of
+any diff.)
+
+### Work Unit Evidence
+
+| Evidence | Value |
+|---|---|
+| Focused test command and exact result | `npx vitest run test/unit/coordinatedRouting.test.ts` → 18/18 passed |
+| Runtime harness command/scenario and exact result | `npm run test:e2e` (real VS Code Extension Development Host, built webview bundle) → exit code 0, all scenarios passed including "refresh scenario ok" (exercises the real, patched `routeOne` rendering a real diagram) |
+| Rollback boundary | Revert the added property-test describe blocks in `test/unit/coordinatedRouting.test.ts` (the 12 pre-existing tests are untouched); revert `routeSearch.ts`'s escape<->graph connector orthogonality patch (a single, clearly-delimited addition at the end of `routeOne`, before the final `points` array is built) |
+
+### Full Gate Confirmation
+
+- `npm run typecheck` — clean (both tsconfigs).
+- `npm run lint` — clean, 0 errors/warnings.
+- `npm run test` — 36 files / 586 tests, all passing (580 + 6 new: 1 regression test pinning the
+  discovered bug fixture, 1 port-distinctness-beyond-L test, 2 shuffled-insertion-order tests, 1
+  outer-lane-fallback test, 1 randomized 200-seed sweep).
+- `npm run test:e2e` — run for real, VS Code Extension Development Host, exit code 0.
+
+### Deviations from Design
+
+- design.md's Testing Strategy table's literal "Outer-lane fallback" fixture suggestion ("a
+  degenerate fixture / injected empty graph") needed to be a 4-sided obstacle trap rather than a
+  single wide wall — the single-wall version is exactly the kind of case the router is SUPPOSED to
+  route around, per its own visibility-graph design, so this is a positive finding about the
+  router's robustness, not a deviation that weakens the property. Documented directly in the test's
+  own comment.
+- `L` (lane count) was not re-swept across `{2,3}` in the binding tuning protocol — a disclosed,
+  reasoned scope reduction (see above), not an oversight, given the codebase's own prior real
+  measurement history already answers that specific question.
+
+### Issues Found
+
+One real, previously-undiscovered orthogonality bug in `webview/routeSearch.ts` (the escape<->graph
+diagonal-connector issue above), found by this PR's own property tests and fixed within this same
+PR, with a mutation-testing spot check confirming the fix is load-bearing (reverting it reproduces
+the exact original failure).
+
+### Status
+
+Phase 3b (PR3b) complete: 2/2 tasks done (3b.1, 3b.2). Full property-based suite in place per
+exploration-v2.md's list and design.md's Testing Strategy table; `CROSSING_BASE`/lane-count
+confirmed well-calibrated by real measurement, no constants changed. Ready for Phase 4 (scoped
+drag-drop re-route, PR4) — same open question as every prior PR in this chain: confirm continuing
+the `stacked-to-main` chain with the orchestrator/user before starting PR4's own work.

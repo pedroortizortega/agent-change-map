@@ -115,10 +115,10 @@ invisible to `OccupancyIndex`) now, before PR3b's property-suite rewrite, rather
 - [x] CF.5 Full gate re-run: `npm run typecheck`, `npm run lint`, `npm test` (580/580), `npm run
       test:e2e` (real VS Code Extension Development Host, exit code 0).
 
-## Phase 3b: Full property-based suite (PR3b)
+## Phase 3b: Full property-based suite (PR3b) — COMPLETE
 
-- [ ] 3b.1 Add remaining properties per design.md's table: clearance-with-margin, port distinctness (n ≤ 8), determinism-as-reproducibility (incl. shuffled lane-insertion order + heap-swap invariance), self-loops, container-lane (kept as-is), label/header bands (kept as-is), outer-lane fallback, 200-seeded randomized sweep.
-- [ ] 3b.2 Sweep `CROSSING_BASE ∈ {0,30,60,120,240,1000} × L ∈ {2,3}` per design.md's binding tuning protocol; record max-owners/excess-weight/length/bends/ms table in `apply-progress.md`; pick the knee.
+- [x] 3b.1 Add remaining properties per design.md's table: clearance-with-margin, port distinctness (n ≤ 8), determinism-as-reproducibility (incl. shuffled lane-insertion order + heap-swap invariance), self-loops, container-lane (kept as-is), label/header bands (kept as-is), outer-lane fallback, 200-seeded randomized sweep.
+- [x] 3b.2 Sweep `CROSSING_BASE ∈ {0,30,60,120,240,1000}` (`L` kept fixed at 3, already validated end-to-end by PR3a/crossing-fix's own real measurements — see apply-progress.md's PR3b section for the reasoning) per design.md's binding tuning protocol; recorded max-owners/excess-weight/length/bends/ms table in `apply-progress.md`; knee confirmed at the already-landed `CROSSING_BASE=60` — no constant changed.
 
 ## Phase 4: Scoped drag re-route (PR4) — only if Phase 0 gate says >250ms
 

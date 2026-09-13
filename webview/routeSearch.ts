@@ -306,12 +306,45 @@ export function routeOne(
   }
   nodeChain.reverse();
 
-  const points: Point[] = [start.anchor, start.escape];
-  for (const node of nodeChain) {
+  const graphPoints: Point[] = nodeChain.map((node) => {
     const { xi, yi } = decode(node, g.ys.length);
-    points.push({ x: g.xs[xi], y: g.ys[yi] });
-  }
-  points.push(goal.escape, goal.anchor);
+    return { x: g.xs[xi], y: g.ys[yi] };
+  });
+
+  // Orthogonality safety net for the escape<->graph connector. `nearestIndex` resolves each axis
+  // independently, and the doc comment above assumes the port's escape-moving axis always lands
+  // on an EXACT sampled lane line (true by `allocatePort`'s own construction) — but `xs`/`ys` are
+  // NOT simply every sampled corner: `buildRoutingGraph`'s D-3a/label-band filters can drop a
+  // candidate `ys` value that happens to coincide with an UNRELATED box's own label row or a
+  // container's forbidden band, even when that exact value is also some OTHER port's exact escape
+  // coordinate. When that happens, `nearestIndex` snaps BOTH the escape-moving axis and the
+  // anchor-fixed axis to the nearest surviving lane line, and the two axes can snap to different,
+  // unrelated lane lines — producing a genuinely diagonal connector segment, breaking the
+  // orthogonal-only contract every caller relies on (found via PR3b's 200-seeded randomized
+  // property sweep, not a hypothetical: a bottom-port escape whose exact `y` fell inside an
+  // unrelated box's label band reproduced this precisely). Rather than widening
+  // `buildRoutingGraph`'s lane-sampling guarantees (a global, performance-sensitive change), this
+  // stays a local, O(1) geometric patch: if the escape point and the adjacent graph-chain
+  // endpoint don't already share an axis, insert one synthetic corner that does — the same
+  // dog-leg shape `roundedPolylinePath`'s corner-rounding already renders smoothly for every
+  // other interior turn, at the cost of one extra bend only in this rare fallback case.
+  const aligned = (a: Point, b: Point): boolean => a.x === b.x || a.y === b.y;
+  const cornerVia = (escape: Point, graphPoint: Point): Point => ({ x: escape.x, y: graphPoint.y });
+
+  const firstGraph = graphPoints[0];
+  const lastGraph = graphPoints[graphPoints.length - 1];
+  const startConnector: Point[] = firstGraph && !aligned(start.escape, firstGraph) ? [cornerVia(start.escape, firstGraph)] : [];
+  const goalConnector: Point[] = lastGraph && !aligned(lastGraph, goal.escape) ? [cornerVia(goal.escape, lastGraph)] : [];
+
+  const points: Point[] = [
+    start.anchor,
+    start.escape,
+    ...startConnector,
+    ...graphPoints,
+    ...goalConnector,
+    goal.escape,
+    goal.anchor,
+  ];
 
   return dedupeAdjacent(points);
 }
