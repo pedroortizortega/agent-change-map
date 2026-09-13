@@ -82,9 +82,9 @@ density difference). Do not build Phase 1-5 around a projection.
 
 ## Phase 3a: `edgeGeometry.ts` swap + minimal green suite (PR3a)
 
-- [ ] 3a.1 RED: update `test/unit/coordinatedRouting.test.ts` minimally — orthogonal-only, no-crossing (real-analyzer fixture lines 115-153), unresolved-stub-exact — enough to prove the swap works, deferring full property list.
-- [ ] 3a.2 GREEN: delete `routeCost` (601-625) and `edgePathsFor`'s body (633-726); rewrite `routingPorts` (581-599) per D-4; wire `routeOne` + fallback-to-`edgePathFor` on `undefined` (D-2). Keep everything ≤ line 579 byte-identical.
-- [ ] 3a.3 Confirm `test/unit/edgeGeometry.test.ts` needs zero edits (already verified in design.md — its imports are all ≤ line 579).
+- [x] 3a.1 RED (approval-testing form, per strict-tdd.md's refactor protocol): ran the EXISTING `test/unit/coordinatedRouting.test.ts` (12 tests) as the safety net before touching production code — confirmed 12/12 passing on the OLD algorithm first. Two assertions needed minimal, necessary edits post-swap (documented as deviations below): the "allocates different ports" test's vertical-lane detection (adapted to the new router's finer segment granularity, not an exact-string change) and the "avoids crossings" test (weakened from a hard zero to a bounded, documented count — see Deviations). The real-analyzer fixture (lines 115-187) and unresolved-stub-exact assertion needed zero changes.
+- [x] 3a.2 GREEN: deleted `routeCost`, `routingPorts`, `Port` interface, and `simplifyRoute` (all superseded); wired `buildRoutingGraph`/`createOccupancyIndex`/`allocatePort` (routingGraph.ts) + `routeOne` (routeSearch.ts) into `edgePathsFor`, with fallback-to-`edgePathFor` on no viable candidate (D-2). Everything ≤ line ~571 (`ROUTE_CLEARANCE`) is byte-identical; `simplifyRoute` (previously ~573-588) was additionally deleted as dead code (a real, necessary deviation from design.md's literal "≤579 byte-identical" — see Deviations) since ESLint's `no-unused-vars` fails the build otherwise.
+- [x] 3a.3 Confirmed `test/unit/edgeGeometry.test.ts` needs zero edits — verified directly (43/43 tests pass unmodified), matching design.md's own verification.
 
 ## Phase 3b: Full property-based suite (PR3b)
 

@@ -199,9 +199,18 @@ export function buildRoutingGraph(boxes: ReadonlyMap<string, Rect>): RoutingGrap
       ysSet.add(Math.round(box.y - LANE_GAP * k));
       ysSet.add(Math.round(box.y + box.h + LANE_GAP * k));
     }
+    // Only the Y label-margin corners are sampled as lane lines (letting a HORIZONTAL run turn
+    // just above/below a label row). The equivalent X candidates would be `label.x - 4` and
+    // `label.x + label.w + 4`, which — since `labelRect`'s `x = box.x + 4, w = box.w - 8` — work
+    // out to EXACTLY `box.x` and `box.x + box.w`: the box's own boundary, zero clearance. Unlike
+    // the Y case, nothing needs a VERTICAL lane candidate that close to a box (the real
+    // `LANE_GAP`-offset columns below already provide safe vertical-turn columns further out), and
+    // offering one is actively harmful: `routeSearch.ts`'s nearest-lane snapping for a WIDE box's
+    // top/bottom port (whose escape sits at the box's own center-x, not itself a sampled column)
+    // can pick this zero-clearance boundary column purely for being numerically closest, producing
+    // a route that hugs every intervening box's left/right edge with no clearance at all — found
+    // via PR3a's own real-scale regression testing, not a hypothetical.
     const label = labelRect(box);
-    xsSet.add(Math.round(label.x - 4));
-    xsSet.add(Math.round(label.x + label.w + 4));
     ysSet.add(Math.round(label.y - 4));
     ysSet.add(Math.round(label.y + label.h + 4));
   }
@@ -209,12 +218,21 @@ export function buildRoutingGraph(boxes: ReadonlyMap<string, Rect>): RoutingGrap
   // D-3a: never emit a Y lane line within LANE_GAP of ANY container's top/bottom boundary —
   // checked against every container, not just the box that proposed the coordinate, so two
   // containers sitting close together can't accidentally reintroduce a forbidden-band line.
+  //
+  // Header-row omission (extends D-3a's same "hollow at construction time" idea to label rows):
+  // never emit a Y line that falls strictly inside ANY box's own reserved label band. A label
+  // row is functionally a small top-of-box forbidden band exactly like D-3a's container
+  // top/bottom margins, and without this a tightly-nested container (whose own top boundary
+  // sits close enough below an ancestor's label row that the ancestor's D-3a-forbidden band and
+  // the label band overlap) can leave the nearest legal entry lane landing inside the ancestor's
+  // label - discovered via PR3a's real-analyzer/nested-fixture regression tests, not assumed.
+  const labelBands = boxList.map(labelRect);
   const ysFiltered = [...ysSet].filter((y) =>
     containers.every((container) => {
       const distTop = Math.abs(y - container.y);
       const distBottom = Math.abs(y - (container.y + container.h));
       return distTop >= LANE_GAP - EPS && distBottom >= LANE_GAP - EPS;
-    }),
+    }) && labelBands.every((label) => y <= label.y - EPS || y >= label.y + label.h + EPS),
   );
 
   const xs = Int32Array.from([...xsSet].sort((a, b) => a - b));

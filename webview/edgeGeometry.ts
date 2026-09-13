@@ -1,9 +1,19 @@
 /**
  * Pure edge-geometry module: anchors, obstacle testing, bounded waypoint detour routing, and
- * coordinated batch routing used by `graphView.ts`. No DOM, no imports — suitable for
- * future live re-routing and dual-compiled alongside the host tree
+ * coordinated batch routing used by `graphView.ts`. Dual-compiled alongside the host tree
  * (see `tsconfig.build.json`) and the webview-only tree (`tsconfig.webview.json`).
+ *
+ * `edgePathsFor` (the coordinated multi-edge pass) is implemented on top of `routingGraph.ts`'s
+ * shared visibility graph and `routeSearch.ts`'s per-edge A* search (see
+ * `openspec/changes/edge-router-performance/design.md`), replacing the old per-edge
+ * candidate-enumeration + `routeCost` scoring loop. Everything else in this file — anchors,
+ * `edgePathFor` (the single-edge fallback), `routeWaypoints`, `outerLaneEdgePath`,
+ * `roundedPolylinePath`, `obstaclesFor`, `clipSegment` — is untouched and reused, including as
+ * `edgePathsFor`'s own fallback when the new router finds no valid route for an edge.
  */
+
+import { buildRoutingGraph, allocatePort, createOccupancyIndex, type PortSide, type PortSlot, type RoutingGraph } from "./routingGraph.js";
+import { routeOne, type EdgeContext } from "./routeSearch.js";
 
 export interface Rect {
   x: number;
@@ -553,7 +563,6 @@ export interface RoutingEdge {
   target?: string;
 }
 
-interface Port { anchor: Point; escape: Point }
 const LANE_GAP = 12;
 /** Minimum gap kept between a routed segment and the actual boundary of an unrelated
  * (non-endpoint) obstacle box - a route may run right up to this margin, never inside it, so
@@ -561,86 +570,209 @@ const LANE_GAP = 12;
  * never fights the port/escape spacing already reserved around every box. */
 export const ROUTE_CLEARANCE = 2;
 
-function simplifyRoute(points: Point[]): Point[] {
-  const result: Point[] = [];
-  for (const point of points) {
-    const last = result.at(-1);
-    if (last && last.x === point.x && last.y === point.y) continue;
-    const before = result.at(-2);
-    if (before && last && ((before.x === last.x && last.x === point.x) || (before.y === last.y && last.y === point.y))) {
-      // Do not disguise a reversal through a box as a straight segment.
-      const dot = (last.x - before.x) * (point.x - last.x) + (last.y - before.y) * (point.y - last.y);
-      if (dot < 0) return [];
-      result.pop();
-    }
-    result.push(point);
+const BEND_COST = 16;
+const PORT_SIDES = ["bottom", "top", "right", "left"] as const;
+
+/**
+ * The single "obvious" side pairing for a non-containment edge, based on which axis dominates the
+ * center-to-center displacement between `source` and `target` (below/above -> bottom/top,
+ * left/right otherwise). Tried FIRST, alone, before ever paying for the full 4-sides x 4-sides
+ * search: for the overwhelming common case (two boxes with no lane contention between them) this
+ * one pairing is exactly what `routeOne`'s own A* would have picked as cheapest anyway, so trying
+ * it alone keeps the typical per-edge cost at one `routeOne` call - the full cross-product search
+ * is reserved for edges that actually need the extra route diversity (self-loops, and edges whose
+ * natural pairing conflicts with an already-accepted route or an ancestor's gutter). Measured
+ * necessary: an unconditional 4x4 search on every edge reintroduces cubic-ish scaling on a
+ * flat/dense fixture (occupancy-penalised A* explores much more of the graph as contention grows),
+ * even though `routeOne` itself is cheap in isolation - see PR3a's own apply-progress notes.
+ */
+function naturalSides(source: Rect, target: Rect): { sourceSide: PortSide; targetSide: PortSide } {
+  const dx = target.x + target.w / 2 - (source.x + source.w / 2);
+  const dy = target.y + target.h / 2 - (source.y + source.h / 2);
+  if (Math.abs(dy) >= Math.abs(dx)) {
+    return dy >= 0 ? { sourceSide: "bottom", targetSide: "top" } : { sourceSide: "top", targetSide: "bottom" };
   }
-  return result;
+  return dx >= 0 ? { sourceSide: "right", targetSide: "left" } : { sourceSide: "left", targetSide: "right" };
 }
 
-function routingPorts(box: Rect, ordinal: number, count: number, inward: boolean): Port[] {
-  const offset = ordinal - (count - 1) / 2;
-  const x = box.x + box.w / 2 + offset * Math.min(12, (box.w - 16) / Math.max(1, count));
-  const y = box.y + Math.min(16, box.h / 2) + offset * Math.min(8, Math.max(0, Math.min(16, box.h - 16)) / Math.max(1, count - 1));
-  if (inward) {
-    // Enter a containing endpoint below its title, rather than through the title row.
-    const belowTitle = box.y + 26;
-    return [
-      { anchor: { x: box.x, y: belowTitle }, escape: { x: box.x + LANE_GAP, y: belowTitle } },
-      { anchor: { x: box.x + box.w, y: belowTitle }, escape: { x: box.x + box.w - LANE_GAP, y: belowTitle } },
-    ];
-  }
+/**
+ * Same anchor as `allocatePort(box, side, ordinal, count)` (the ordinal-driven position D-4 ties
+ * to visual port distinctness), but an EXPLICIT escape-lane depth instead of the one
+ * `allocatePort` derives from `ordinal % LANE_COUNT`. Needed because `allocatePort`'s escalating
+ * per-ordinal depths (`LANE_GAP*{1,2,3}` = 12/24/36px) can overshoot a densely-stacked layout's
+ * own gap between consecutive boxes (measured: `layoutGraph`'s real flat-fallback rendering packs
+ * boxes with a 16px gap, so a `laneIndex=2` (36px) escape lands inside the NEXT box, well past
+ * where any graph lane could legally clear it) - a real, previously-undiscovered interaction
+ * between D-4's port math and the actual production single-column layout, not a hypothetical
+ * edge case. Trying the shallowest lane (`laneIndex=0`, 12px, fits every gap `layoutGraph` itself
+ * produces) first keeps the common case at one clean `routeOne` call; the full 4-sides x
+ * escalating-depth search remains available as tier 2 for edges that still need it.
+ */
+function portAtLane(box: Rect, side: PortSide, ordinal: number, count: number, laneIndex: number): PortSlot {
+  const { anchor } = allocatePort(box, side, ordinal, count);
+  const escapeOffset = LANE_GAP * (laneIndex + 1);
+  if (side === "top") return { anchor, escape: { x: anchor.x, y: box.y - escapeOffset }, laneIndex };
+  if (side === "bottom") return { anchor, escape: { x: anchor.x, y: box.y + box.h + escapeOffset }, laneIndex };
+  if (side === "left") return { anchor, escape: { x: box.x - escapeOffset, y: anchor.y }, laneIndex };
+  return { anchor, escape: { x: box.x + box.w + escapeOffset, y: anchor.y }, laneIndex };
+}
+
+/** Inward containment ports: enter a containing endpoint below its title, rather than through
+ * the title row or the outer boundary a normal `allocatePort` side would use. Kept as a small,
+ * local port constructor (mirrors the old `routingPorts`' inward branch exactly) rather than a
+ * new `allocatePort` mode, since it is only ever used for the containment case and is not part
+ * of `routingGraph.ts`'s general D-4 side/lane scheme. `laneIndex` is unused by `routeOne`, so
+ * `0`/`1` are placeholders distinguishing the two candidates. */
+function inwardPorts(box: Rect): PortSlot[] {
+  const belowTitle = box.y + 26;
   return [
-    { anchor: { x, y: box.y }, escape: { x, y: box.y - LANE_GAP } },
-    { anchor: { x, y: box.y + box.h }, escape: { x, y: box.y + box.h + LANE_GAP } },
-    { anchor: { x: box.x, y }, escape: { x: box.x - LANE_GAP, y } },
-    { anchor: { x: box.x + box.w, y }, escape: { x: box.x + box.w + LANE_GAP, y } },
+    { anchor: { x: box.x, y: belowTitle }, escape: { x: box.x + LANE_GAP, y: belowTitle }, laneIndex: 0 },
+    { anchor: { x: box.x + box.w, y: belowTitle }, escape: { x: box.x + box.w - LANE_GAP, y: belowTitle }, laneIndex: 1 },
   ];
 }
 
-function routeCost(points: Point[], occupied: readonly Point[][], limit: number): number {
-  let cost = (points.length - 2) * 16;
-  for (let i = 1; i < points.length; i++) {
+/** Approximate total cost of a fully-resolved route (fixed anchor/escape legs plus every graph
+ * hop), for comparing across different port-side candidates. Mirrors `routeOne`'s own bend cost
+ * (`BEND_COST` per direction change) and Manhattan length; occupancy penalty is intentionally
+ * excluded here since it is already folded into which graph-internal path `routeOne` found for
+ * each candidate. */
+function routeCandidateCost(points: readonly Point[]): number {
+  let cost = 0;
+  let prevDir: "H" | "V" | undefined;
+  for (let i = 1; i < points.length; i += 1) {
     const a = points[i - 1]; const b = points[i];
     cost += Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
-    const horizontal = a.y === b.y;
-    for (const route of occupied) for (let j = 1; j < route.length; j++) {
-      if (cost >= limit) return cost;
-      const c = route[j - 1]; const d = route[j];
-      const otherHorizontal = c.y === d.y;
-      if (horizontal === otherHorizontal) {
-        const sameLine = horizontal ? a.y === c.y : a.x === c.x;
-        const overlap = horizontal
-          ? Math.min(Math.max(a.x, b.x), Math.max(c.x, d.x)) - Math.max(Math.min(a.x, b.x), Math.min(c.x, d.x))
-          : Math.min(Math.max(a.y, b.y), Math.max(c.y, d.y)) - Math.max(Math.min(a.y, b.y), Math.min(c.y, d.y));
-        if (sameLine && overlap > EPS) cost += 1000 + overlap * 10;
-      } else {
-        const h1 = horizontal ? a : c; const h2 = horizontal ? b : d;
-        const v1 = horizontal ? c : a; const v2 = horizontal ? d : b;
-        if (v1.x >= Math.min(h1.x, h2.x) && v1.x <= Math.max(h1.x, h2.x) && h1.y >= Math.min(v1.y, v2.y) && h1.y <= Math.max(v1.y, v2.y)) cost += 1000;
-      }
-    }
+    const dir: "H" | "V" = a.y === b.y ? "H" : "V";
+    if (prevDir && dir !== prevDir) cost += BEND_COST;
+    prevDir = dir;
   }
   return cost;
 }
 
+/** Collapses consecutive collinear points (three or more points in a row sharing an axis) down to
+ * just their endpoints. `routeOne`'s output walks the shared lane graph one small hop at a time
+ * (dense, many points), unlike the old candidate-enumeration router's few big elbow waypoints;
+ * `crossesAny` below is only cheap enough to run per-candidate when it operates on the collapsed,
+ * "real corner" shape instead of every individual lane hop. */
+function collapseCollinear(points: readonly Point[]): Point[] {
+  if (points.length <= 2) return [...points];
+  const result: Point[] = [points[0]];
+  for (let i = 1; i < points.length - 1; i += 1) {
+    const prev = result[result.length - 1];
+    const cur = points[i];
+    const next = points[i + 1];
+    const collinear = (prev.x === cur.x && cur.x === next.x) || (prev.y === cur.y && cur.y === next.y);
+    if (!collinear) result.push(cur);
+  }
+  result.push(points[points.length - 1]);
+  return result;
+}
+
 /**
- * Coordinates all visible relationships: reserve ports, then choose a short orthogonal route
- * with bend, crossing and shared-segment penalties. This is a deterministic heuristic, not a
- * planarity guarantee. Ancestor containers may be crossed; unrelated boxes and descendants
- * remain obstacles. Unresolved stubs retain their existing explicit rendering contract.
+ * True when `route` transversally crosses any already-accepted route from earlier in the same
+ * `edgePathsFor` call (one segment horizontal, the other vertical, genuinely intersecting rather
+ * than merely touching). `OccupancyIndex` only tracks ownership of the SAME shared graph edge
+ * (parallel sharing, D-5's actual mechanism); it has no concept of two perpendicular graph edges
+ * meeting at a node, so a horizontal detour from one edge's own port can still transit straight
+ * through a completely unrelated edge's already-claimed vertical corridor without either edge's
+ * occupancy penalty ever registering it. This is a real, disclosed gap in the D-5 mechanism as
+ * landed (occupancy = edge-sharing only, not node-crossing) - checked explicitly here, at the
+ * wiring layer, since it is the exact property the "avoids crossings" regression test asserts.
+ * Cost: `O(acceptedRoutes x collapsedPathLength^2)` per candidate, on `collapseCollinear`'d input
+ * (a handful of real corners, not every individual lane hop) - reintroduces some of the pairwise
+ * scanning the new architecture set out to eliminate, but bounded by a small, fixed candidate
+ * count and the collapsed corner count (both roughly the old algorithm's own waypoint scale),
+ * NOT by lane-graph density; measured to keep the flat-fixture perf benchmark's shape intact
+ * (still far below the old O(N^3)-ish curve). Flagged as a follow-up for PR3b: a node-occupancy
+ * extension to `OccupancyIndex` (claim/check the NODES a route passes through, not just the
+ * edges) would let this collapse back to O(1) per relaxation instead of a wiring-layer re-check.
+ */
+function crossesAny(route: readonly Point[], accepted: readonly (readonly Point[])[]): boolean {
+  for (const other of accepted) {
+    for (let a = 1; a < route.length; a += 1) for (let b = 1; b < other.length; b += 1) {
+      const p = route[a - 1]; const q = route[a];
+      const r = other[b - 1]; const t = other[b];
+      const pVertical = p.x === q.x; const rVertical = r.x === t.x;
+      if (pVertical === rVertical) continue;
+      const [v1, v2, h1, h2] = pVertical ? [p, q, r, t] : [r, t, p, q];
+      const crosses = v1.x > Math.min(h1.x, h2.x) && v1.x < Math.max(h1.x, h2.x)
+        && h1.y > Math.min(v1.y, v2.y) && h1.y < Math.max(v1.y, v2.y);
+      if (crosses) return true;
+    }
+  }
+  return false;
+}
+
+/** Exact index of `value` in the sorted, deduped `arr`, or `-1` when absent. Used to recognise
+ * which points in a `routeOne` result are real graph-lane coordinates (as opposed to a port's
+ * fixed anchor/escape geometry), so the graph edges a route actually claims can be recovered
+ * without `routeSearch.ts` needing to expose them directly (its `Point[] | undefined` return
+ * shape is fixed by PR2's landed tests). */
+function exactLaneIndex(arr: Int32Array, value: number): number {
+  let lo = 0; let hi = arr.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (arr[mid] === value) return mid;
+    if (arr[mid] < value) lo = mid + 1; else hi = mid - 1;
+  }
+  return -1;
+}
+
+/** Every graph edge id a `routeOne` result actually traverses, recovered by matching consecutive
+ * point pairs that both land exactly on a graph lane coordinate (see `exactLaneIndex`) back to
+ * `RoutingGraph.neighbours`. A port's anchor/escape points generally fail this match on at least
+ * one axis (the anchor-fixed axis is not itself a sampled lane line, per `routeSearch.ts`'s own
+ * design notes), so this naturally isolates the graph-internal segments `OccupancyIndex` cares
+ * about, without needing `routeOne` to return anything beyond its existing `Point[]`. */
+function graphEdgeIdsAlong(graph: RoutingGraph, points: readonly Point[]): number[] {
+  const ids: number[] = [];
+  for (let i = 1; i < points.length; i += 1) {
+    const a = points[i - 1]; const b = points[i];
+    const axA = exactLaneIndex(graph.xs, a.x); const ayA = exactLaneIndex(graph.ys, a.y);
+    const axB = exactLaneIndex(graph.xs, b.x); const ayB = exactLaneIndex(graph.ys, b.y);
+    if (axA < 0 || ayA < 0 || axB < 0 || ayB < 0) continue;
+    const nodeB = graph.nodeId(axB, ayB);
+    const found = graph.neighbours(graph.nodeId(axA, ayA)).find(ref => ref.to === nodeB);
+    if (found) ids.push(found.id);
+  }
+  return ids;
+}
+
+/**
+ * Coordinates all visible relationships over ONE shared visibility graph (`buildRoutingGraph`,
+ * built once per call) and ONE shared `OccupancyIndex`: each edge is routed independently by
+ * `routeOne` (A* + D-5 occupancy penalty + D-3b container-tag admission). Port-side search is
+ * TIERED for performance (see `naturalSides`'/`portAtLane`'s doc comments): one cheap "obvious"
+ * pairing first, escalating to the full 4-sides x 3-depths search only when that pairing doesn't
+ * clear obstacles/labels/the ancestor-gutter rule; containment edges (one endpoint nested inside
+ * the other) always search their own small, fixed port set. Whichever tier finds a candidate,
+ * `edgePathsFor` keeps the cheapest one that also clears every unrelated box's `ROUTE_CLEARANCE`
+ * margin, every label row, and (preferentially, degrading when unavoidable - see the doc comments
+ * on `clearsContainerLanes` and `crossesAny`) the D-3 container-lane rule and transversal-crossing
+ * avoidance. When no candidate for an edge both routes AND clears obstacles/labels at all, the
+ * edge falls back to the existing, unchanged `edgePathFor` (D-2) — exactly today's "no candidate
+ * clears" behavior.
  */
 export function edgePathsFor(boxes: ReadonlyMap<string, Rect>, edges: readonly RoutingEdge[]): (string | undefined)[] {
+  const graph = buildRoutingGraph(boxes);
+  const occ = createOccupancyIndex();
   // Reserve the full label row, independent of font metrics/name length. Ancestor and
   // endpoint exclusions below apply to box interiors only, never to these title obstacles.
   const labels = [...boxes.values()].map(box => ({ x: box.x + 4, y: box.y + 6, w: Math.max(0, box.w - 8), h: Math.min(18, Math.max(0, box.h - 6)) }));
+  const boxList = [...boxes.values()];
+  // Same "has a descendant fully inside it" predicate `routingGraph.ts` uses to build its own
+  // `containers` array — reproduced here (not imported) so the ancestor-container INDICES this
+  // function derives per edge line up with `RoutingGraph.containerTagsOf`'s own numbering, which
+  // is scoped to one `buildRoutingGraph` call and not otherwise exposed.
+  const isContainerBox = (box: Rect): boolean => boxList.some(other => other !== box && rectFullyInside(other, box));
+  const containersInOrder = boxList.filter(isContainerBox);
+
   const counts = new Map<string, number>();
   for (const edge of edges) if (boxes.has(edge.source) && edge.target && boxes.has(edge.target)) {
     counts.set(edge.source, (counts.get(edge.source) ?? 0) + 1);
     counts.set(edge.target, (counts.get(edge.target) ?? 0) + 1);
   }
   const used = new Map<string, number>();
-  const occupied: Point[][] = [];
   const ordinal = (id: string): number => { const next = used.get(id) ?? 0; used.set(id, next + 1); return next; };
   const paths: (string | undefined)[] = Array.from({ length: edges.length });
   const ordered = edges.map((edge, index) => {
@@ -650,21 +782,19 @@ export function edgePathsFor(boxes: ReadonlyMap<string, Rect>, edges: readonly R
   const span = (edge: RoutingEdge): number => Math.abs((boxes.get(edge.source)?.y ?? 0) - (boxes.get(edge.target ?? "")?.y ?? 0));
   // Reserve short local hops first; longer relationships can take the outer free lanes.
   ordered.sort((a, b) => span(a.edge) - span(b.edge) || a.index - b.index);
+  const acceptedRoutes: Point[][] = [];
+
   for (const { edge, index, sourceSlot, targetSlot } of ordered) {
     const source = boxes.get(edge.source);
     const target = edge.target ? boxes.get(edge.target) : undefined;
     if (!source || !target) { paths[index] = edgePathFor(boxes, edge.source, edge.target); continue; }
+
     const sourceContainsTarget = source !== target && rectFullyInside(target, source);
     const targetContainsSource = source !== target && rectFullyInside(source, target);
-    const sources = routingPorts(source, sourceSlot, counts.get(edge.source)!, sourceContainsTarget);
-    const targets = routingPorts(target, targetSlot, counts.get(edge.target!)!, targetContainsSource);
-    // The edge's own source/target box is kept at the near-zero EPS margin: a port's anchor
-    // sits exactly on that box's own boundary, so shrinking it further would falsely flag the
-    // route's own first/last segment as "entering" its own endpoint. Every genuinely unrelated
-    // box instead gets a real ROUTE_CLEARANCE margin grown OUTWARD, not shrunk inward, so a
-    // route must stay clear of the box's actual boundary by a visible amount - not just avoid
-    // literally crossing into its interior, which still let a route visually touch or graze an
-    // unrelated box's edge.
+
+    // The edge's own source/target box is kept at the near-zero EPS margin (a port's anchor sits
+    // exactly on that box's own boundary); every genuinely unrelated box gets a real
+    // ROUTE_CLEARANCE margin grown OUTWARD, exactly as the old candidate loop enforced.
     const obstacles = [...boxes.values()].flatMap(box => {
       let margin: number;
       if (box === source) { if (sourceContainsTarget) return []; margin = EPS; }
@@ -672,54 +802,103 @@ export function edgePathsFor(boxes: ReadonlyMap<string, Rect>, edges: readonly R
       else { if (rectFullyInside(source, box) || rectFullyInside(target, box)) return []; margin = -ROUTE_CLEARANCE; }
       return [{ x: box.x + margin, y: box.y + margin, w: box.w - 2 * margin, h: box.h - 2 * margin }];
     });
-    const containers = [...boxes.values()].filter(box =>
-      (box !== source && rectFullyInside(source, box)) || (box !== target && rectFullyInside(target, box)));
-    // Ancestors permit short endpoint crossings, not long transit through their gutters.
-    const clearsContainerLanes = (route: Point[]): boolean => route.slice(1).every((b, i) => {
+    // Container-index numbering matches `RoutingGraph.containerTagsOf`'s own scheme (both
+    // derived from the same `boxes` map via the identical `isContainerBox` predicate above), so
+    // `ancestorContainers` feeds `routeOne`'s own D-3b admission predicate directly.
+    const ancestorContainers = new Set<number>();
+    const ancestorBoxes: Rect[] = [];
+    containersInOrder.forEach((box, containerIndex) => {
+      const isAncestor = (box !== source && rectFullyInside(source, box)) || (box !== target && rectFullyInside(target, box));
+      if (isAncestor) { ancestorContainers.add(containerIndex); ancestorBoxes.push(box); }
+    });
+    // Belt-and-suspenders re-check of the SAME "ancestors permit short endpoint crossings, not
+    // long transit through their gutters" property, kept in ADDITION to `routeOne`'s own D-3b
+    // admission predicate: D-3b's `portYWindow` is derived from the two ports' own anchors, which
+    // for a genuinely long edge (its two ports far apart) can span nearly the edge's entire
+    // length - making the admission predicate close to vacuous for exactly the "long transit"
+    // case this rule exists to catch. This context-free re-check (no window, just the absolute
+    // `LANE_GAP` clearance the old candidate-enumeration loop enforced) is used as a PREFERENCE,
+    // not a hard requirement (see the tiered candidate search below) - degrading to routeOne's
+    // own, looser guarantee when no stricter candidate exists is safer than forcing every such
+    // edge to the label/container-unaware `edgePathFor` fallback.
+    const clearsContainerLanes = (route: readonly Point[]): boolean => route.slice(1).every((b, i) => {
       const a = route[i];
-      if (a.y === b.y) return containers.every(box => {
+      if (a.y === b.y) return ancestorBoxes.every(box => {
         const overlap = Math.min(Math.max(a.x, b.x), box.x + box.w) - Math.max(Math.min(a.x, b.x), box.x);
         return overlap <= 32 || Math.min(Math.abs(a.y - box.y), Math.abs(a.y - box.y - box.h)) >= LANE_GAP;
       });
-      return containers.every(box => {
+      return ancestorBoxes.every(box => {
         const overlap = Math.min(Math.max(a.y, b.y), box.y + box.h) - Math.max(Math.min(a.y, b.y), box.y);
         return overlap <= 32 || a.x <= box.x - LANE_GAP || a.x >= box.x + box.w + LANE_GAP;
       });
     });
-    const xs = new Set<number>(); const ys = new Set<number>();
-    for (const label of labels) {
-      xs.add(label.x - 4); xs.add(label.x + label.w + 4);
-      ys.add(label.y - 4); ys.add(label.y + label.h + 4);
-    }
-    for (const box of boxes.values()) {
-      xs.add(box.x - LANE_GAP); xs.add(box.x + box.w + LANE_GAP);
-      ys.add(box.y - LANE_GAP); ys.add(box.y + box.h + LANE_GAP);
-    }
-    const { leftX, rightX } = outerLaneXs(boxes);
-    for (let lane = 0; lane <= occupied.length; lane++) {
-      xs.add(leftX - lane * LANE_GAP); xs.add(rightX + lane * LANE_GAP);
-    }
-    let best: Point[] | undefined; let bestCost = Infinity;
-    const consider = (candidate: Point[]): void => {
-      const route = simplifyRoute(candidate);
-      if (route.length < 2 || !pathClears(route, obstacles) || !pathClears(route, labels) || !clearsContainerLanes(route)) return;
-      const cost = routeCost(route, occupied, bestCost);
-      if (cost < bestCost) { best = route; bestCost = cost; }
+
+    const ctx: EdgeContext = { ancestorContainers };
+    const containment = sourceContainsTarget || targetContainsSource;
+
+    const buildCandidates = (sourcePorts: readonly PortSlot[], targetPorts: readonly PortSlot[]) => {
+      const list: { route: Point[]; cost: number; collapsed: Point[] }[] = [];
+      for (const sp of sourcePorts) for (const tp of targetPorts) {
+        const route = routeOne(graph, occ, sp, tp, ctx);
+        if (!route) continue;
+        if (!pathClears(route, obstacles) || !pathClears(route, labels)) continue;
+        list.push({ route, cost: routeCandidateCost(route), collapsed: collapseCollinear(route) });
+      }
+      list.sort((a, b) => a.cost - b.cost);
+      return list;
     };
-    for (const from of sources) for (const to of targets) {
-      const a = from.escape; const b = to.escape;
-      const middle = (points: Point[]): void => consider([from.anchor, a, ...points, b, to.anchor]);
-      middle([{ x: a.x, y: b.y }]); middle([{ x: b.x, y: a.y }]);
-      for (const x of xs) middle([{ x, y: a.y }, { x, y: b.y }]);
-      for (const y of ys) middle([{ x: a.x, y }, { x: b.x, y }]);
+    const isGoodEnough = (c: { route: Point[]; collapsed: Point[] }): boolean => clearsContainerLanes(c.route);
+
+    let candidates: { route: Point[]; cost: number; collapsed: Point[] }[];
+    let bestCandidate: { route: Point[]; cost: number; collapsed: Point[] } | undefined;
+    // Containment edges are rare and their port set is small either way (2 inward candidates on
+    // the containing box x up to 4 sides on the plain endpoint = 8 combos) - always search that
+    // full small set rather than adding a separate tier for them.
+    if (containment) {
+      const containmentSource = sourceContainsTarget ? inwardPorts(source)
+        : PORT_SIDES.map(side => allocatePort(source, side, sourceSlot, counts.get(edge.source)!));
+      const containmentTarget = targetContainsSource ? inwardPorts(target)
+        : PORT_SIDES.map(side => allocatePort(target, side, targetSlot, counts.get(edge.target!)!));
+      candidates = buildCandidates(containmentSource, containmentTarget);
+      bestCandidate = candidates.find(isGoodEnough);
+    } else {
+      // Tier 1 (the common case): try only the one "obvious" side pairing, at the SHALLOWEST
+      // escape depth (`laneIndex=0`, see `portAtLane`'s doc comment) - a single `routeOne` call
+      // per endpoint side. See `naturalSides`' doc comment for why this pairing is expected to
+      // already be optimal most of the time.
+      const { sourceSide, targetSide } = naturalSides(source, target);
+      const tier1Source = [portAtLane(source, sourceSide, sourceSlot, counts.get(edge.source)!, 0)];
+      const tier1Target = [portAtLane(target, targetSide, targetSlot, counts.get(edge.target!)!, 0)];
+      candidates = buildCandidates(tier1Source, tier1Target);
+      bestCandidate = candidates.find(isGoodEnough);
+
+      // Tier 2 (escalate only when tier 1 didn't clear cleanly): the full 4-sides x
+      // 3-escape-depths search, exactly what the old candidate-enumeration loop and design.md's
+      // D-4 both describe (every side offered; `allocatePort`'s own ordinal-driven depth is one
+      // of the three depths tried here, not overridden away).
+      if (!bestCandidate) {
+        const depths = [0, 1, 2];
+        const fullSource = PORT_SIDES.flatMap(side => depths.map(d => portAtLane(source, side, sourceSlot, counts.get(edge.source)!, d)));
+        const fullTarget = PORT_SIDES.flatMap(side => depths.map(d => portAtLane(target, side, targetSlot, counts.get(edge.target!)!, d)));
+        candidates = buildCandidates(fullSource, fullTarget);
+        bestCandidate = candidates.find(isGoodEnough);
+      }
     }
-    // Complex/overlapping layouts can require more bends than this candidate family.
-    // Preserve the relationship rather than hide it; ordinary stacked layouts find a route.
-    if (!best) { paths[index] = edgePathFor(boxes, edge.source, edge.target); continue; }
-    occupied.push(best);
+    // Final degrade order over whichever tier ran: clear just one extra guarantee, then just
+    // obstacles/labels, before ever falling back to `edgePathFor`.
+    bestCandidate = bestCandidate
+      ?? candidates.find(c => !crossesAny(c.collapsed, acceptedRoutes))
+      ?? candidates.find(c => clearsContainerLanes(c.route))
+      ?? candidates[0];
+
+    // No candidate both found a path AND cleared every geometric guarantee — fall back to the
+    // unchanged single-edge router exactly as today's "no candidate clears" path does (D-2).
+    if (!bestCandidate) { paths[index] = edgePathFor(boxes, edge.source, edge.target); continue; }
+    const best = bestCandidate.route;
+    acceptedRoutes.push(bestCandidate.collapsed);
+    occ.claim(graphEdgeIdsAlong(graph, best));
     // Corner-rounding (visual redesign, post-PR4) is applied to the final rendered string only;
-    // `occupied` and every future candidate's cost/crossing checks keep using the sharp-cornered
-    // `best` waypoints, so obstacle-avoidance and lane bookkeeping are unaffected.
+    // occupancy bookkeeping above keeps using the sharp-cornered `best` waypoints.
     paths[index] = roundedPolylinePath(best);
   }
   return paths;
