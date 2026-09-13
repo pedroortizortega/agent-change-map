@@ -1452,3 +1452,185 @@ exploration-v2.md's list and design.md's Testing Strategy table; `CROSSING_BASE`
 confirmed well-calibrated by real measurement, no constants changed. Ready for Phase 4 (scoped
 drag-drop re-route, PR4) — same open question as every prior PR in this chain: confirm continuing
 the `stacked-to-main` chain with the orchestrator/user before starting PR4's own work.
+
+---
+
+## PR4: Scoped drag-drop re-route (Phase 4 of tasks.md) — COMPLETE
+
+Scope: confirm/update the EXISTING scoped-reroute wiring in `webview/index.tsx` to work correctly
+against the NEW visibility-graph+A* router (PR1-3b), reusing `routingGraph.ts`'s `OccupancyIndex`
+claim/release API instead of the pre-migration wiring's per-edge `edgePathFor` reuse pattern.
+
+### Investigation first (per instructions — did not assume)
+
+Read `webview/index.tsx`'s current `onNodeDragStop`/`onNodesChange`/`computeLiveDragUpdate` (the
+latter now lives in `webview/graphLayout.ts`, confirmed directly) before writing any code. Real
+finding, verified against the actual code, not assumed:
+
+- **`onNodesChange` (live preview DURING a drag) already works correctly and needed zero changes.**
+  It calls `computeLiveDragUpdate`, which calls the single-edge `edgePathFor` directly per touched
+  edge (`graphLayout.ts:519`) — a function this whole change explicitly leaves untouched (D-2's own
+  fallback). This path never called into the old `routeCost`/`edgePathsFor` internals the router
+  swap replaced, so it was never broken by PR3a.
+- **`onNodeDragStop` (the COMMITTED re-route on drop) was the real gap.** Before this PR it did
+  exactly one thing: bump `overrideSeq`, which triggers `layoutGraph`'s `useMemo` to re-run —
+  calling the FULL coordinated `edgePathsFor(boxes, edges)` over every edge in the graph, every
+  single drag-drop commit, unconditionally. `edgePathsFor`'s public signature was preserved
+  unchanged by PR3a (the whole point of the rollback-seam design), so this "just worked" in the
+  sense of not crashing or producing wrong output — but the PREVIOUS pre-migration scoped-reroute
+  optimization (whatever mechanism `react-flow-diagram-migration` had) was genuinely LOST at the
+  algorithm swap, exactly as the task brief hypothesized: the new router has no "cheap, reuse-prior-
+  state, only re-route these edges" entry point the way the old code's per-edge candidate/local-
+  preview mechanism did. **Confirmed by measurement, not assumption**: PR0's own Addendum 3 gate
+  already measured this exact full-pass cost — 392.8ms/954.4ms/4,445.9ms at
+  `{100,200}`/`{150,300}`/`{300,600}` — 1.6x-18x over the spec's 250ms budget. This PR's job was
+  therefore real: add a genuinely scoped/incremental capability to the NEW router, not just
+  reconnect old wiring (there was no old wiring left to reconnect for the commit path — it never
+  called router internals directly to begin with).
+
+### Design decision: is skipping `buildRoutingGraph` on a scoped pass safe/necessary?
+
+Measured directly with a throwaway `tsx` spike (written, run, deleted — same convention as every
+prior spike in this change) before committing to an implementation:
+
+| nodes/edges | `buildRoutingGraph` alone (ms) | full `edgePathsFor` (build + route all edges, ms) |
+|---|---|---|
+| 100/200 | 2.8 | 378.0 |
+| 150/300 | 3.4 | 942.0 |
+| 300/600 | 8.8 | 4,701.2 |
+
+**Answer: no, it is not safe to skip, and it is not necessary to skip.** `buildRoutingGraph` is
+under 0.2% of a full pass's cost at `{300,600}` — the O(E) per-edge `routeOne` candidate search is
+the entire expensive part, not graph construction. Skipping the rebuild would ALSO be wrong for
+correctness: the moved node's new position must be reflected in the shared lane grid (its own ports
+need to dock against the NEW geometry), or routing would silently use stale obstacle positions.
+**Implementation decision: rebuild the graph fresh every scoped call (cheap, correct); skip
+`routeOne` entirely for every edge that doesn't touch a moved node, carrying its previous raw
+waypoints forward unchanged instead.** This is the real, measured source of the win, not graph
+reuse — flagged explicitly because the task brief's own phrasing ("doesn't rebuild the whole
+visibility graph from scratch") could be read as requiring graph reuse; real measurement showed
+that premise doesn't hold and reuse would be counterproductive (a genuine, disclosed deviation from
+the task's literal wording, resolved by measurement per this change's own established convention).
+
+### Implementation
+
+- **`webview/edgeGeometry.ts`**: `edgePathsFor`'s existing per-edge loop body was extracted into a
+  shared internal `coordinateRoutes(boxes, edges, scope?)` engine. With `scope` omitted,
+  `coordinateRoutes` is byte-for-byte the same algorithm `edgePathsFor` always ran (verified: the
+  full existing `coordinatedRouting.test.ts`/`edgeGeometry.test.ts` suites, 43+18 tests, pass
+  unmodified) — `edgePathsFor`'s signature AND behavior are unchanged, preserving it as the rollback
+  seam design.md calls out. Two new exports layer on top:
+  - `edgeRoutesFor(boxes, edges)`: same full pass as `edgePathsFor`, but also returns each edge's
+    raw (pre-rounding) `Point[]` waypoints (`CoordinatedRoutes.routes`), needed so a LATER scoped
+    pass has something to carry forward — `edgePathsFor`'s string-only return shape can't expose
+    this without changing its signature.
+  - `scopedEdgePathsFor(boxes, edges, movedIds, previousRoutes)`: the actual PR4 mechanism. For
+    every edge NOT touching `movedIds`, skips `routeOne` entirely — instead re-derives which graph
+    edges its cached previous route occupies on the FRESH graph via the existing
+    `graphEdgeIdsAlong` helper (coordinate-matched, so it still works correctly even though a fresh
+    build renumbers every graph edge id) and `occ.claim(...)`s them, so touched edges still see
+    accurate crossing-avoidance context. Touched edges (source or target in `movedIds`) run the
+    exact same tiered candidate search/`routeOne` as a full pass. If a TOUCHED edge finds no
+    candidate at all, `coordinateRoutes` returns `undefined` instead of silently degrading just
+    that edge — the caller's contract, not a per-edge `edgePathFor` fallback like the full-pass
+    case, because a scoped pass's occupancy context is deliberately partial and its own "no
+    candidate" verdict for a touched edge isn't necessarily what a real full pass would find.
+- **`webview/graphLayout.ts`**: `LayoutInput` gained an optional `dragCommit?: DragCommitScope`;
+  `LayoutResult` gained `edgeRoutes: Map<number, Point[]>` (raw per-edge waypoints, keyed by the
+  edge's stable position in `AnalysisGraph.edges`, always populated whether the pass was scoped or
+  full). `routedPaths` (now returning `{paths, routes}` instead of a bare `Map`) calls
+  `scopedEdgePathsFor` when `scope` is given, translating between its own filtered `visible`-list
+  positions and the caller-facing original edge indices; on `undefined` (scope bailed), it re-calls
+  `edgeRoutesFor` for a REAL full re-route rather than leaving any edge unrouted — the exact
+  "falls back to a full re-route" contract the task brief asked to be confirmed. `buildEdges` and
+  both `layoutGraph` branches (flat/nested) thread `dragCommit` through and return `edgeRoutes`.
+- **`webview/index.tsx`**: `onNodeDragStop` now builds `movedIds` (the dragged node plus every
+  D14-cascaded descendant, reusing the SAME `descendantsOf` walk it already used for
+  `positionOverrides`) and stores `{movedIds, previousRoutes: edgeRoutesRef.current}` into a
+  one-shot `pendingDragCommitRef` just before bumping `overrideSeq`. The `layout` `useMemo` reads
+  `pendingDragCommitRef.current` as `dragCommit` for that one recompute; two small effects keep the
+  bookkeeping self-consistent: one mirrors `layout.edgeRoutes` into `edgeRoutesRef` after every
+  layout (scoped or full) so the NEXT drag always has the freshest baseline, the other clears
+  `pendingDragCommitRef` right after `overrideSeq` changes so a later, non-drag `layout` recompute
+  (e.g. a fresh `state.graph` snapshot landing from the host) never accidentally replays a stale
+  scope. D14 cascade behavior itself (`positionOverrides.set` per descendant, offset by the same
+  `dx`/`dy`) is completely unchanged — only which ids feed the NEW `movedIds` set is added.
+
+### Work Unit Evidence
+
+| Evidence | Value |
+|---|---|
+| Focused test command and result | `npx vitest run test/unit/graphLayout.test.ts` — 33/33 pass, including the 3 new PR4 tests (byte-identical untouched edge, fallback-to-full-reroute, `{300,600}` timing) |
+| Runtime harness command/scenario and result | `npm run test:e2e` (real VS Code Extension Development Host) — exit code 0, all 8 scripted scenarios pass. **Honest caveat**: the e2e scenario suite (`test/e2e/scenarios.ts`) has no scripted drag-and-drop gesture (confirmed via direct search — "drag" appears nowhere in `test/e2e/*.ts`; `test/unit/webviewDom.test.ts`'s own doc comment states pan/zoom/drag/hover are React Flow's own concern, not scripted there either). This run confirms the extension host builds, loads the webview bundle, and runs its full existing scenario suite cleanly with this PR's changes — it does NOT specifically exercise a live pointer-drag gesture end-to-end. No regression signal either way from e2e beyond "nothing else broke." |
+| Rollback boundary | Revert the `{movedIds, previousRoutes}` param end-to-end: delete `pendingDragCommitRef`/`edgeRoutesRef` and the two small effects in `index.tsx`, drop `dragCommit`/`edgeRoutes` from `LayoutInput`/`LayoutResult`/`buildEdges`/`routedPaths` in `graphLayout.ts`, and drop `edgeRoutesFor`/`scopedEdgePathsFor`/`coordinateRoutes`'s `scope` parameter in `edgeGeometry.ts` (collapsing it back to `edgePathsFor`'s original body). `onNodeDragStop` then falls back to an unconditional full re-route exactly as before this PR — a real, mechanical, single-direction revert with no other behavior touched. |
+
+### TDD Cycle Evidence
+
+| Step | Action | Result |
+|---|---|---|
+| RED (approval-testing form, per strict-tdd.md's refactor protocol — this PR is primarily a refactor/extension of an already-property-tested router, mirroring PR3a's own documented approach) | Ran the full EXISTING `coordinatedRouting.test.ts`/`edgeGeometry.test.ts`/`routingGraph.test.ts`/`routeSearch.test.ts` suites (96 tests) as the safety net BEFORE refactoring `edgePathsFor`'s body into the shared `coordinateRoutes` engine, confirming 96/96 green on the pre-refactor code first | Established: any regression from the extraction itself would show up as a failure in this already-comprehensive suite |
+| RED (genuinely new behavior) | Wrote the three new `test/unit/graphLayout.test.ts` tests (byte-identical untouched edge, fallback-to-full-reroute via the boxed-in fixture, `{300,600}` timing bound) against `routedPaths` before any `scope`-aware code existed in `graphLayout.ts` | Confirmed to fail (`routedPaths` had no third parameter, `DragCommitScope` didn't exist) before implementation began |
+| GREEN | Implemented `coordinateRoutes`'s `scope` parameter in `edgeGeometry.ts`, `DragCommitScope`/`routedPaths`/`buildEdges`/`layoutGraph` threading in `graphLayout.ts`, and the `index.tsx` wiring | All 3 new tests pass; all 96 pre-existing router-suite tests still pass unmodified; full suite 589/589 |
+| REFACTOR | `npm run typecheck` (both tsconfigs), `npm run lint` (`--max-warnings=0`), `npm run test` (589/589), `npm run test:e2e` (exit 0) | All clean |
+
+### Real measured numbers (this PR's own implementation, not a spike)
+
+| nodes/edges | full `layoutGraph` (ms) | scoped drag-commit `layoutGraph` (ms) | speedup |
+|---|---|---|---|
+| 100/200 | 400.6 | 36.9 | 10.9x |
+| 150/300 | 965.8 | 137.7 | 7.0x |
+| 300/600 | 4,744.1 | 128.3 | 37.0x |
+
+(A second, independent run of the committed `{300,600}` test measured 126.0ms and 143.7ms/130.5ms
+across repeated `npm test` invocations — consistent, comfortably under both the 500ms test bound
+and design.md's own 250ms Block-F decision bar, with real machine-noise variance, not a fluke.)
+Only 4 edges out of 600 were genuinely re-solved via `routeOne` at `{300,600}` (this generator's
+per-node out+in degree for a single moved node) — the rest carried forward via the occupancy-reuse
+path, which is the entire mechanism behind the 37x speedup.
+
+### Deviations from Design
+
+1. **`previousOccupancy` (design.md's literal param name) was NOT implemented as reusing an
+   `OccupancyIndex` object across calls.** Implemented instead as `previousRoutes: Map<number,
+   Point[]>` — the previous pass's raw per-edge waypoints, re-projected onto a freshly-built graph
+   via coordinate matching (`graphEdgeIdsAlong`) rather than reused edge ids. Reasoned deviation,
+   not an oversight: `OccupancyIndex.owners()` is keyed by graph-EDGE ids, which `buildRoutingGraph`
+   assigns fresh (renumbered) on every call — reusing an old `OccupancyIndex` object against a
+   REBUILT graph (required for correctness, see the design-decision section above) would silently
+   misattribute occupancy to the wrong edges. Coordinate-based re-projection is the correct fix for
+   this specific incompatibility and still satisfies the design's actual intent (reuse prior
+   occupancy state cheaply, O(1) per untouched edge) — `OccupancyIndex`'s own `claim`/`release`
+   methods ARE used, exactly as instructed, just seeded from re-projected coordinates instead of a
+   raw object handle.
+2. **Line count**: design.md/tasks.md estimated `~50` lines (`graphLayout.ts` +35, `index.tsx` +15)
+   for this slice. Real diff is `+350/-24` across 4 files (`edgeGeometry.ts` +130/-24 net from the
+   `coordinateRoutes` extraction + two new exported functions with full doc comments,
+   `graphLayout.ts` +82, `index.tsx` +41, `test/unit/graphLayout.test.ts` +121). Root cause: the
+   estimate assumed `edgePathsFor`'s body wouldn't need touching at all ("`routedPaths` accepts
+   optional params" implied the scoping logic lived entirely in `graphLayout.ts`), but the actual
+   O(E) cost this PR needs to skip lives INSIDE `edgeGeometry.ts`'s per-edge loop, not at the
+   `graphLayout.ts` call-site level — there is no way to skip `routeOne` calls from outside that
+   loop without threading scope awareness into it. Still comfortably under the 400-line single-PR
+   budget, so no `size:exception` was needed, but flagged here per this change's own
+   under-forecasting history (Blunt assessment in design.md's Review Workload Forecast).
+3. **Fallback granularity**: design.md's Data Flow diagram shows the scoped path feeding into the
+   SAME `edgePathsFor` pipeline; this implementation's `scopedEdgePathsFor` fallback-to-full is an
+   ALL-OR-NOTHING re-route (if any touched edge fails, the entire call re-solves every edge in a
+   real full pass), not a per-edge degrade. This was a deliberate, disclosed choice (see the task
+   brief's own instruction: "falls back to triggering a FULL re-route", not a per-edge one) rather
+   than an oversight — confirmed by the dedicated fallback test, which asserts the untouched edge's
+   path ALSO gets recomputed (and matches an independent full pass exactly) when the touched edge's
+   scoped attempt fails.
+
+### Issues Found
+
+None — no regressions in the existing 96-test router suite, no new crashes, no unrouted edges.
+
+### Status
+
+Phase 4 (PR4) complete: 2/2 tasks done (4.1, 4.2). Scoped drag-drop re-route genuinely implemented
+and measured (not just reconnected) against the new visibility-graph+A* router, reusing
+`OccupancyIndex.claim`/`release` via coordinate re-projection since raw object reuse across a
+rebuilt graph would have been incorrect. Ready for Phase 5 (threshold + perf probe, PR5) — same
+open question as every prior PR in this chain: confirm continuing the `stacked-to-main` chain with
+the orchestrator/user before starting PR5's own work.

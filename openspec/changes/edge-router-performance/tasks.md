@@ -120,10 +120,25 @@ invisible to `OccupancyIndex`) now, before PR3b's property-suite rewrite, rather
 - [x] 3b.1 Add remaining properties per design.md's table: clearance-with-margin, port distinctness (n ≤ 8), determinism-as-reproducibility (incl. shuffled lane-insertion order + heap-swap invariance), self-loops, container-lane (kept as-is), label/header bands (kept as-is), outer-lane fallback, 200-seeded randomized sweep.
 - [x] 3b.2 Sweep `CROSSING_BASE ∈ {0,30,60,120,240,1000}` (`L` kept fixed at 3, already validated end-to-end by PR3a/crossing-fix's own real measurements — see apply-progress.md's PR3b section for the reasoning) per design.md's binding tuning protocol; recorded max-owners/excess-weight/length/bends/ms table in `apply-progress.md`; knee confirmed at the already-landed `CROSSING_BASE=60` — no constant changed.
 
-## Phase 4: Scoped drag re-route (PR4) — only if Phase 0 gate says >250ms
+## Phase 4: Scoped drag re-route (PR4) — only if Phase 0 gate says >250ms — COMPLETE
 
-- [ ] 4.1 RED: `test/unit/graphLayout.test.ts` — scoped re-route touches only moved-node/cascade edges, keeps others byte-identical, falls back to full re-route when no valid path exists.
-- [ ] 4.2 GREEN: `graphLayout.ts` `routedPaths` accepts optional `{movedIds, previousOccupancy}`; `index.tsx`'s `onNodeDragStop` passes cascade ids (~+35/+15 lines).
+- [x] 4.1 RED/approval-testing: `test/unit/graphLayout.test.ts` (`routedPaths — PR4 scoped drag
+      re-route`) — scoped re-route touches only moved-node/cascade edges, keeps others
+      byte-identical; falls back to a full re-route (not a crash, not an unrouted edge) when no
+      valid path exists for a moved edge; completes at `{300,600}` in real measured time
+      (~126-144ms across runs) comfortably under the 500ms bar, vs. a full re-route's own measured
+      ~4.7s there.
+- [x] 4.2 GREEN: implemented in `webview/edgeGeometry.ts` (`coordinateRoutes` shared engine +
+      `edgeRoutesFor`/`scopedEdgePathsFor`, `edgePathsFor`'s signature/behavior unchanged — the
+      rollback seam design.md calls out), `webview/graphLayout.ts` (`routedPaths`/`buildEdges`/
+      `layoutGraph` thread an optional `DragCommitScope`; `LayoutResult.edgeRoutes` caches raw
+      per-edge waypoints for the next drag), and `webview/index.tsx` (`onNodeDragStop` builds
+      `movedIds` from the D14 cascade and hands `edgeRoutesRef.current` forward as
+      `previousRoutes`). Real diff: `+350/-24` across `webview/edgeGeometry.ts` (+130/-24),
+      `webview/graphLayout.ts` (+82), `webview/index.tsx` (+41), `test/unit/graphLayout.test.ts`
+      (+121) — over design's own `~50`-line estimate for this slice but still under the 400-line
+      single-PR budget, so no `size:exception` needed. See apply-progress.md's PR4 section for the
+      real measurement and design deviations.
 
 ## Phase 5: Threshold + perf probe (PR5)
 
