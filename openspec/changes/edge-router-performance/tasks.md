@@ -140,10 +140,10 @@ invisible to `OccupancyIndex`) now, before PR3b's property-suite rewrite, rather
       single-PR budget, so no `size:exception` needed. See apply-progress.md's PR4 section for the
       real measurement and design deviations.
 
-## Phase 5: Threshold + perf probe (PR5)
+## Phase 5: Threshold + perf probe (PR5) — COMPLETE
 
-- [ ] 5.1 Update `src/webviewProtocol.ts`'s `OVERSIZED_THRESHOLDS` to Phase 0's measured values (0-2 lines, only if changed).
-- [ ] 5.2 Add nested/varied-X perf probe to `test/unit/graphLayout.test.ts` at the new boundary (`<10000ms`) alongside the existing `{60,120}` probe (`<2000ms`).
+- [x] 5.1 Confirmed `src/webviewProtocol.ts`'s `OVERSIZED_THRESHOLDS` is still exactly `{nodes:300, edges:600}` — verified directly by reading the file (not assumed). Zero lines changed, per Phase 0 gate's own "0-2 lines, only if changed" framing: the gate already determined this value stays as-is.
+- [x] 5.2 Added a permanent `{nodes:300, edges:600}` `layoutGraph` perf-regression test to `test/unit/graphLayout.test.ts` (`<10000ms`, the spec's exact hard budget — real measured ~4.6-4.7s on this machine, so real margin remains) alongside the existing `{60,120}` probe, whose bound was tightened from a stale `<10000ms` to the spec's actual `<2000ms` (real measured ~3-12ms, ~166x-600x margin). The pre-existing `{300,600}` scoped drag-commit re-route test (`<500ms`, from PR4) already covers the third spec budget — not duplicated. Followed strict-tdd's approval-testing/RED-GREEN protocol: both new/changed assertions were temporarily set to an impossible bound (`<1`) to confirm they were genuinely wired to production code and would fail on a regression, then restored to their real spec-matching bounds and confirmed green.
 
 ## Next Step
 

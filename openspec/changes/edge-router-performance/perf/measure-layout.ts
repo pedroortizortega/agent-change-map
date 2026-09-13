@@ -16,6 +16,14 @@
  * (binding, from proposal.md "Proposal question round — RESOLVED"):
  *   - {60,120} (NESTED_LAYOUT_LIMITS boundary): < 2000 ms
  *   - new OVERSIZED_THRESHOLDS boundary:        <= 10000 ms (pick with margin, target <= ~6000 ms)
+ *
+ * STATUS (PR5, final): the two boundary points this script exists to check — {60,120} and
+ * {300,600} (the landed OVERSIZED_THRESHOLDS) — are now PERMANENTLY locked in as committed
+ * regression tests in `test/unit/graphLayout.test.ts` ("performance probe near the
+ * OVERSIZED_THRESHOLDS boundary" describe block), run on every `npm test`. This script remains
+ * only as a standing, manually-run diagnostic for exploring the FULL size curve (the intermediate
+ * points {80,160}...{150,300} the committed tests don't cover) — useful for future investigation,
+ * not for CI enforcement. Kept rather than deleted for that reason; not part of the test suite.
  */
 import { layoutGraph } from "../../../../webview/graphLayout.js";
 import type { AnalysisGraph, Edge, Entity } from "../../../../src/protocol.js";

@@ -1634,3 +1634,179 @@ and measured (not just reconnected) against the new visibility-graph+A* router, 
 rebuilt graph would have been incorrect. Ready for Phase 5 (threshold + perf probe, PR5) — same
 open question as every prior PR in this chain: confirm continuing the `stacked-to-main` chain with
 the orchestrator/user before starting PR5's own work.
+
+---
+
+## PR5: `OVERSIZED_THRESHOLDS` confirmation + permanent perf-regression tests (Phase 5 of tasks.md) — COMPLETE, FINAL PR
+
+This is the last PR in the `edge-router-performance` chain (PR1-PR5 all now landed).
+
+### Task 5.1 — confirm `OVERSIZED_THRESHOLDS`, zero-line no-op
+
+Read `src/webviewProtocol.ts:16-19` directly (not assumed): `OVERSIZED_THRESHOLDS = { nodes: 300,
+edges: 600 }`, byte-identical to before this entire change started. This exactly matches the PR0
+gate's own measured verdict (Addendum 3: `{300,600}` measured 4,445.9ms on the realistic FLAT
+fixture, inside the `≤5,000ms` 2x-margin rule; `{400,800}` measured 9,840.5ms, clearly outside it).
+**Zero lines changed** — confirmed, not assumed, per the gate's own "0-2 lines, only if changed"
+framing. No commit content from this task beyond this confirmation.
+
+### Task 5.2 — permanent perf-regression tests (strict TDD, approval-testing/RED-GREEN form)
+
+#### TDD Cycle Evidence
+
+| Test | RED | GREEN | REFACTOR |
+|---|---|---|---|
+| `{60,120}` `layoutGraph` within 2000ms spec budget | Tightened the pre-existing test's bound from a stale `<10000ms` to `<1` (an impossible value) — confirmed it FAILS (`expected 12.41... to be less than 1`), proving the assertion is genuinely wired to `layoutGraph`, not a tautology. | Set the real bound `<2000` (the spec's exact `NESTED_LAYOUT_LIMITS` budget) — confirmed PASS (real measured ~3-12ms across runs on this machine, ~166x-600x margin). | Rewrote the stale doc comment referencing the OLD O(N^3)-ish router's `{60,120}`~0.9s / `{300,600}` "MINUTES" finding (accurate history, but describing a router this change already fully replaced) with a comment describing the CURRENT router and its real measured numbers. |
+| `{300,600}` `layoutGraph` within 10000ms spec budget (NEW test) | Wrote the new test with an impossible `<1` bound — confirmed it FAILS (`expected 4666.60... to be less than 1`), proving it genuinely exercises the full `layoutGraph` call, not a stub. | Set the real bound `<10000` (the spec's exact `OVERSIZED_THRESHOLDS` hard budget, not a tighter ~5000ms bound that could flake on a slower CI machine — matches this task's own explicit guidance) — confirmed PASS (real measured 4,664-4,744ms across 3 separate `npm test`/`vitest` invocations in this session, consistent with every prior measurement of this exact boundary across this change's history: PR0 gate 4,445.9ms, CROSSING_BASE sweep 4,505.8ms, crossing-fix re-measurement 4,889.1-6,442.6ms). | Consolidated the describe block's doc comment (previously describing only the stale `{60,120}` probe and a large inline "FINDING" block about the old router's MINUTES-scale risk, now fully resolved) into one comment describing both permanent tests, their spec-budget rationale, and a pointer to the pre-existing PR4 500ms scoped-reroute test (not duplicated) and to `perf/measure-layout.ts`'s now-narrower diagnostic-only role. |
+
+No production code changed for this task — this is regression-test-only work locking in already-final, already-measured behavior, which is why the RED step used the "temporarily impossible bound" form of approval testing (per strict-tdd.md's refactor/approval-testing protocol) rather than a "write failing test against not-yet-implemented code" RED, since there is no new implementation to drive here.
+
+#### Third spec budget (500ms scoped drag-commit re-route) — already covered, not duplicated
+
+`routedPaths — PR4 scoped drag re-route > completes a drag-commit re-route comfortably under
+500ms at {nodes:300, edges:600}...` (added in PR4, `test/unit/graphLayout.test.ts`) already locks
+in this budget. Re-ran it in this session as part of the full-file run: 127.86ms-159.10ms across
+3 runs, comfortably under 500ms. Left untouched — no duplication needed.
+
+### `perf/measure-layout.ts` fate — KEPT, documented as a narrowed diagnostic-only script
+
+**Decision: keep, not delete, not fold entirely into the test suite.** Reasoning:
+
+- The two decision-relevant boundary points this script exists to check (`{60,120}`,
+  `{300,600}`) are now permanently covered by committed, CI-enforced tests (above) — that part of
+  its original purpose is superseded.
+- The script's remaining value is exploring the FULL size curve (`{80,160}` through `{150,300}` in
+  its `DEFAULT_SIZES`) for future investigation/debugging — e.g. if a future change needs to
+  understand the shape of the curve between the two locked boundary points, or wants to probe a
+  size neither committed test covers, without writing a new throwaway spike from scratch. This
+  matches `react-flow-diagram-migration`'s own precedent this script's header already cites.
+- Folding the whole sweep into the permanent suite would mean either (a) running 6 sizes on every
+  `npm test`, including `{150,300}` at ~1s+ for no additional CI-enforcement value beyond what the
+  two boundary tests already lock in, or (b) keeping it real-boundary-only, which is exactly what
+  the two new committed tests already do. Neither improves on "keep the exploratory script
+  separate, lock in the two decisions permanently."
+- Updated its header docstring (see diff) to state plainly that its two headline numbers are now
+  superseded by permanent tests, so a future reader doesn't mistake it for the authoritative check.
+
+### Files Changed (this PR)
+
+| File | Action | What Was Done |
+|---|---|---|
+| `test/unit/graphLayout.test.ts` | Modified | Tightened `{60,120}` perf-probe bound `10000ms → 2000ms` (matches spec exactly); added new `{300,600}` perf-probe test (`<10000ms`); rewrote the describe block's doc comment to reflect the final, landed router instead of the superseded old one. Net: +26/-24 (one new test, one doc-comment rewrite). |
+| `openspec/changes/edge-router-performance/perf/measure-layout.ts` | Modified | Added a `STATUS (PR5, final)` doc-comment block noting its two headline boundary numbers are now superseded by permanent committed tests; kept as a standing manual diagnostic for the full curve. +8/-0. |
+| `openspec/changes/edge-router-performance/tasks.md` | Modified | Marked Phase 5 tasks 5.1/5.2 `[x]`, with evidence notes. |
+| `openspec/changes/edge-router-performance/apply-progress.md` | Modified | This section + Change Summary below. |
+| `src/webviewProtocol.ts` | Unchanged | Confirmed `OVERSIZED_THRESHOLDS = {nodes:300, edges:600}`, zero lines changed (task 5.1). |
+
+**Total authored additions+deletions (production/test code only, excluding planning artifacts):
+~34 lines** — far under the 400-line review budget; no `size:exception` needed.
+
+### Final sanity sweep (per this PR's explicit task) — clean, one pre-existing-and-intentional finding, no bugs
+
+Grepped `webview/` and `src/` for leftover references to deleted/superseded old-router internals:
+
+- `routeCost`, `consider(`, `simplifyRoute`, `routingPorts`: **zero live code references** — the
+  only matches are historical doc-comments in `webview/edgeGeometry.ts`, `webview/routeSearch.ts`,
+  and `webview/nodes/AcmEntityNode.tsx` explicitly explaining what those old names were replaced
+  by/mirror (intentional documentation, not dead code left lying around).
+- `webview/edgeGeometry.ts`'s single-edge fallback trio — `edgePathFor`, `outerLaneEdgePath`,
+  `needsOuterLaneFallback` — confirmed **intact and still correctly wired**: `edgePathFor` (line
+  533) is still the D-2 fallback called from both `edgePathsFor`'s no-candidate branch (line 857)
+  and `scopedEdgePathsFor`'s per-edge fallback (line 981); it still calls `needsOuterLaneFallback`
+  (line 544) and `outerLaneEdgePath` (lines 545/551) exactly as before this entire change. No
+  regression, no dead code, nothing left dangling.
+- **No new bugs found** during this sweep — the constraint's "if you find something, fix it and
+  disclose" clause does not apply this round; nothing to disclose beyond the above confirmation.
+
+### Full Gate Confirmation (real execution, this session)
+
+- `npm run typecheck` — clean (both tsconfigs).
+- `npm run lint` — clean, 0 errors/warnings (`--max-warnings=0`).
+- `npm run test` — **36 files / 590 tests, all passing** (589 landed by PR4 + 1 new test from this PR — the new `{300,600}` `layoutGraph` perf-regression test; the `{60,120}` test's bound was tightened in place, not added, so it doesn't add to the count).
+- `npm run test:e2e` — real VS Code Extension Development Host, exit code 0, all 8 scenarios passed (`selection`, `exact navigation`, `stale navigation refusal`, `draft save`, `forged repository root refusal`, `direct save`, `oversized consent`, `refresh`, `explicit run/stream`, `explicit cancel` — 10 logged, matching the harness's own scenario list).
+- `npm run build` — clean (`tsc -p tsconfig.build.json && npm run build:webview`).
+- `npm run build:webview` — clean (webview bundle built, static assets copied).
+
+### Work Unit Evidence
+
+| Evidence | Value |
+|---|---|
+| Focused test command and exact result | `npx vitest run test/unit/graphLayout.test.ts` → 34/34 passed |
+| Runtime harness command/scenario and exact result | `npm run test:e2e` → real VS Code Extension Development Host, exit code 0, all scenarios passed |
+| Rollback boundary | Revert the two perf-test bound/assertion changes in `test/unit/graphLayout.test.ts` (self-contained, no production code touched) and the doc-comment addendum in `perf/measure-layout.ts`; `src/webviewProtocol.ts` needs no rollback since it was never touched |
+
+### Deviations from Design
+
+None — task 5.1 confirmed the gate's own zero-line-change verdict exactly as anticipated; task 5.2
+implemented per this task's own explicit instructions (generous catastrophic-regression-guard
+bounds, spec-matching where reasonable, consolidate rather than duplicate PR4's existing 500ms
+test).
+
+### Issues Found
+
+None in this PR's own scope. The final sanity sweep (above) found no bugs — only confirmed all
+targeted old-router internals are genuinely gone and the untouched single-edge fallback trio is
+intact.
+
+### Status
+
+Phase 5 (PR5) complete: 2/2 tasks done (5.1, 5.2). **All tasks across all phases of
+`edge-router-performance` are now marked `[x]` in tasks.md** — confirmed via
+`rg -n "^\- \[ \]" tasks.md` returning no matches. This is the final PR in the chain.
+
+---
+
+## Change Summary: `edge-router-performance` — COMPLETE (all 5 PRs + PR0 gate landed)
+
+A 6-round change (PR0 gate + PR1-PR5) that replaced `webview/edgeGeometry.ts`'s coordinated
+multi-edge router — an O(N^3)-ish candidate-enumeration + pairwise-scan algorithm that took
+**>590,000ms and did not complete** at `{300,600}` (Phase 0's own measured baseline) — with a
+visibility-graph + A* router (`webview/routingGraph.ts` + `webview/routeSearch.ts`), while keeping
+`edgePathsFor`'s public signature and the base spec's routing-correctness contract unchanged.
+
+### What shipped, PR by PR
+
+- **PR0 (gate, throwaway)**: 4 real measurement spikes (D1-only spatial-indexing, visibility-graph
+  no-crossing-avoidance, visibility-graph WITH crossing-avoidance, full-featured
+  nested-vs-flat-fixture) established the algorithm-class case for a visibility-graph + A*
+  rewrite BEFORE committing real design/implementation effort, and made two binding, measured gate
+  decisions: **keep** the scoped drag-drop re-route (Block F), and **keep** `OVERSIZED_THRESHOLDS
+  = {300,600}` unchanged (both later re-confirmed by PR5).
+- **PR1** (`webview/routingGraph.ts`): visibility-graph construction, `OccupancyIndex`,
+  `allocatePort` — 15 tests, all green.
+- **PR2** (`webview/routeSearch.ts`): binary-min-heap A* with D-1's exact tie-break comparator,
+  D-5 occupancy-penalty edge relaxation, D-3b container-tag admission — 13 tests, all green.
+- **PR3a** (`edgeGeometry.ts` swap): wired the new router into `edgePathsFor`, deleted the old
+  `routeCost`/`routingPorts`/`Port`/`simplifyRoute` internals, kept the single-edge `edgePathFor`
+  fallback (D-2) byte-for-bene untouched. Measured real speedup: `{150,300}` 27,068ms → 788.0ms
+  (~34x); `{300,600}` (previously non-terminating) → 4,242.4ms.
+- **Crossing-fix** (user-requested, pre-PR3b): closed a real gap — perpendicular node-crossings
+  invisible to the edge-only `OccupancyIndex` — with an O(1)-per-relaxation node-occupancy
+  extension, not a reintroduced pairwise scan.
+- **PR3b**: full property-based test suite (clearance, port distinctness, determinism, self-loops,
+  outer-lane fallback, 200-seeded randomized sweep) plus a real `CROSSING_BASE` tuning sweep that
+  CONFIRMED the already-landed `60`/`60`/`3` constants, changing nothing.
+- **PR4**: scoped drag-drop re-route reusing the last full pass's occupancy state via coordinate
+  re-projection — real measured speedup at `{300,600}`: full re-route ~4.7s → scoped re-route
+  ~128-159ms (~30-37x), comfortably inside the 500ms spec budget.
+- **PR5 (this PR)**: confirmed `OVERSIZED_THRESHOLDS` needed zero changes (PR0's own verdict,
+  re-verified directly against the file), and added permanent, CI-enforced regression tests
+  locking in all three spec ms-budgets (`{60,120}`<2000ms, `{300,600}`<10000ms,
+  `{300,600}` scoped-reroute<500ms) against the now-final implementation.
+
+### Net effect, measured (not projected)
+
+| Metric | Before this change | After this change |
+|---|---|---|
+| `layoutGraph` at `{300,600}` (full pass) | did not complete in >590,000ms | ~4.6-4.7s |
+| `edgePathsFor` at `{300,600}` (routing only) | not separately measurable (>590s total) | ~4.2-6.4s across measurement rounds |
+| Drag-commit re-route at `{300,600}` | not scoped — would re-run the full ~4.6-4.7s pass | ~128-159ms |
+| `OVERSIZED_THRESHOLDS` | `{300, 600}` | `{300, 600}` (unchanged — the gate's own verdict) |
+| Committed perf-regression coverage | none | 3 permanent tests locking all 3 spec ms-budgets |
+
+### Is `edge-router-performance` functionally complete and ready for `sdd-verify`?
+
+**Yes.** All tasks across all phases (Phase 0 gate through Phase 5) are marked `[x]` in
+`tasks.md`; the full gate (`typecheck`, `lint`, `test` — 590/590, `test:e2e` — real VS Code host
+exit 0, `build`, `build:webview`) is green in this session; the final sanity sweep found no dead
+code and no bugs. Recommend `sdd-verify` next.
