@@ -42,17 +42,26 @@ describe("coordinated orthogonal routing", () => {
   });
 
   it("keeps crossings rare in a planar fan-in/fan-out fixture instead of sharing outer lanes", () => {
-    // PR3a's new visibility-graph router deliberately tries only ONE cheap port-side pairing per
-    // edge before falling back to an exhaustive search (see edgeGeometry.ts's `naturalSides`/tier
-    // 1-2 strategy) - an unconditional exhaustive search on every edge was measured to reintroduce
-    // cubic-ish scaling (the exact complexity class this whole change exists to eliminate), since
-    // `OccupancyIndex` only tracks SAME-graph-edge sharing (D-5), not perpendicular node-crossings
-    // between two independently-optimal edges. A rare, incidental crossing between two edges that
-    // each independently found their own cheapest path is therefore an accepted, disclosed
-    // trade-off for PR3a - full elimination needs a proper O(1) node-occupancy extension to
-    // `OccupancyIndex`, flagged as PR3b/follow-up design work (see edgeGeometry.ts's `crossesAny`
-    // doc comment). This property test still asserts crossings stay RARE (a small bounded count in
-    // this small fixture), not "eliminated by construction" as the old algorithm guaranteed.
+    // Crossing-fix update (see apply-progress.md's crossing-fix section for the full honest
+    // accounting): `OccupancyIndex` now tracks NODE-axis occupancy in addition to same-graph-edge
+    // sharing (see `routingGraph.ts`'s `OccupancyIndex` doc comment and `routeSearch.ts`'s
+    // node-crossing-penalty relaxation step). A perpendicular crossing between two GRAPH-INTERNAL
+    // segments of two independently-optimal edges is now cost-discouraged DURING the A* search
+    // itself, at O(1) per relaxation — the exact PR3a-disclosed gap this closes.
+    //
+    // This does NOT close every crossing category: a port's fixed anchor->escape hop (the short
+    // segment between a box's own boundary and its nearest lane line) sits OUTSIDE the shared
+    // visibility graph entirely, fixed once by port geometry before `routeOne`'s search even
+    // starts — `OccupancyIndex` has no node to attach an occupancy count to for it, no matter how
+    // it's extended. A crossing between two such hops (this fixture hits exactly one) is therefore
+    // still possible. Promoting the wiring-layer `crossesAny` check into a hard tier-1/tier-2
+    // acceptance gate (tried during this same follow-up) WOULD close this specific remaining case,
+    // but was measured to reintroduce catastrophic scaling (~49.6s at {100,200}, vs. ~0.4s without
+    // it) by forcing frequent full-search escalation — a real, deliberately-NOT-taken trade-off,
+    // not an oversight. `crossesAny` therefore stays exactly as PR3a's Deviation 4 landed it: a
+    // low-cost preference in the final degrade order only, not a hard requirement. This property
+    // test still asserts crossings stay RARE (a small bounded count in this small fixture), same
+    // as PR3a's own honest framing — now for a narrower, disclosed reason than before.
     const routes = edgePathsFor(boxes, edges).map(path => points(path!));
     let crossingCount = 0;
     for (let i = 0; i < routes.length; i++) for (let j = i + 1; j < routes.length; j++) {

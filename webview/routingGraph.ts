@@ -46,36 +46,103 @@ export interface RoutingGraph {
   /** D-3b: container indices whose x-band contains this (vertical) edge's column. Empty for
    * horizontal edges. */
   containerTagsOf(edgeRef: number): readonly number[];
+  /** `0` (horizontal) or `1` (vertical) — the axis this graph edge travels along. Used by
+   * `OccupancyIndex.claim`/`release` (crossing-fix follow-up, see `OccupancyIndex`'s own doc
+   * comment) to populate NODE-level axis occupancy, not just edge-id sharing. */
+  edgeAxis(edgeRef: number): 0 | 1;
+  /** The two node ids this graph edge connects (order-independent — an edge is undirected). */
+  edgeNodes(edgeRef: number): readonly [number, number];
 }
 
+/**
+ * `OccupancyIndex` tracks two independent kinds of "already claimed" state, both consulted purely
+ * as O(1) lookups during A* relaxation (`routeSearch.ts`'s `routeOne`), never as a scan over prior
+ * routes or edges:
+ *
+ * 1. **Same-graph-edge sharing** (`owners`/original D-5 mechanism): how many already-committed
+ *    routes reuse the exact same graph edge (parallel/overlapping runs on one shared segment).
+ * 2. **Node-axis occupancy** (`nodeAxisOwners`, the crossing-fix extension): for each graph node,
+ *    how many already-committed routes pass through it travelling horizontally vs. vertically.
+ *    Two orthogonal graph edges can only geometrically cross at a shared grid node (segments run
+ *    between coordinate-ADJACENT lane lines by construction, so a transversal intersection between
+ *    two differently-axised segments always lands exactly on a node both segments touch — never
+ *    strictly inside either segment). Consulting the PERPENDICULAR axis's owner count at both
+ *    endpoints of a candidate segment therefore detects (and, via the same D-5 penalty formula,
+ *    discourages) a perpendicular node-crossing with an already-routed edge, entirely locally —
+ *    no pairwise scan over `acceptedRoutes` is needed, unlike the wiring-layer `crossesAny` check
+ *    this extension was built to make redundant (kept only as a defense-in-depth net; see
+ *    `edgeGeometry.ts`'s own doc comment on `crossesAny`).
+ *
+ * Honesty note (same spirit as the rest of this router): this is a deterministic cost-based
+ * DISCOURAGEMENT, applied uniformly to every candidate via the shared A* cost function — not a
+ * hard planarity guarantee. If every alternative route is even more expensive than paying the
+ * crossing penalty (rare, but possible in a dense fixture), A* will still choose the cheapest
+ * option available, which may include a crossing. What this eliminates is the PR3a gap where
+ * crossings were invisible to the search entirely (a same-cost, unpenalized choice); it does not
+ * claim to eliminate every geometrically possible crossing in every fixture.
+ */
 export interface OccupancyIndex {
   owners(edgeRef: number): number;
-  claim(path: readonly number[]): void;
-  release(path: readonly number[]): void;
+  /** Count of already-committed routes passing through `nodeId` along `axis` (`0` = horizontal,
+   * `1` = vertical). An O(1) map lookup. */
+  nodeAxisOwners(nodeId: number, axis: 0 | 1): number;
+  /** `graph` is optional for backward compatibility with call sites that only track same-edge
+   * sharing (e.g. unit tests using synthetic edge ids with no real graph behind them); when
+   * provided, `claim`/`release` also update node-axis occupancy for every edge in `path`. */
+  claim(path: readonly number[], graph?: RoutingGraph): void;
+  release(path: readonly number[], graph?: RoutingGraph): void;
   snapshot(): OccupancyIndex;
 }
 
 class OccupancyIndexImpl implements OccupancyIndex {
-  constructor(private readonly counts: Map<number, number> = new Map()) {}
+  constructor(
+    private readonly counts: Map<number, number> = new Map(),
+    private readonly nodeAxis: Map<number, [number, number]> = new Map(),
+  ) {}
 
   owners(edgeRef: number): number {
     return this.counts.get(edgeRef) ?? 0;
   }
 
-  claim(path: readonly number[]): void {
-    for (const id of path) this.counts.set(id, (this.counts.get(id) ?? 0) + 1);
+  nodeAxisOwners(nodeId: number, axis: 0 | 1): number {
+    return this.nodeAxis.get(nodeId)?.[axis] ?? 0;
   }
 
-  release(path: readonly number[]): void {
+  private bumpNode(nodeId: number, axis: 0 | 1, delta: number): void {
+    const pair = this.nodeAxis.get(nodeId) ?? [0, 0];
+    pair[axis] += delta;
+    if (pair[0] <= 0 && pair[1] <= 0) this.nodeAxis.delete(nodeId);
+    else this.nodeAxis.set(nodeId, pair);
+  }
+
+  claim(path: readonly number[], graph?: RoutingGraph): void {
+    for (const id of path) {
+      this.counts.set(id, (this.counts.get(id) ?? 0) + 1);
+      if (!graph) continue;
+      const axis = graph.edgeAxis(id);
+      const [a, b] = graph.edgeNodes(id);
+      this.bumpNode(a, axis, 1);
+      this.bumpNode(b, axis, 1);
+    }
+  }
+
+  release(path: readonly number[], graph?: RoutingGraph): void {
     for (const id of path) {
       const next = (this.counts.get(id) ?? 0) - 1;
       if (next <= 0) this.counts.delete(id);
       else this.counts.set(id, next);
+      if (!graph) continue;
+      const axis = graph.edgeAxis(id);
+      const [a, b] = graph.edgeNodes(id);
+      this.bumpNode(a, axis, -1);
+      this.bumpNode(b, axis, -1);
     }
   }
 
   snapshot(): OccupancyIndex {
-    return new OccupancyIndexImpl(new Map(this.counts));
+    const nodeAxisCopy = new Map<number, [number, number]>();
+    for (const [k, v] of this.nodeAxis) nodeAxisCopy.set(k, [v[0], v[1]]);
+    return new OccupancyIndexImpl(new Map(this.counts), nodeAxisCopy);
   }
 }
 
@@ -245,11 +312,15 @@ export function buildRoutingGraph(boxes: ReadonlyMap<string, Rect>): RoutingGrap
 
   const adjacency = new Map<number, GraphEdgeRef[]>();
   const containerTagsById = new Map<number, number[]>();
+  const axisById = new Map<number, 0 | 1>();
+  const nodesById = new Map<number, [number, number]>();
   let nextEdgeId = 0;
-  const addEdge = (a: number, b: number, containerTags: number[]): void => {
+  const addEdge = (a: number, b: number, containerTags: number[], axis: 0 | 1): void => {
     const id = nextEdgeId;
     nextEdgeId += 1;
     containerTagsById.set(id, containerTags);
+    axisById.set(id, axis);
+    nodesById.set(id, [a, b]);
     if (!adjacency.has(a)) adjacency.set(a, []);
     if (!adjacency.has(b)) adjacency.set(b, []);
     adjacency.get(a)!.push({ id, to: b });
@@ -265,7 +336,7 @@ export function buildRoutingGraph(boxes: ReadonlyMap<string, Rect>): RoutingGrap
     const active = leavesByX.filter((box) => box.y < y - EPS && y < box.y + box.h - EPS);
     const blocked = sweepBlocked(Array.from(xs), active, "x", "w");
     for (let xi = 0; xi < xs.length - 1; xi += 1) {
-      if (!blocked[xi]) addEdge(nodeId(xi, yi), nodeId(xi + 1, yi), []);
+      if (!blocked[xi]) addEdge(nodeId(xi, yi), nodeId(xi + 1, yi), [], 0);
     }
   }
 
@@ -283,7 +354,7 @@ export function buildRoutingGraph(boxes: ReadonlyMap<string, Rect>): RoutingGrap
       return acc;
     }, []);
     for (let yi = 0; yi < ys.length - 1; yi += 1) {
-      if (!blocked[yi]) addEdge(nodeId(xi, yi), nodeId(xi, yi + 1), tags);
+      if (!blocked[yi]) addEdge(nodeId(xi, yi), nodeId(xi, yi + 1), tags, 1);
     }
   }
 
@@ -295,5 +366,7 @@ export function buildRoutingGraph(boxes: ReadonlyMap<string, Rect>): RoutingGrap
     nodeId,
     neighbours: (id: number): readonly GraphEdgeRef[] => adjacency.get(id) ?? emptyNeighbours,
     containerTagsOf: (edgeRef: number): readonly number[] => containerTagsById.get(edgeRef) ?? emptyTags,
+    edgeAxis: (edgeRef: number): 0 | 1 => axisById.get(edgeRef) ?? 0,
+    edgeNodes: (edgeRef: number): readonly [number, number] => nodesById.get(edgeRef) ?? [0, 0],
   };
 }

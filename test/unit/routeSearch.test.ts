@@ -44,6 +44,8 @@ function makeGraph(xs: number[], ys: number[], edges: { a: [number, number]; b: 
   const nodeId = (xi: number, yi: number): number => xi * ysArr.length + yi;
   const adjacency = new Map<number, GraphEdgeRef[]>();
   const tagsById = new Map<number, number[]>();
+  const axisById = new Map<number, 0 | 1>();
+  const nodesById = new Map<number, [number, number]>();
   edges.forEach(({ a, b, tags }, id) => {
     const na = nodeId(a[0], a[1]);
     const nb = nodeId(b[0], b[1]);
@@ -52,6 +54,10 @@ function makeGraph(xs: number[], ys: number[], edges: { a: [number, number]; b: 
     adjacency.get(na)!.push({ id, to: nb });
     adjacency.get(nb)!.push({ id, to: na });
     tagsById.set(id, tags ?? []);
+    // Same convention as `buildRoutingGraph`: axis 0 = horizontal (same yi, different xi), axis 1
+    // = vertical (same xi, different yi).
+    axisById.set(id, a[1] === b[1] ? 0 : 1);
+    nodesById.set(id, [na, nb]);
   });
   return {
     xs: xsArr,
@@ -59,6 +65,8 @@ function makeGraph(xs: number[], ys: number[], edges: { a: [number, number]; b: 
     nodeId,
     neighbours: (id: number): readonly GraphEdgeRef[] => adjacency.get(id) ?? [],
     containerTagsOf: (edgeRef: number): readonly number[] => tagsById.get(edgeRef) ?? [],
+    edgeAxis: (edgeRef: number): 0 | 1 => axisById.get(edgeRef) ?? 0,
+    edgeNodes: (edgeRef: number): readonly [number, number] => nodesById.get(edgeRef) ?? [0, 0],
   };
 }
 
@@ -228,6 +236,79 @@ describe("routeSearch: D-5 occupancy penalty changes the winning route", () => {
       { x: 0, y: 10 },
       { x: 100, y: 10 },
       { x: 100, y: 0 },
+    ]);
+  });
+});
+
+describe("routeSearch: node-crossing penalty (crossing-fix extension)", () => {
+  // A already-committed edge A routes straight horizontally through node (2,1) (x=10,y=10),
+  // claimed via `occ.claim([...A's edge ids], g)` — the crossing-fix `graph` argument that
+  // populates NODE-axis occupancy, not just same-edge `owners`. Edge B's direct path would run
+  // straight VERTICALLY through that exact same node (2,1), a genuine perpendicular crossing this
+  // extension exists to discourage. A disjoint detour column (x=-10) gives B a real, more
+  // expensive alternative that touches none of A's claimed nodes.
+  function crossingGraph(): RoutingGraph {
+    return makeGraph(
+      [-10, 0, 10, 20],
+      [0, 10, 20],
+      [
+        { a: [1, 1], b: [2, 1] }, // id0: A, H y=10, x:0->10
+        { a: [2, 1], b: [3, 1] }, // id1: A, H y=10, x:10->20
+        { a: [2, 0], b: [2, 1] }, // id2: B direct, V x=10, y:0->10
+        { a: [2, 1], b: [2, 2] }, // id3: B direct, V x=10, y:10->20
+        { a: [2, 0], b: [0, 0] }, // id4: B detour, H y=0, x:10->-10
+        { a: [0, 0], b: [0, 1] }, // id5: B detour, V x=-10, y:0->10
+        { a: [0, 1], b: [0, 2] }, // id6: B detour, V x=-10, y:10->20
+        { a: [0, 2], b: [2, 2] }, // id7: B detour, H y=20, x:-10->10
+      ],
+    );
+  }
+
+  const bStart = slot({ x: 10, y: -10 }, { x: 10, y: 0 }); // anchor north of escape -> startDir = south
+  const bGoal = slot({ x: 10, y: 30 }, { x: 10, y: 20 });
+
+  it("takes the direct straight-through path when node (2,1) carries no perpendicular occupancy", () => {
+    const g = crossingGraph();
+    const occ = createOccupancyIndex();
+    const route = routeOne(g, occ, bStart, bGoal, noAncestors);
+    expect(route).toEqual([
+      { x: 10, y: -10 },
+      { x: 10, y: 0 },
+      { x: 10, y: 10 },
+      { x: 10, y: 20 },
+      { x: 10, y: 30 },
+    ]);
+  });
+
+  it("switches to the disjoint detour once A's horizontal route is claimed WITH the graph argument (node-axis occupancy)", () => {
+    const g = crossingGraph();
+    const occ = createOccupancyIndex();
+    occ.claim([0, 1], g); // A's route: ids 0,1 — bumps horizontal-axis occupancy at nodes (2,1) (x=10,y=10) among others
+    expect(occ.nodeAxisOwners(g.nodeId(2, 1), 0)).toBe(2); // node (2,1) is an endpoint of BOTH id0 and id1
+    const route = routeOne(g, occ, bStart, bGoal, noAncestors);
+    expect(route).toEqual([
+      { x: 10, y: -10 },
+      { x: 10, y: 0 },
+      { x: -10, y: 0 },
+      { x: -10, y: 10 },
+      { x: -10, y: 20 },
+      { x: 10, y: 20 },
+      { x: 10, y: 30 },
+    ]);
+  });
+
+  it("claim WITHOUT the graph argument does not populate node-axis occupancy — the search stays on the direct path (backward-compat no-op)", () => {
+    const g = crossingGraph();
+    const occ = createOccupancyIndex();
+    occ.claim([0, 1]); // no graph passed — same-edge `owners` update only, no node-axis effect
+    expect(occ.nodeAxisOwners(g.nodeId(2, 1), 0)).toBe(0);
+    const route = routeOne(g, occ, bStart, bGoal, noAncestors);
+    expect(route).toEqual([
+      { x: 10, y: -10 },
+      { x: 10, y: 0 },
+      { x: 10, y: 10 },
+      { x: 10, y: 20 },
+      { x: 10, y: 30 },
     ]);
   });
 });

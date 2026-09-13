@@ -86,6 +86,35 @@ density difference). Do not build Phase 1-5 around a projection.
 - [x] 3a.2 GREEN: deleted `routeCost`, `routingPorts`, `Port` interface, and `simplifyRoute` (all superseded); wired `buildRoutingGraph`/`createOccupancyIndex`/`allocatePort` (routingGraph.ts) + `routeOne` (routeSearch.ts) into `edgePathsFor`, with fallback-to-`edgePathFor` on no viable candidate (D-2). Everything ≤ line ~571 (`ROUTE_CLEARANCE`) is byte-identical; `simplifyRoute` (previously ~573-588) was additionally deleted as dead code (a real, necessary deviation from design.md's literal "≤579 byte-identical" — see Deviations) since ESLint's `no-unused-vars` fails the build otherwise.
 - [x] 3a.3 Confirmed `test/unit/edgeGeometry.test.ts` needs zero edits — verified directly (43/43 tests pass unmodified), matching design.md's own verification.
 
+## Crossing-fix (pre-PR3b, user-requested) — COMPLETE
+
+User explicitly chose to resolve PR3a's disclosed Deviation 4/5 gap (perpendicular node-crossings
+invisible to `OccupancyIndex`) now, before PR3b's property-suite rewrite, rather than deferring it.
+
+- [x] CF.1 RED: extended `test/unit/routingGraph.test.ts` (node-axis claim/release round-trip,
+      backward-compat no-graph-arg case, `edgeAxis`/`edgeNodes` invariant check) and
+      `test/unit/routeSearch.test.ts` (node-crossing-penalty behavioral route-switch test, direct
+      vs. detour vs. backward-compat-no-op) — confirmed failing before implementation (missing
+      `edgeAxis`/`edgeNodes`/`nodeAxisOwners` APIs).
+- [x] CF.2 GREEN: extended `RoutingGraph` with `edgeAxis`/`edgeNodes`; extended `OccupancyIndex`
+      with `nodeAxisOwners` and an optional `graph` argument on `claim`/`release` (backward
+      compatible — omitting it skips node tracking); extended `routeOne`'s edge relaxation to
+      apply the SAME `crossingPenaltyFor` formula against both endpoints' perpendicular-axis node
+      occupancy, O(1) per relaxation, no pairwise scan. All new + existing routingGraph/routeSearch
+      tests pass (35/35).
+- [x] CF.3 Tightened `coordinatedRouting.test.ts`'s "keeps crossings rare" test; investigated the
+      one residual crossing (a fixed anchor->escape port hop, outside the search graph, not a
+      graph-internal node-crossing) — attempted to close it by promoting `crossesAny` into a hard
+      tier-1/tier-2 acceptance gate, MEASURED a catastrophic regression (~49.6s at {100,200}),
+      REVERTED. Kept the bounded (`<=1`) assertion with an honest, narrowed doc-comment explaining
+      exactly which crossing category remains and why the stronger fix was rejected.
+- [x] CF.4 Re-measured `edgePathsFor` at {60,120}/{100,200}/{150,300}/{200,400}/{300,600} (3 runs
+      each at the two largest sizes) — confirmed no reintroduction of cubic-ish scaling; numbers
+      stayed in the same order of magnitude as PR3a's own accepted benchmark. See
+      apply-progress.md's crossing-fix section for the full table.
+- [x] CF.5 Full gate re-run: `npm run typecheck`, `npm run lint`, `npm test` (580/580), `npm run
+      test:e2e` (real VS Code Extension Development Host, exit code 0).
+
 ## Phase 3b: Full property-based suite (PR3b)
 
 - [ ] 3b.1 Add remaining properties per design.md's table: clearance-with-margin, port distinctness (n ≤ 8), determinism-as-reproducibility (incl. shuffled lane-insertion order + heap-swap invariance), self-loops, container-lane (kept as-is), label/header bands (kept as-is), outer-lane fallback, 200-seeded randomized sweep.

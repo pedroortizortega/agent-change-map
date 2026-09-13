@@ -226,4 +226,95 @@ describe("routingGraph: OccupancyIndex", () => {
     expect(occ.owners(5)).toBe(2);
     expect(snap.owners(5)).toBe(1);
   });
+
+  it("nodeAxisOwners defaults to 0 for every node/axis before any claim", () => {
+    const occ = createOccupancyIndex();
+    expect(occ.nodeAxisOwners(0, 0)).toBe(0);
+    expect(occ.nodeAxisOwners(0, 1)).toBe(0);
+  });
+
+  it("claim(path, graph) records NODE-axis occupancy for both endpoints of every graph edge in path, round-tripping on release", () => {
+    // Crossing-fix extension: build a tiny real graph via `buildRoutingGraph` (two boxes stacked
+    // vertically, far enough apart that a plain horizontal lane and a plain vertical lane both
+    // exist) and confirm claiming a route bumps the correct axis at the correct nodes, not just
+    // the same-edge `owners` count.
+    const boxes = new Map<string, Rect>([
+      ["a", { x: 0, y: 0, w: 40, h: 20 }],
+      ["b", { x: 0, y: 100, w: 40, h: 20 }],
+    ]);
+    const graph = buildRoutingGraph(boxes);
+    // Find one horizontal edge (axis 0) and one vertical edge (axis 1) to probe directly.
+    let horizontalId = -1;
+    let verticalId = -1;
+    let hNodes: readonly [number, number] = [0, 0];
+    let vNodes: readonly [number, number] = [0, 0];
+    outer: for (let xi = 0; xi < graph.xs.length; xi += 1) {
+      for (let yi = 0; yi < graph.ys.length; yi += 1) {
+        for (const ref of graph.neighbours(graph.nodeId(xi, yi))) {
+          if (horizontalId < 0 && graph.edgeAxis(ref.id) === 0) { horizontalId = ref.id; hNodes = graph.edgeNodes(ref.id); }
+          if (verticalId < 0 && graph.edgeAxis(ref.id) === 1) { verticalId = ref.id; vNodes = graph.edgeNodes(ref.id); }
+          if (horizontalId >= 0 && verticalId >= 0) break outer;
+        }
+      }
+    }
+    expect(horizontalId).toBeGreaterThanOrEqual(0);
+    expect(verticalId).toBeGreaterThanOrEqual(0);
+
+    const occ = createOccupancyIndex();
+    expect(occ.nodeAxisOwners(hNodes[0], 0)).toBe(0);
+    occ.claim([horizontalId], graph);
+    expect(occ.nodeAxisOwners(hNodes[0], 0)).toBe(1);
+    expect(occ.nodeAxisOwners(hNodes[1], 0)).toBe(1);
+    // The perpendicular axis at those same nodes must stay untouched by a same-axis claim.
+    expect(occ.nodeAxisOwners(hNodes[0], 1)).toBe(0);
+
+    occ.claim([verticalId], graph);
+    expect(occ.nodeAxisOwners(vNodes[0], 1)).toBe(1);
+    expect(occ.nodeAxisOwners(vNodes[1], 1)).toBe(1);
+
+    occ.release([horizontalId], graph);
+    expect(occ.nodeAxisOwners(hNodes[0], 0)).toBe(0);
+    expect(occ.nodeAxisOwners(hNodes[1], 0)).toBe(0);
+    occ.release([verticalId], graph);
+    expect(occ.nodeAxisOwners(vNodes[0], 1)).toBe(0);
+    expect(occ.nodeAxisOwners(vNodes[1], 1)).toBe(0);
+  });
+
+  it("claim(path) WITHOUT a graph argument stays backward-compatible: same-edge owners still update, node-axis stays untouched", () => {
+    const occ = createOccupancyIndex();
+    occ.claim([9]);
+    expect(occ.owners(9)).toBe(1);
+    // No graph was passed, so no node could possibly have been touched — this is the exact
+    // backward-compatibility contract existing call sites (and the test above) rely on.
+    expect(occ.nodeAxisOwners(0, 0)).toBe(0);
+    expect(occ.nodeAxisOwners(0, 1)).toBe(0);
+  });
+});
+
+describe("routingGraph: edgeAxis / edgeNodes (crossing-fix extension)", () => {
+  it("reports axis 0 (horizontal) for a row edge and axis 1 (vertical) for a column edge, with correct endpoint node ids", () => {
+    const boxes = new Map<string, Rect>([
+      ["a", { x: 0, y: 0, w: 40, h: 20 }],
+      ["b", { x: 0, y: 100, w: 40, h: 20 }],
+    ]);
+    const graph = buildRoutingGraph(boxes);
+    // Any horizontal edge connects two nodes sharing the same yi (different xi); any vertical
+    // edge connects two nodes sharing the same xi (different yi). Verify this invariant holds for
+    // every edge reachable from every node, using `edgeAxis`/`edgeNodes` directly (not inferred).
+    let sawHorizontal = false;
+    let sawVertical = false;
+    for (let xi = 0; xi < graph.xs.length; xi += 1) {
+      for (let yi = 0; yi < graph.ys.length; yi += 1) {
+        for (const ref of graph.neighbours(graph.nodeId(xi, yi))) {
+          const axis = graph.edgeAxis(ref.id);
+          const [a, b] = graph.edgeNodes(ref.id);
+          expect(a === graph.nodeId(xi, yi) || b === graph.nodeId(xi, yi)).toBe(true);
+          if (axis === 0) sawHorizontal = true;
+          else sawVertical = true;
+        }
+      }
+    }
+    expect(sawHorizontal).toBe(true);
+    expect(sawVertical).toBe(true);
+  });
 });

@@ -245,7 +245,20 @@ export function routeOne(
       const bendHere = nextDir === current.dir ? 0 : 1;
       const length = Math.abs(dx) + Math.abs(dy);
       const penalty = crossingPenaltyFor(occ.owners(edge.id));
-      const stepCost = length + bendHere * BEND_COST + penalty;
+      // Crossing-fix extension (see `routingGraph.ts`'s `OccupancyIndex` doc comment): two
+      // orthogonal segments can only geometrically cross at a shared grid node, since segments
+      // only ever run between coordinate-ADJACENT lane lines. This step's own axis is `dx !== 0`
+      // (horizontal, axis 0) or vertical (axis 1); checking the PERPENDICULAR axis's owner count
+      // at both endpoints this segment touches is therefore an O(1), locally-sufficient check for
+      // "does this exact step risk crossing an already-committed route" — no scan over prior
+      // routes. Reuses the same calibrated D-5 formula (`crossingPenaltyFor`) so both mechanisms
+      // share one tuning knob, per design.md's binding CROSSING_BASE/CROSSING_STEP sweep.
+      const axis: 0 | 1 = dx !== 0 ? 0 : 1;
+      const perpAxis: 0 | 1 = axis === 0 ? 1 : 0;
+      const nodeCrossPenalty =
+        crossingPenaltyFor(occ.nodeAxisOwners(current.node, perpAxis)) +
+        crossingPenaltyFor(occ.nodeAxisOwners(nextNode, perpAxis));
+      const stepCost = length + bendHere * BEND_COST + penalty + nodeCrossPenalty;
 
       const nextStateKey = nextNode * 4 + nextDir;
       if (closed.has(nextStateKey)) continue;

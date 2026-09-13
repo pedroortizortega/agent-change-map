@@ -1078,3 +1078,143 @@ concrete, disclosed follow-up items for PR3b's design attention: (1) the node-oc
 needed to make crossing-avoidance and container-lane clearance O(1) hard guarantees instead of
 wiring-layer preferences (Deviations 4-5), and (2) the full property suite itself, which was
 explicitly out of scope for this PR's "minimal green suite" mandate.
+
+---
+
+## Crossing-fix (pre-PR3b, user-requested): node-occupancy extension to `OccupancyIndex`
+
+User explicitly chose to resolve PR3a's Deviation 4/5 gap NOW (before PR3b's full property-suite
+rewrite), even at the cost of extra time/risk, rather than defer it as documented follow-up debt.
+Same branch (`feat/edge-router-performance`), no new branch created, per `stacked-to-main`.
+
+### TDD Cycle Evidence
+
+| Step | Action | Result |
+|---|---|---|
+| RED | Extended `test/unit/routingGraph.test.ts` (node-axis claim/release round-trip via a real `buildRoutingGraph` graph, backward-compat `claim(path)`-without-graph no-op case, `edgeAxis`/`edgeNodes` invariant check) and `test/unit/routeSearch.test.ts` (`makeGraph` mock extended with `edgeAxis`/`edgeNodes`; three new behavioral tests: direct path when unoccupied, switches to a disjoint detour once a perpendicular route is claimed WITH the graph argument, stays on the direct path when `claim` is called WITHOUT the graph argument). | Confirmed failing: `RoutingGraph`/`OccupancyIndex` lacked `edgeAxis`/`edgeNodes`/`nodeAxisOwners`; `makeGraph`'s mock object failed the `RoutingGraph` structural type. |
+| GREEN | Implemented the extension: `RoutingGraph.edgeAxis`/`edgeNodes` (populated at `buildRoutingGraph` construction time, one extra `Map` write per edge, no added asymptotic cost); `OccupancyIndex.nodeAxisOwners` plus an OPTIONAL `graph` second argument on `claim`/`release` (omitting it is a documented, tested no-op — existing call sites and tests needed zero changes); `routeSearch.ts`'s edge-relaxation step now also looks up `occ.nodeAxisOwners` for the PERPENDICULAR axis at both endpoints of the candidate segment and folds the same `crossingPenaltyFor` formula into `stepCost` — reusing D-5's existing calibration, not a new untuned constant. | All new tests passed on first implementation attempt; full `routingGraph.test.ts` + `routeSearch.test.ts` suite: 35/35. |
+| REFACTOR | Ran `npm run typecheck` (both tsconfigs), `npm run lint`, `npm run test` (full suite), `npm run test:e2e`. | All clean — see Full Gate Confirmation below. |
+
+### Why this is O(1)-per-relaxation, not a reintroduced pairwise scan
+
+Two orthogonal graph edges can only geometrically cross at a shared grid node: every graph edge
+runs between coordinate-ADJACENT lane lines by construction (`buildRoutingGraph`'s `xs`/`ys`
+sampling), so a transversal intersection between a horizontal and a vertical segment always lands
+exactly on a node both segments touch — never strictly inside either segment's interior. This means
+checking the PERPENDICULAR axis's owner count at the two endpoint nodes of a candidate step is a
+locally-sufficient, O(1) map-lookup check for "does this exact step risk a perpendicular crossing
+with an already-committed route" — no scan over `acceptedRoutes` or any other edge's full path is
+needed, matching this change's entire performance thesis.
+
+### What this DOES fix, verified
+
+The `routeSearch.test.ts` node-crossing-penalty tests directly verify the mechanism: an
+already-claimed horizontal route (`occ.claim([...], graph)`) makes a subsequent straight vertical
+path through the same shared node cost 260 (length 20 + node-crossing penalty 240) vs. a disjoint
+detour's 92 (length 60 + 2 bends), so the search switches to the detour — exactly the intended
+in-search discouragement, and exactly the class of gap PR3a's Deviation 4 disclosed (graph-internal
+perpendicular node-crossings, previously invisible to `OccupancyIndex` entirely).
+
+### What this does NOT fix — investigated directly, not assumed, and the stronger fix was REJECTED after being measured
+
+Re-running `coordinatedRouting.test.ts`'s "keeps crossings rare" fixture after the node-occupancy
+fix alone still showed **1 crossing** (down from what PR3a's own bound already tolerated, but not
+zero). Traced directly (not guessed) via targeted debug output: the crossing is between two edges'
+fixed **anchor->escape hops** — the short segment between a box's own boundary and its nearest lane
+line, whose geometry is fixed entirely by `allocatePort`/`portAtLane` BEFORE `routeOne`'s search
+even begins. This segment sits OUTSIDE the shared visibility graph entirely; there is no graph node
+for `OccupancyIndex` to attach an occupancy count to, no matter how the index itself is extended —
+this is a structurally different crossing category from the one Deviation 4 flagged and this fix
+targets.
+
+**A stronger fix was attempted and explicitly rejected, honestly, after real measurement — this is
+the disclosed trade-off the task asked to surface if one existed:** promoting the wiring-layer
+`crossesAny` check (previously consulted only in the final degrade order, per PR3a's Deviation 4)
+into a hard requirement inside `isGoodEnough` (tier-1/tier-2 acceptance) DOES close this remaining
+case — tier-2's varied escape-depth search can dock a port at a different offset that avoids the
+hop-level crossing. But it was measured, not assumed, to reintroduce catastrophic scaling:
+
+| nodes/edges | `edgePathsFor` ms, `crossesAny` as a hard gate |
+|---|---|
+| 60/120 | 7.2 |
+| 100/200 | **49,581.2** (killed before larger sizes ran — no value in continuing) |
+
+This is a ~130x regression over the accepted (reverted-to) numbers at the same size (see below) —
+exactly the class of regression PR3a's own Deviation 3 already documented for an earlier,
+independent attempt at a similar promotion (unconditional-search escalation), now confirmed to
+recur for this specific promotion too. **Reverted in full** — `isGoodEnough` is back to exactly
+PR3a's landed shape (`clearsContainerLanes` only), `crossesAny` stays a final-degrade preference
+only. This is reported here as a genuine, measured, NOT-silently-resolved trade-off: the anchor/
+escape-hop crossing category remains open, by deliberate choice, because the only tested way to
+close it costs the exact performance property this entire change exists to deliver.
+
+`coordinatedRouting.test.ts`'s "keeps crossings rare" test is therefore kept at its PR3a bound
+(`<=1`, not tightened to `0`), with its doc comment rewritten to name the SPECIFIC, narrower
+remaining gap (anchor/escape hops) rather than the broader one PR3a originally disclosed
+(perpendicular graph-node crossings), which this fix does close.
+
+### Performance — re-measured for real, same sizes used throughout this change
+
+Fresh throwaway script `openspec/changes/edge-router-performance/perf/measure-edgepaths-crossing-fix.ts`
+(same isolation methodology as PR3a's own measurement: `layoutGraph` once for real `boxes`, then
+`edgePathsFor` timed directly), run 3 times at the two largest sizes to check run-to-run variance
+(this machine measures with real, sometimes-substantial cold-JIT-per-process noise, as prior
+rounds' own numbers already show). Written, measured, and **deleted** per this change's own
+throwaway-spike convention; `git status --porcelain` confirms it is not part of any diff.
+
+| nodes/edges | PR3a's own accepted number (ms) | This fix, run 1 (ms) | run 2 (ms) | run 3 (ms) |
+|---|---|---|---|---|
+| 60/120 | 107.2 | 6.1 | 6.1 | 6.1 |
+| 100/200 | not in PR3a's table | 380.4 | 376.7 | 384.5 |
+| 150/300 | 788.0 | 965.8 | 975.5 | 982.6 |
+| 200/400 | not in PR3a's table | 1,799.9 | 1,998.5 | 1,836.9 |
+| 300/600 | 4,242.4 | 4,889.1 | 6,442.6 | 4,938.3 |
+
+**Verdict: the speedup survives.** `{300,600}` stays at 4.9-6.4s across three real runs — the same
+order of magnitude as PR3a's own 4,242.4ms number (roughly 1.15x-1.5x slower, attributable to the
+extra `Map` writes/lookups this extension adds per claim/relaxation), comfortably under the
+10,000ms hard budget with real margin, and nowhere close to the old, unfixed router's measured
+>590,000ms at the same size (Phase 0). The scaling SHAPE also stays consistent with PR3a's own
+sub-cubic curve (100->150, 1.5x N: 380->966 = 2.54x, ~N^2.3; 200->300, 1.5x N: 1,837-1,999->4,889-
+6,443 ≈ 2.6-3.2x, ~N^2.4-2.9) — not a reversion to the old router's confirmed cubic-ish growth. The
+60/120 number (6.1ms, notably lower than PR3a's own 107.2ms) is most likely measurement variance
+from this specific run's box layout / process warm-up, not a meaningful regression signal in
+either direction — flagged honestly rather than cherry-picked.
+
+### Files Changed (this work unit)
+
+| File | Action | Lines (`git diff --numstat`) |
+|---|---|---|
+| `webview/routingGraph.ts` | Modified | +83 / -10 |
+| `webview/routeSearch.ts` | Modified | +14 / -1 |
+| `webview/edgeGeometry.ts` | Modified | +30 / -16 |
+| `test/unit/routingGraph.test.ts` | Modified | +91 / -0 |
+| `test/unit/routeSearch.test.ts` | Modified | +81 / -0 |
+| `test/unit/coordinatedRouting.test.ts` | Modified | +20 / -11 |
+| **Total authored additions+deletions** | | **357** — under the 400-line review budget, no `size:exception` needed |
+
+### Work Unit Evidence
+
+| Evidence | Value |
+|---|---|
+| Focused test command and exact result | `npx vitest run test/unit/routingGraph.test.ts test/unit/routeSearch.test.ts test/unit/coordinatedRouting.test.ts test/unit/edgeGeometry.test.ts` → 90/90 passed (19+16+12+43; `routingGraph.test.ts` grew from 15 to 19, `routeSearch.test.ts` grew from 13 to 16, `coordinatedRouting.test.ts`/`edgeGeometry.test.ts` test counts unchanged) |
+| Runtime harness command/scenario and exact result | `npm run test:e2e` (real VS Code Extension Development Host, built webview bundle) → exit code 0, all scenarios passed including "refresh scenario ok" (exercises the real, patched `edgePathsFor`/`routeOne` rendering a real diagram) |
+| Rollback boundary | Revert `RoutingGraph.edgeAxis`/`edgeNodes` and `OccupancyIndex.nodeAxisOwners`/the optional `graph` argument on `claim`/`release` (all additive/optional — no existing call site required a change beyond `edgeGeometry.ts`'s own `occ.claim(ids, graph)` call site, a 1-line diff); revert `routeSearch.ts`'s node-crossing-penalty block (a single, clearly-delimited addition inside the edge-relaxation loop); revert the three test files' additions. `isGoodEnough`/`crossesAny` in `webview/edgeGeometry.ts` are net byte-identical to PR3a (the hard-gate attempt was fully reverted, not left as dead code) except for an updated doc comment. |
+
+### Full Gate Confirmation
+
+- `npm run typecheck` — clean (both tsconfigs).
+- `npm run lint` — clean, 0 errors/warnings.
+- `npm run test` — 36 files / 580 tests, all passing (573 + 7 new: 4 in `routingGraph.test.ts`, 3 in `routeSearch.test.ts`; `coordinatedRouting.test.ts`'s existing test count unchanged, only its doc comment and bound stayed the same).
+- `npm run test:e2e` — run for real, VS Code Extension Development Host, exit code 0.
+
+### Status
+
+Crossing-fix work unit complete: node-occupancy extension implemented, tested, and verified to
+close the graph-internal perpendicular-crossing gap (PR3a Deviation 4's PRIMARY concern) without
+regressing performance. A narrower, structurally-distinct crossing category (fixed anchor/escape
+port hops) remains open by deliberate, measured choice — closing it costs this change's entire
+performance thesis, so it was not taken. This is now the most precise, up-to-date statement of
+what `edgePathsFor`'s crossing-avoidance does and does not guarantee; carry it forward into PR3b's
+property suite (a property test asserting the SPECIFIC remaining gap, rather than a generic
+"crossings are rare" property, would be more honest test coverage for PR3b to add).

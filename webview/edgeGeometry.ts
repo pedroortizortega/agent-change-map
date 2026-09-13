@@ -671,21 +671,25 @@ function collapseCollinear(points: readonly Point[]): Point[] {
 /**
  * True when `route` transversally crosses any already-accepted route from earlier in the same
  * `edgePathsFor` call (one segment horizontal, the other vertical, genuinely intersecting rather
- * than merely touching). `OccupancyIndex` only tracks ownership of the SAME shared graph edge
- * (parallel sharing, D-5's actual mechanism); it has no concept of two perpendicular graph edges
- * meeting at a node, so a horizontal detour from one edge's own port can still transit straight
- * through a completely unrelated edge's already-claimed vertical corridor without either edge's
- * occupancy penalty ever registering it. This is a real, disclosed gap in the D-5 mechanism as
- * landed (occupancy = edge-sharing only, not node-crossing) - checked explicitly here, at the
- * wiring layer, since it is the exact property the "avoids crossings" regression test asserts.
- * Cost: `O(acceptedRoutes x collapsedPathLength^2)` per candidate, on `collapseCollinear`'d input
- * (a handful of real corners, not every individual lane hop) - reintroduces some of the pairwise
- * scanning the new architecture set out to eliminate, but bounded by a small, fixed candidate
- * count and the collapsed corner count (both roughly the old algorithm's own waypoint scale),
- * NOT by lane-graph density; measured to keep the flat-fixture perf benchmark's shape intact
- * (still far below the old O(N^3)-ish curve). Flagged as a follow-up for PR3b: a node-occupancy
- * extension to `OccupancyIndex` (claim/check the NODES a route passes through, not just the
- * edges) would let this collapse back to O(1) per relaxation instead of a wiring-layer re-check.
+ * than merely touching).
+ *
+ * **Crossing-fix update**: the O(1) node-occupancy mechanism this doc comment used to flag as
+ * missing now exists — `OccupancyIndex.nodeAxisOwners` (`routingGraph.ts`) is consulted directly
+ * inside `routeOne`'s A* relaxation (`routeSearch.ts`), so a candidate step that would land on a
+ * node already carrying a perpendicular committed route is cost-penalized DURING the search
+ * itself, structurally, not just preferred afterwards at this wiring layer. This makes crossings
+ * rare by construction rather than by a post-hoc pairwise check.
+ *
+ * This function is kept as a **defense-in-depth safety net, not the load-bearing mechanism**: the
+ * in-search penalty is a cost-based discouragement (see `OccupancyIndex`'s own doc comment for the
+ * exact honesty caveat), not a hard rejection, so a candidate that is otherwise far cheaper could
+ * still, in principle, be selected despite carrying a crossing. Kept as a final degrade-order
+ * preference (see call site below) rather than removed outright, since certainty that every case
+ * is caught upstream is not fully provable from this test suite alone. Cost:
+ * `O(acceptedRoutes x collapsedPathLength^2)` per candidate, on `collapseCollinear`'d input (a
+ * handful of real corners, not every individual lane hop) — bounded by a small, fixed candidate
+ * count and the collapsed corner count, NOT by lane-graph density; unchanged from PR3a's own
+ * measured-safe shape.
  */
 function crossesAny(route: readonly Point[], accepted: readonly (readonly Point[])[]): boolean {
   for (const other of accepted) {
@@ -847,6 +851,16 @@ export function edgePathsFor(boxes: ReadonlyMap<string, Rect>, edges: readonly R
       list.sort((a, b) => a.cost - b.cost);
       return list;
     };
+    // Crossing-fix investigation note: promoting `!crossesAny` into this acceptance predicate
+    // (tried during the crossing-fix follow-up to PR3a) was MEASURED to reintroduce catastrophic
+    // scaling — {100,200} alone took ~49.6s, vs. this PR's own 392.8ms `edgePathsFor` number one
+    // measurement round earlier — because it forces frequent tier-2 escalation as `acceptedRoutes`
+    // grows, and `crossesAny`'s own O(acceptedRoutes x pathLength^2) cost is then paid for every
+    // one of tier-2's ~48 candidates, repeatedly, for a large fraction of edges. Reverted; kept
+    // exactly as PR3a's Deviation 4 landed it (see `crossesAny`'s own doc comment): a low-cost
+    // preference consulted ONLY in the final degrade order below, never a tier-1/tier-2 gate. This
+    // is a real, disclosed, deliberately-not-taken trade-off — see apply-progress.md's crossing-fix
+    // section for the full honest accounting of what this leaves unresolved.
     const isGoodEnough = (c: { route: Point[]; collapsed: Point[] }): boolean => clearsContainerLanes(c.route);
 
     let candidates: { route: Point[]; cost: number; collapsed: Point[] }[];
@@ -896,7 +910,7 @@ export function edgePathsFor(boxes: ReadonlyMap<string, Rect>, edges: readonly R
     if (!bestCandidate) { paths[index] = edgePathFor(boxes, edge.source, edge.target); continue; }
     const best = bestCandidate.route;
     acceptedRoutes.push(bestCandidate.collapsed);
-    occ.claim(graphEdgeIdsAlong(graph, best));
+    occ.claim(graphEdgeIdsAlong(graph, best), graph);
     // Corner-rounding (visual redesign, post-PR4) is applied to the final rendered string only;
     // occupancy bookkeeping above keeps using the sharp-cornered `best` waypoints.
     paths[index] = roundedPolylinePath(best);
