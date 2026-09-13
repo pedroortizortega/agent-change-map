@@ -1,6 +1,6 @@
 import type { AnalysisGraph, Edge, Entity } from "../src/protocol.js";
 import type { CorrelatedDiffEntry } from "../src/navigation/sourceProvider.js";
-import { edgePathFor, edgePathsFor, pathEndpoints, type Point, type Rect } from "./edgeGeometry.js";
+import { edgePathFor, edgeRoutesFor, pathEndpoints, scopedEdgePathsFor, type Point, type Rect } from "./edgeGeometry.js";
 import { changeStatusFor, NESTED_LAYOUT_LIMITS, type ChangeStatus } from "./graphFilters.js";
 
 export interface Position {
@@ -234,14 +234,57 @@ export function measure(node: Entity, childrenOf: Map<string | undefined, Entity
   return size;
 }
 
+/**
+ * PR4 scoped drag-drop re-route input (design.md Block F, KEEP — see apply-progress.md's PR4
+ * section for the real measurement). `movedIds` is the dragged node plus every D14-cascaded
+ * descendant (mirrors `onNodeDragStop`'s own cascade in `index.tsx`); `previousRoutes` is the
+ * PRIOR `layoutGraph` call's own `LayoutResult.edgeRoutes` — the raw (pre-rounding) waypoints for
+ * every edge that pass currently routed, keyed by the edge's position in `AnalysisGraph.edges`
+ * (stable across a drag, since a drag never adds/removes edges).
+ */
+export interface DragCommitScope {
+  movedIds: ReadonlySet<string>;
+  previousRoutes: ReadonlyMap<number, readonly Point[]>;
+}
+
+export interface RoutedPathsResult {
+  paths: Map<number, string | undefined>;
+  /** Raw (pre-rounding) waypoints per routed edge, keyed by the SAME `AnalysisGraph.edges`
+   * position as `paths` — cached by the caller (`index.tsx`) and threaded back in as the NEXT
+   * drag-commit's `DragCommitScope.previousRoutes` (PR4). */
+  routes: Map<number, Point[]>;
+}
+
 /** Exclude containment before allocating connector ports, while preserving protocol indices. */
-export function routedPaths(edges: readonly Edge[], boxes: Map<string, Rect>): Map<number, string | undefined> {
+export function routedPaths(edges: readonly Edge[], boxes: Map<string, Rect>, scope?: DragCommitScope): RoutedPathsResult {
   const visible = edges.map((edge, index) => ({ edge, index })).filter(({ edge }) => edge.kind !== "contains" && edge.resolution.kind === "resolved" && boxes.has(edge.resolution.target));
-  const paths = edgePathsFor(boxes, visible.map(({ edge }) => ({
+  const routingEdges = visible.map(({ edge }) => ({
     source: edge.source,
     target: edge.resolution.kind === "resolved" ? edge.resolution.target : undefined,
-  })));
-  return new Map(visible.map(({ index }, i) => [index, paths[i]]));
+  }));
+
+  const core = (() => {
+    if (!scope) return edgeRoutesFor(boxes, routingEdges);
+    // Translate the caller's original-edge-index-keyed `previousRoutes` into the positional
+    // indices `coordinateRoutes` (edgeGeometry.ts) uses for THIS `routingEdges` list.
+    const previousForCore = new Map<number, readonly Point[]>();
+    visible.forEach(({ index }, i) => {
+      const previous = scope.previousRoutes.get(index);
+      if (previous) previousForCore.set(i, previous);
+    });
+    // `scopedEdgePathsFor` returns `undefined` when a touched edge couldn't be routed at all —
+    // fall back to a REAL full re-route (never a crash, never a silently unrouted edge), per
+    // design.md's own scoped-reroute fallback scenario.
+    return scopedEdgePathsFor(boxes, routingEdges, scope.movedIds, previousForCore) ?? edgeRoutesFor(boxes, routingEdges);
+  })();
+
+  const paths = new Map(visible.map(({ index }, i) => [index, core.paths[i]]));
+  const routes = new Map<number, Point[]>();
+  visible.forEach(({ index }, i) => {
+    const route = core.routes.get(i);
+    if (route) routes.set(index, route);
+  });
+  return { paths, routes };
 }
 
 /**
@@ -287,6 +330,10 @@ export interface LayoutInput {
   diff: CorrelatedDiffEntry[];
   untrackedPaths: readonly string[];
   overrides: ReadonlyMap<string, Position>;
+  /** PR4: set only on the ONE `layoutGraph` call that commits a drag-drop (`onNodeDragStop`).
+   * When present, edge routing takes the scoped fast path instead of a full coordinated pass —
+   * see `routedPaths`'s own doc comment. */
+  dragCommit?: DragCommitScope;
 }
 
 export type AcmNode = {
@@ -342,6 +389,10 @@ export interface LayoutResult {
   boxes: Map<string, Rect>;
   relationshipCounts: Map<string, number>;
   flat: boolean;
+  /** PR4: raw (pre-rounding) waypoints per routed edge, keyed by its `AnalysisGraph.edges`
+   * position — cache this and thread it back as the NEXT drag-commit's
+   * `DragCommitScope.previousRoutes` (see `index.tsx`'s `onNodeDragStop`). */
+  edgeRoutes: Map<number, Point[]>;
 }
 
 /** Reverses `childrenOf`'s bucketing into a per-node normalized parent id, so orphan/cycle/
@@ -419,8 +470,13 @@ export function boxesForRouting(boxes: Map<string, Rect>, overrides: ReadonlyMap
   return merged;
 }
 
-function buildEdges(edges: readonly Edge[], boxes: Map<string, Rect>, overrides: ReadonlyMap<string, Position>): AcmEdge[] {
-  const paths = routedPaths(edges, boxesForRouting(boxes, overrides));
+function buildEdges(
+  edges: readonly Edge[],
+  boxes: Map<string, Rect>,
+  overrides: ReadonlyMap<string, Position>,
+  scope?: DragCommitScope,
+): { edges: AcmEdge[]; routes: Map<number, Point[]> } {
+  const { paths, routes } = routedPaths(edges, boxesForRouting(boxes, overrides), scope);
   const result: AcmEdge[] = [];
   edges.forEach((edge, index) => {
     if (edge.kind === "contains") return;
@@ -449,7 +505,7 @@ function buildEdges(edges: readonly Edge[], boxes: Map<string, Rect>, overrides:
       },
     });
   });
-  return result;
+  return { edges: result, routes };
 }
 
 export interface LiveDragUpdate {
@@ -527,7 +583,7 @@ export function computeLiveDragUpdate(input: {
 
 /** THE entry point index.tsx calls. */
 export function layoutGraph(input: LayoutInput): LayoutResult {
-  const { graph, diff, untrackedPaths, overrides } = input;
+  const { graph, diff, untrackedPaths, overrides, dragCommit } = input;
   const flat = graph.nodes.length > NESTED_LAYOUT_LIMITS.nodes || graph.edges.length > NESTED_LAYOUT_LIMITS.edges;
 
   const boxes = new Map<string, Rect>();
@@ -543,8 +599,8 @@ export function layoutGraph(input: LayoutInput): LayoutResult {
     const relationshipCounts = relationshipCountsFor(graph, boxes);
     const childrenOf = new Map<string | undefined, Entity[]>([[undefined, graph.nodes]]);
     const nodes = buildNodes(graph.nodes, childrenOf, boxes, depths, diff, untrackedPaths, relationshipCounts, overrides);
-    const edges = buildEdges(graph.edges, boxes, overrides);
-    return { nodes, edges, boxes, relationshipCounts, flat };
+    const { edges, routes } = buildEdges(graph.edges, boxes, overrides, dragCommit);
+    return { nodes, edges, boxes, relationshipCounts, flat, edgeRoutes: routes };
   }
 
   const childrenOf = computeChildrenOf(graph.nodes, graph.edges);
@@ -556,6 +612,6 @@ export function layoutGraph(input: LayoutInput): LayoutResult {
   }
   const relationshipCounts = relationshipCountsFor(graph, boxes);
   const nodes = buildNodes(graph.nodes, childrenOf, boxes, depths, diff, untrackedPaths, relationshipCounts, overrides);
-  const edges = buildEdges(graph.edges, boxes, overrides);
-  return { nodes, edges, boxes, relationshipCounts, flat };
+  const { edges, routes } = buildEdges(graph.edges, boxes, overrides, dragCommit);
+  return { nodes, edges, boxes, relationshipCounts, flat, edgeRoutes: routes };
 }
