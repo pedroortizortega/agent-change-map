@@ -74,10 +74,11 @@ density difference). Do not build Phase 1-5 around a projection.
 - [x] 1.2 GREEN: implemented `RoutingGraph`/`OccupancyIndex`/`allocatePort` per design.md's interfaces (~270 lines including doc comments). All 15 tests pass.
 - [x] 1.3 REFACTOR: ran `npm run typecheck`, `npm run lint`, `npm run test` (full suite, 35 files / 560 tests) — all clean. No duplication found worth extracting yet (Phase 2's `routeSearch.ts` will decide once it exists).
 
-## Phase 2: `webview/routeSearch.ts` (PR2)
+## Phase 2: `webview/routeSearch.ts` (PR2) — COMPLETE
 
-- [ ] 2.1 RED: heap pop-order matches a reference sorted list (D-1 determinism); A* respects D-3b's `containerTags` admission predicate.
-- [ ] 2.2 GREEN: implement binary min-heap + `routeOne()` with D-1 tie-break and D-5 cost model (~150 lines).
+- [x] 2.1 RED: `test/unit/routeSearch.test.ts` (13 tests) — deterministic tie-break matches a hand-derived `f→h→bends→stateKey` reference winner on a diamond graph; bend-count minimized as secondary cost when lengths tie; D-5 occupancy penalty numerically verified (`crossingPenaltyFor` exact formula plus a route-switching behavioral test at the calibrated `CROSSING_BASE=60` boundary); D-3b `containerTags` admission predicate (blocks/admits/ignores-non-ancestor); simple no-obstacle path; obstacle detour; `undefined` (not throw) on no-path (disconnected mock graph + a real `buildRoutingGraph` full-height-wall fixture); determinism across repeated runs. Confirmed failing (`Cannot find module '../../webview/routeSearch.js'`) before implementation.
+- [x] 2.2 GREEN: implemented `webview/routeSearch.ts` — real binary min-heap (not the spike's linear-scan open set), `routeOne()` with D-1's exact tie-break comparator (`f→h→bends→stateKey`, lazy-deletion closed-set A*), D-5 occupancy-penalty folded directly into edge relaxation (`crossingPenaltyFor`, `CROSSING_BASE=60`/`CROSSING_STEP=60`/`BEND_COST=16`), D-3b per-edge container-tag admission predicate (`portYWindow` derived from both ports' true anchors). All 13 tests pass.
+- [x] 2.3 REFACTOR: ran `npm run typecheck` (both tsconfigs), `npm run lint`, `npm run test` (full suite) — all clean. 36 files / 573 tests passing (560 + 13 new).
 
 ## Phase 3a: `edgeGeometry.ts` swap + minimal green suite (PR3a)
 

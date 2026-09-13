@@ -769,3 +769,112 @@ commit): see the commit itself for exact `git diff --stat` numbers.
 Phase 1 (PR1) complete: 3/3 tasks done (1.1, 1.2, 1.3). Ready for PR2 (`webview/routeSearch.ts`,
 Phase 2 of tasks.md) — ask the user/orchestrator to confirm continuing the `stacked-to-main` chain
 before starting PR2's own branch.
+
+---
+
+## PR2: `webview/routeSearch.ts` — A* search over the visibility graph (Phase 2 of tasks.md)
+
+Scope: production module only, no production caller wired yet (that is PR3a's job). Branch
+`feat/edge-router-performance` already checked out (no new branch created, per the chain strategy
+resolved as `stacked-to-main`). Followed strict TDD (RED -> GREEN -> REFACTOR).
+
+### Design decisions made explicit during implementation (not spelled out numerically in design.md)
+
+design.md's interface sketch (`routeOne(g, occ, start: PortSpec, goal: PortSpec, ctx: EdgeContext)
+: Point[] | undefined`) left `PortSpec`/`EdgeContext`'s exact shapes, and a few mechanics,
+unspecified since no production caller exists yet. Resolved as follows, consistent with D-1/D-3b/
+D-5's stated intent:
+
+- **`PortSpec` = `routingGraph.ts`'s own `PortSlot`** (`{anchor, escape, laneIndex}`) — reused
+  directly rather than duplicating an equivalent type, since it is exactly the concept D-1's
+  `stateKey` needs (an anchor + a graph-aligned escape point).
+- **Entry/exit node resolution is nearest-index, not exact-match, per axis.** Verified directly
+  against `routingGraph.ts`'s real construction: a port's *escape-moving* axis (e.g. `x` for a
+  left/right port) always lands exactly on a generated lane line (`allocatePort`'s
+  `LANE_GAP*(laneIndex+1)` offsets match `buildRoutingGraph`'s `box.x ± LANE_GAP*k` sampling
+  exactly, confirmed by the "simple case" and "obstacle avoidance" tests passing against the real
+  `buildRoutingGraph`+`allocatePort` pair on first attempt). The port's *anchor-fixed* axis (e.g.
+  `y` for that same left/right port, `clamp(box.y+16+off, ...)`) is **not** itself a sampled lane
+  line — `buildRoutingGraph` only samples box-corner-derived coordinates, never port positions.
+  Requiring an exact match on both axes would make every left/right and top/bottom port
+  (whichever axis is "fixed") fail to resolve to any graph node at all. Nearest-index resolution on
+  each axis independently fixes this without breaking orthogonality: the escape axis matches
+  exactly (zero-length connector), and only the anchor axis gets a short, still-orthogonal
+  connector segment to the nearest real lane line. **This is a load-bearing detail for PR3a's
+  wiring** — worth calling out explicitly since design.md's interface sketch didn't specify it.
+- **`EdgeContext = { ancestorContainers: ReadonlySet<number> }`.** `portYWindow` (D-3b's
+  `[min(sourcePortY,targetPortY)-LANE_GAP, max(...)+LANE_GAP]`) is computed internally from
+  `start.anchor.y`/`goal.anchor.y` (the true port position, not the escape offset) — this is what
+  the "blocks a non-ancestor's long vertical transit" test exercises directly: ports whose
+  *anchors* sit close together but whose nearest *graph nodes* happen to be far apart (a sparse
+  y-sampling artifact) must still get a narrow window derived from the anchors, not the resolved
+  graph nodes, or the D-3b rule would be vacuous whenever the graph is sparse near the ports.
+- **The anchor↔escape connector segments (`start.anchor→start.escape`, `goal.escape→goal.anchor`)
+  are fixed, uncosted geometry**, exactly like today's `edgePathsFor`/`routingPorts` treat them —
+  only the graph-internal portion (`start.escape`'s resolved node → `goal.escape`'s resolved node)
+  is A*-costed. Bend cost for the *first* graph-internal move is still charged relative to the
+  port's already-fixed anchor→escape direction (`dirOf(escape-anchor)`), which is what the
+  deterministic-tie-break and bend-minimization tests both rely on to force a specific winner.
+
+### TDD Cycle Evidence
+
+| Step | Action | Result |
+|---|---|---|
+| RED | Wrote `test/unit/routeSearch.test.ts` (13 tests): D-5 penalty formula exact values (`crossingPenaltyFor(0/1/2/4)` against `60+(o-1)*60`); simple no-obstacle path (real `buildRoutingGraph`+`allocatePort`); obstacle detour (real graph, asserts orthogonality + obstacle clearance + a real bend); **deterministic tie-break** — hand-built diamond graph with a genuine 4-way tie (`f=52,h=0,bends=2` identical on both arms) resolved only by `stateKey`, asserted against an independently hand-computed expected path, run twice; **bend-count as secondary cost** — same diamond with a different `startDir` making one arm's total cost strictly lower via fewer bends; **D-5 occupancy penalty changes the winning route** — a ladder graph where claiming the direct edge once (`owners=1`, penalty 60) flips the optimal route to a longer, more-bent detour whose total cost (152) undercuts the now-penalized direct route (176) but not the unpenalized one (116); **D-3b admission predicate** — blocks/admits/ignores-non-ancestor, three sub-cases; **no path** — a fully disconnected hand-built graph, plus a real `buildRoutingGraph` fixture with a full-height obstacle wall severing every visibility edge between two boxes; **determinism** — 5 repeated runs on the same real graph, deep-equal. Confirmed failing: `Cannot find module '../../webview/routeSearch.js'` (module did not exist). |
+| GREEN | Implemented `webview/routeSearch.ts`: `MinHeap<T>` (real binary min-heap, push/pop O(log n) — explicitly NOT the PR0 spike's naive linear-scan open set, per design.md's/Addendum 3's flagged confound), `routeOne()` — lazy-deletion closed-set A* keyed by `stateKey = nodeId*4+dirIndex`, D-1's exact `f→h→bends→stateKey` comparator as a strict total order, D-5's `crossingPenaltyFor` folded directly into edge relaxation (not a post-hoc pairwise scan — `occ.owners(edge.id)` is read once per relaxed edge), D-3b's per-edge `containerTags` admission predicate evaluated inline during relaxation. Two implementation bugs found and fixed while getting from RED to GREEN, both in this file's tests, not `routingGraph.ts`: (1) the first D-3b "blocks" test was initially self-contradictory (the tagged edge's own span exactly equaled the two ports' resolved graph nodes, so it could never be "outside" a window derived from those same two points) — fixed by separating the ports' true anchors (close together) from their resolved graph nodes (far apart due to sparse sampling), which is also the scenario that makes the anchor-vs-node distinction in `portYWindow` load-bearing rather than incidental; (2) the first "fully enclosed real graph" fixture (four leaves ringing a target box) did not actually sever every visibility edge — replaced with a single full-height wall leaf spanning far beyond both boxes' y-range, which reliably blocks every horizontal row near either box. All 13 tests passed after these two test-only fixes (implementation needed no changes for either). |
+| REFACTOR | Ran `npm run typecheck` (both tsconfigs), `npm run lint` (fixed one unused-import lint error, `OccupancyIndex` imported but unused in the test file), `npm run test` (full suite). | Typecheck clean. Lint clean (0 errors/warnings). Full suite: 36 files / 573 tests, all passing (560 from PR1 + 13 new) — `git status --porcelain` confirms only the two new files (`webview/routeSearch.ts`, `test/unit/routeSearch.test.ts`) are untracked/changed; nothing else touched. |
+
+### Work Unit Evidence
+
+| Evidence | Value |
+|---|---|
+| Focused test command and exact result | `npx vitest run test/unit/routeSearch.test.ts` → 13/13 passed |
+| Runtime harness command/scenario and exact result | N/A — no production caller yet (same as PR1; wiring is PR3a's job) |
+| Rollback boundary | Delete `webview/routeSearch.ts` + `test/unit/routeSearch.test.ts`; nothing else references either file yet |
+
+### Review Workload Note — deviation from design.md's ~230-line estimate
+
+`git diff --numstat` for this PR: `webview/routeSearch.ts` 304 lines, `test/unit/routeSearch.test.ts`
+327 lines — **631 total, versus design.md's/tasks.md's own ~230-line estimate for this slice**, and
+over the 400-line review budget on its own. Root cause: the orchestrator's own RED-phase
+requirements for this PR enumerated 7 distinct required test categories (simple path, obstacle
+detour, deterministic tie-break with an explicit stateKey-ordering assertion, numeric
+crossing-penalty verification, bend-count-as-secondary-cost, no-path/`undefined`, determinism) —
+covering all 7 rigorously, including hand-derived/hand-verified fixtures for the tie-break and
+occupancy-penalty cases (chosen deliberately over asserting only "some valid path" per the
+orchestrator's explicit instruction), produced a larger test file than design.md's rough estimate
+anticipated. The production module itself (`routeSearch.ts`, 304 lines including doc comments) is
+close to design.md's own "~150 lines" figure once doc comments are excluded (the actual code,
+excluding comments/blank lines, is closer to ~210 lines). **Flagging this transparently rather than
+cutting test coverage to fit a line target** — every one of the 13 tests maps to a specific,
+individually-named requirement from the orchestrator's task description, none are redundant.
+Recommend the orchestrator treat this PR as `size:exception` if the reviewer budget is enforced
+strictly per-PR, or split the "determinism/no-path" tests into a follow-up PR if a hard split is
+required — no code changes needed either way, only how the diff is sliced across PR boundaries.
+
+### Deviations from Design
+
+- `PortSpec`/`EdgeContext` exact shapes were not specified numerically in design.md (only the
+  `routeOne` signature's type names were sketched) — resolved as documented above, reusing
+  `routingGraph.ts`'s own `PortSlot` type and defining `EdgeContext` minimally. No conflict with
+  any decided (`[DECIDED]`) design block — this is filling an acknowledged interface gap, not
+  overriding a decision.
+- Nearest-index (rather than exact-match) entry/exit node resolution per axis — not explicitly
+  specified by design.md, but necessary given the verified mismatch between `allocatePort`'s
+  anchor-fixed axis and `buildRoutingGraph`'s lane sampling (see above). Flagged directly for
+  PR3a's attention since it is load-bearing for correct wiring.
+- Line-count estimate exceeded (631 vs. ~230) — see Review Workload Note above.
+
+### Issues Found
+
+None in `routingGraph.ts` (PR1) — the two bugs hit during this PR's own RED phase were both in this
+PR's own test fixtures, not in the already-landed PR1 module, and were fixed before GREEN.
+
+### Status
+
+Phase 2 (PR2) complete: 3/3 tasks done (2.1, 2.2, 2.3). `webview/routeSearch.ts` and
+`test/unit/routeSearch.test.ts` are new, untracked files; no other file was touched. Ready for PR3a
+(`edgeGeometry.ts` swap + minimal green suite, Phase 3a of tasks.md) — same open question as PR1
+left pending: confirm continuing the `stacked-to-main` chain, and PR3a's own borderline/`
+size:exception` risk (already flagged in tasks.md) still needs the orchestrator's attention
+separately from this PR's line-count note above.
