@@ -689,3 +689,83 @@ partial-feature number.
    The flat fixture was the right fixture; what Addenda 1-2 were actually missing was router
    feature-completeness (ports, container-lanes, real A* tie-break), not box-placement realism —
    and this spike shows that gap closed while staying inside budget.
+
+---
+
+## PR1: `webview/routingGraph.ts` — visibility-graph construction (Phase 1 of tasks.md)
+
+Scope: production module only, no A* search (that is PR2's `routeSearch.ts`). Followed strict
+TDD (RED -> GREEN -> REFACTOR).
+
+### TDD Cycle Evidence
+
+| Step | Action | Result |
+|---|---|---|
+| RED | Wrote `test/unit/routingGraph.test.ts` (15 tests) covering node placement (clearance-grown corners, label-row corners, deterministic `nodeId`), visibility edges (blocked vs. clear line-of-sight), D-3a container-lane exclusion, D-3b container-tag admission tagging, the Addendum-3 "container treated as solid obstacle" bug, D-4 port/escape-lane math (pitch/off/lane-index formulas), "construction happens once" (neighbours() reference-identity + a perf-shape bound reproducing Addendum 3's exact `{60,120}` hang shape), and `OccupancyIndex` claim/release/snapshot round-trips. | Confirmed failing: `Cannot find module '../../webview/routingGraph.js'` (module did not exist). |
+| GREEN | Implemented `webview/routingGraph.ts`: `buildRoutingGraph`, `allocatePort`, `createOccupancyIndex`, `RoutingGraph`/`OccupancyIndex`/`GraphEdgeRef`/`PortSlot` types, per design.md's D-1/D-3/D-4/D-5 formulas. | All 15 tests passed on first implementation attempt (`npx vitest run test/unit/routingGraph.test.ts` — 15/15). |
+| REFACTOR | Ran `npm run typecheck` (both tsconfigs), `npm run lint` (fixed 2 unused-variable lint errors: dead `EdgeRecord` interface, dead `clearYi`/`void ys/xs` cruft in a test), `npm run test` (full suite). | Typecheck clean. Lint clean (0 errors/warnings). Full suite: 35 files / 560 tests, all passing — nothing outside `routingGraph.ts`/its test was touched, confirmed by `git status`. |
+
+### Work Unit Evidence
+
+| Evidence | Value |
+|---|---|
+| Focused test command and exact result | `npx vitest run test/unit/routingGraph.test.ts` → 15/15 passed |
+| Runtime harness command/scenario and exact result | N/A — no production caller wires this module in yet (PR3a's scope, per design.md); this is the same "no runtime boundary yet" case tasks.md's own Suggested Work Units row 1 documents ("N/A — no production caller yet") |
+| Rollback boundary | Delete `webview/routingGraph.ts` and `test/unit/routingGraph.test.ts`; nothing else imports either file (verified: no other file in the repo references `routingGraph`) |
+
+### Addendum-3 bugs explicitly designed against (both verified by a dedicated test)
+
+1. **Container-as-solid-obstacle bug**: `buildRoutingGraph` computes `isContainer` (any box with a
+   descendant fully inside it) and excludes containers entirely from the `leaves` array used for
+   visibility-edge clipping — only leaves ever block a lane segment. Verified by
+   `"does NOT treat a container box as a solid obstacle at build time (Addendum-3 bug)"`, which
+   asserts an unbroken vertical chain through a container's interior, away from its one leaf
+   child.
+2. **O(V·boxes) build blow-up**: obstacle relevance is filtered ONCE per row/column (not once per
+   candidate segment), then swept with a forward-only pointer (`sweepBlocked`) across the
+   sorted-by-start subset — a single linear pass per row/column, not a rescan of every box per
+   segment. Verified by a perf-shape test reproducing Addendum 3's exact failing size
+   (`{60,120}`, i.e. 60 boxes) with a generous 3000ms bound (the original naive build hung past
+   2m22s at this exact size).
+
+### Design fidelity
+
+- D-4's port math implemented exactly per design.md's formulas: `pitch = max(4, min(LANE_GAP,
+  floor(usable/(n+1))))`, `off = round((i-(n-1)/2)*pitch)`, escape lane `k = i % L` docked at
+  `boundary ± LANE_GAP*(k+1)` (never the exact boundary coordinate — the other half of the
+  Addendum-3 100%-route-failure bug).
+- D-3a's Y-lane exclusion checked against every container (not just the box that proposed the
+  coordinate), per the design text's literal wording, so two nearby containers can't
+  accidentally reintroduce a forbidden-band line.
+- D-3b's container tags are attached per vertical graph edge (container indices whose x-band
+  contains that edge's column), ready for `routeSearch.ts` (PR2) to apply the `O(depth)`
+  admission predicate at relax time — no filtering happens at construction time for verticals,
+  exactly as D-3b specifies (only D-3a's horizontal band omission is a construction-time hard
+  exclusion).
+- `edgeGeometry.ts`, `graphLayout.ts`, `index.tsx`, and every other existing production file were
+  not touched — confirmed via `git status --porcelain` before commit (only `routingGraph.ts` and
+  its test are new/staged).
+
+### Deviations from design
+
+None. `GraphEdgeRef`'s exact shape (`{ id, to }`) and `PortSlot`'s exact shape
+(`{ anchor, escape, laneIndex }`) were not spelled out verbatim in design.md's interface sketch
+(only referenced by name) — filled in with the minimal shape `routeSearch.ts` (PR2) will need
+(`id` as the `OccupancyIndex` key, `to` as the neighbour node id), consistent with the data-flow
+diagram and D-5's occupancy-penalty mechanism.
+
+### Files changed (this PR)
+
+| File | Action | Lines |
+|---|---|---|
+| `webview/routingGraph.ts` | Created | ~270 |
+| `test/unit/routingGraph.test.ts` | Created | ~200 |
+
+Diff stat (from the tracker branch's tip after the planning-docs commit `cd30f89` to this PR's
+commit): see the commit itself for exact `git diff --stat` numbers.
+
+### Status
+
+Phase 1 (PR1) complete: 3/3 tasks done (1.1, 1.2, 1.3). Ready for PR2 (`webview/routeSearch.ts`,
+Phase 2 of tasks.md) — ask the user/orchestrator to confirm continuing the `stacked-to-main` chain
+before starting PR2's own branch.

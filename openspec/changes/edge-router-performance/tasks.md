@@ -68,11 +68,11 @@ density difference). Do not build Phase 1-5 around a projection.
 - [x] 0.5 **GATE DECISION — OVERSIZED_THRESHOLDS: keep `{300, 600}`**, zero lines changed in `src/webviewProtocol.ts`. Measured 4,445.9ms on the realistic FLAT fixture (the one `layoutGraph` actually produces at this size) — inside the ≤5000ms 2x-margin rule; `{400,800}` measured 9,840.5ms, clearly outside it. Recorded in `apply-progress.md` Addendum 3.
 - [x] 0.6 Flagged the NESTED-fixture numbers as a real but separate, out-of-scope-for-today risk (grid blow-up past design.md's own `|X| > ~30` fallback trigger) rather than a blocker, since `layoutGraph`'s `NESTED_LAYOUT_LIMITS = {60,120}` gate means production never actually feeds the router a multi-X-column box set at the sizes this change's thresholds govern — verified directly against `webview/graphLayout.ts`, not assumed. No STOP triggered.
 
-## Phase 1: `webview/routingGraph.ts` (PR1)
+## Phase 1: `webview/routingGraph.ts` (PR1) — COMPLETE
 
-- [ ] 1.1 RED: `test/unit/routingGraph.test.ts` — lane sampling never lands in a container's forbidden band (D-3a); container tags match brute-force reference; `OccupancyIndex` claim/release round-trip.
-- [ ] 1.2 GREEN: implement `RoutingGraph`/`OccupancyIndex` per design.md's interfaces (~230 lines).
-- [ ] 1.3 REFACTOR: extract shared geometry helpers reused by Phase 2 if any duplication appears.
+- [x] 1.1 RED: `test/unit/routingGraph.test.ts` — lane sampling never lands in a container's forbidden band (D-3a); container tags match brute-force reference; `OccupancyIndex` claim/release round-trip. 15 tests written; confirmed failing (`Cannot find module '../../webview/routingGraph.js'`) before implementation.
+- [x] 1.2 GREEN: implemented `RoutingGraph`/`OccupancyIndex`/`allocatePort` per design.md's interfaces (~270 lines including doc comments). All 15 tests pass.
+- [x] 1.3 REFACTOR: ran `npm run typecheck`, `npm run lint`, `npm run test` (full suite, 35 files / 560 tests) — all clean. No duplication found worth extracting yet (Phase 2's `routeSearch.ts` will decide once it exists).
 
 ## Phase 2: `webview/routeSearch.ts` (PR2)
 
