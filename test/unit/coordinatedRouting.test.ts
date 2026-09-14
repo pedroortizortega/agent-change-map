@@ -50,19 +50,29 @@ describe("coordinated orthogonal routing", () => {
     // segments of two independently-optimal edges is now cost-discouraged DURING the A* search
     // itself, at O(1) per relaxation — the exact PR3a-disclosed gap this closes.
     //
-    // This does NOT close every crossing category: a port's fixed anchor->escape hop (the short
+    // This did NOT close every crossing category: a port's fixed anchor->escape hop (the short
     // segment between a box's own boundary and its nearest lane line) sits OUTSIDE the shared
     // visibility graph entirely, fixed once by port geometry before `routeOne`'s search even
     // starts — `OccupancyIndex` has no node to attach an occupancy count to for it, no matter how
-    // it's extended. A crossing between two such hops (this fixture hits exactly one) is therefore
-    // still possible. Promoting the wiring-layer `crossesAny` check into a hard tier-1/tier-2
-    // acceptance gate (tried during this same follow-up) WOULD close this specific remaining case,
-    // but was measured to reintroduce catastrophic scaling (~49.6s at {100,200}, vs. ~0.4s without
-    // it) by forcing frequent full-search escalation — a real, deliberately-NOT-taken trade-off,
-    // not an oversight. `crossesAny` therefore stays exactly as PR3a's Deviation 4 landed it: a
-    // low-cost preference in the final degrade order only, not a hard requirement. This property
-    // test still asserts crossings stay RARE (a small bounded count in this small fixture), same
-    // as PR3a's own honest framing — now for a narrower, disclosed reason than before.
+    // it's extended. A crossing between two such hops (this fixture used to hit exactly one) was
+    // therefore still possible. Promoting the wiring-layer `crossesAny` check (or its narrower
+    // `anchorHopCrosses` sibling) into a hard tier-1/tier-2 ACCEPTANCE gate would close this
+    // specific case, but was measured (twice, independently) to reintroduce catastrophic scaling —
+    // ~49.6s at {100,200} for the full-`crossesAny` gate, ~27.7s-78.4s at {100,200}..{150,300} for
+    // even the 2-segment-only `anchorHopCrosses` gate, vs. this change's own ~380ms/~966ms baseline
+    // — because failing ANY hard requirement in `isGoodEnough` forces expensive tier-2 escalation,
+    // regardless of how cheap the check's own per-call cost is. See
+    // `openspec/changes/edge-router-performance-anchor-fix/apply-progress.md` for the full,
+    // honestly-reported trade-off space this follow-up explored.
+    //
+    // What DID ship (2026-09-13 follow-up, same apply-progress.md): a FREE reordering inside tier
+    // 2 only — tier 2 already has to build its full 144-candidate list whenever tier 1 fails
+    // outright (e.g. an obstacle blocks the natural pairing), so preferring an
+    // anchor-hop-crossing-free candidate from that SAME already-built list costs zero extra
+    // `routeOne` calls. This closes the crossing this exact fixture hit (now asserted at `0`, not
+    // `<=1`) without any additional search cost, but is NOT a general guarantee — an edge whose
+    // tier-1 candidate ALREADY clears every guarantee (so tier 2 never runs) keeps whatever
+    // crossing that single candidate has, exactly as before this follow-up.
     const routes = edgePathsFor(boxes, edges).map(path => points(path!));
     let crossingCount = 0;
     for (let i = 0; i < routes.length; i++) for (let j = i + 1; j < routes.length; j++) {
@@ -76,7 +86,7 @@ describe("coordinated orthogonal routing", () => {
         if (crosses) crossingCount += 1;
       }
     }
-    expect(crossingCount).toBeLessThanOrEqual(1);
+    expect(crossingCount).toBe(0);
   });
 
   it("allocates different ports and separates otherwise identical relationships", () => {
