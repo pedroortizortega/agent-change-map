@@ -691,20 +691,73 @@ function collapseCollinear(points: readonly Point[]): Point[] {
  * count and the collapsed corner count, NOT by lane-graph density; unchanged from PR3a's own
  * measured-safe shape.
  */
+/** True when orthogonal segments `p->q` and `r->t` genuinely (transversally) intersect — one
+ * horizontal, one vertical, crossing strictly inside both. Shared primitive behind `crossesAny`
+ * and the anchor-hop-scoped check below, so both stay byte-identical in their crossing test. */
+function segmentsCross(p: Point, q: Point, r: Point, t: Point): boolean {
+  const pVertical = p.x === q.x; const rVertical = r.x === t.x;
+  if (pVertical === rVertical) return false;
+  const [v1, v2, h1, h2] = pVertical ? [p, q, r, t] : [r, t, p, q];
+  return v1.x > Math.min(h1.x, h2.x) && v1.x < Math.max(h1.x, h2.x)
+    && h1.y > Math.min(v1.y, v2.y) && h1.y < Math.max(v1.y, v2.y);
+}
+
 function crossesAny(route: readonly Point[], accepted: readonly (readonly Point[])[]): boolean {
   for (const other of accepted) {
     for (let a = 1; a < route.length; a += 1) for (let b = 1; b < other.length; b += 1) {
-      const p = route[a - 1]; const q = route[a];
-      const r = other[b - 1]; const t = other[b];
-      const pVertical = p.x === q.x; const rVertical = r.x === t.x;
-      if (pVertical === rVertical) continue;
-      const [v1, v2, h1, h2] = pVertical ? [p, q, r, t] : [r, t, p, q];
-      const crosses = v1.x > Math.min(h1.x, h2.x) && v1.x < Math.max(h1.x, h2.x)
-        && h1.y > Math.min(v1.y, v2.y) && h1.y < Math.max(v1.y, v2.y);
-      if (crosses) return true;
+      if (segmentsCross(route[a - 1], route[a], other[b - 1], other[b])) return true;
     }
   }
   return false;
+}
+
+/** The (up to two) fixed anchor->escape hop segments at the ends of a raw (uncollapsed) `routeOne`
+ * result — always exactly `route[0]-route[1]` and `route[len-2]-route[len-1]`, regardless of the
+ * graph-internal hop count in between. Self-loops / degenerate 2-point routes only ever contribute
+ * one (the two ends coincide). */
+function anchorHopsOf(route: readonly Point[]): [Point, Point][] {
+  if (route.length < 2) return [];
+  const hops: [Point, Point][] = [[route[0], route[1]]];
+  if (route.length > 2) hops.push([route[route.length - 2], route[route.length - 1]]);
+  return hops;
+}
+
+/** True when the single fixed hop segment `[p,q]` crosses any segment of any already-accepted
+ * route. Split out from `anchorHopCrosses` so a caller can tell WHICH endpoint (source or target)
+ * is the offending one, if it ever needs to (kept for that purpose even though the mechanism that
+ * shipped from this follow-up does not itself need the distinction — see `isGoodEnough`'s doc
+ * comment for the escalation path that DID need it and was reverted). */
+function singleHopCrosses(hop: readonly [Point, Point], accepted: readonly (readonly Point[])[]): boolean {
+  const [p, q] = hop;
+  for (const other of accepted) {
+    for (let b = 1; b < other.length; b += 1) {
+      if (segmentsCross(p, q, other[b - 1], other[b])) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Anchor-fix (2026-09-13 follow-up, see
+ * `openspec/changes/edge-router-performance-anchor-fix/apply-progress.md`): cheap, SCOPED sibling
+ * of `crossesAny` above targeting specifically the crossing category `crossesAny`'s own doc
+ * comment and `edge-router-performance`'s apply-progress.md ("Crossing-fix" section) both disclose
+ * as open — a port's fixed anchor->escape hop (the short segment between a box's own boundary and
+ * its nearest lane line) sits OUTSIDE the shared visibility graph, so `OccupancyIndex`'s in-search
+ * node-crossing penalty has no graph node to attach to there.
+ *
+ * Promoting the FULL `crossesAny` check (every segment of a candidate's entire path) into a hard
+ * `isGoodEnough` requirement was tried and measured to cost ~130x (49.6s at {100,200} vs. ~0.4s
+ * without it) — reverted, documented in apply-progress.md. This is deliberately NOT that: it only
+ * ever inspects the candidate's own two fixed anchor/escape-hop segments (`route[0]-route[1]` and
+ * `route[len-2]-route[len-1]`, always exactly 2 segments, regardless of how many lane hops the
+ * graph-internal middle of the route contains) against each already-accepted route's full shape -
+ * O(2 x accepted x other-length) per call, not O(route-length^2). Used ONLY inside tier 2's FREE
+ * candidate reordering below (never as an `isGoodEnough` requirement — see that predicate's own
+ * doc comment for why even this cheap, narrow check still measured catastrophic there).
+ */
+function anchorHopCrosses(route: readonly Point[], accepted: readonly (readonly Point[])[]): boolean {
+  return anchorHopsOf(route).some(hop => singleHopCrosses(hop, accepted));
 }
 
 /** Exact index of `value` in the sorted, deduped `arr`, or `-1` when absent. Used to recognise
@@ -926,6 +979,18 @@ function coordinateRoutes(
     // preference consulted ONLY in the final degrade order below, never a tier-1/tier-2 gate. This
     // is a real, disclosed, deliberately-not-taken trade-off — see apply-progress.md's crossing-fix
     // section for the full honest accounting of what this leaves unresolved.
+    //
+    // Anchor-fix investigation note: folding `!anchorHopCrosses` into THIS predicate (tried first,
+    // during this same follow-up) was ALSO measured to reintroduce catastrophic scaling —
+    // {100,200} took ~27.7s and {150,300} took ~78.4s, vs. this change's own accepted ~380ms/~966ms
+    // baseline — even though `anchorHopCrosses` itself only ever inspects 2 short segments per
+    // candidate. The cost is NOT the check itself: it is that failing `isGoodEnough` at all forces
+    // tier 1 to escalate into tier 2's full 4-sides x 3-depths x 144-candidate search, and in a
+    // dense synthetic benchmark an anchor-hop crossing SOMEWHERE among many already-accepted routes
+    // is common enough that nearly every edge escalates — the exact same escalation-cost trap
+    // PR3a's Deviation 3 and the crossing-fix's own rejected `crossesAny`-as-a-gate attempt already
+    // documented, now confirmed to recur for ANY hard requirement here, however cheap its own
+    // per-call cost is. Reverted; kept byte-identical to `edge-router-performance`'s landed shape.
     const isGoodEnough = (c: { route: Point[]; collapsed: Point[] }): boolean => clearsContainerLanes(c.route);
 
     let candidates: { route: Point[]; cost: number; collapsed: Point[] }[];
@@ -951,6 +1016,19 @@ function coordinateRoutes(
       candidates = buildCandidates(tier1Source, tier1Target);
       bestCandidate = candidates.find(isGoodEnough);
 
+      // Anchor-fix investigation note: a bounded "docking-time depth/side nudge" (tier 1.5) was
+      // ALSO tried here — escalating up to 12 extra side/depth candidates (bounded, not tier 2's
+      // full 144) only for the specific endpoint whose anchor hop crosses an already-accepted
+      // route. Its OWN per-candidate cost is small and fixed, but it still measured a real,
+      // non-trivial regression at scale (~5-7x at {100,200}..{300,600} in a dense synthetic
+      // benchmark, vs. the accepted baseline) — the trigger condition (an anchor-hop crossing
+      // SOMEWHERE among many already-accepted routes) is common enough in a dense graph that the
+      // extra 12-candidate `routeOne` search (each a full A* pass) ends up running for a large
+      // fraction of edges, and that compounds. Reverted — not worth a 5-7x constant-factor cost for
+      // a marginal crossing-count improvement. See apply-progress.md for the measured numbers.
+      // Tier 2's below FREE reordering (reusing candidates tier 2 already had to build for other
+      // reasons) is what shipped instead.
+
       // Tier 2 (escalate only when tier 1 didn't clear cleanly): the full 4-sides x
       // 3-escape-depths search, exactly what the old candidate-enumeration loop and design.md's
       // D-4 both describe (every side offered; `allocatePort`'s own ordinal-driven depth is one
@@ -960,7 +1038,15 @@ function coordinateRoutes(
         const fullSource = PORT_SIDES.flatMap(side => depths.map(d => portAtLane(source, side, sourceSlot, counts.get(edge.source)!, d)));
         const fullTarget = PORT_SIDES.flatMap(side => depths.map(d => portAtLane(target, side, targetSlot, counts.get(edge.target!)!, d)));
         candidates = buildCandidates(fullSource, fullTarget);
-        bestCandidate = candidates.find(isGoodEnough);
+        // Anchor-fix: tier 2 already pays for building this full 144-candidate list (unavoidable —
+        // tier 1 failed `isGoodEnough` outright, e.g. an obstacle blocked the natural pairing
+        // entirely), so preferring an anchor-hop-crossing-free candidate FROM THIS SAME LIST costs
+        // nothing extra (one more cheap scan over already-built candidates, no additional
+        // `routeOne` calls) — unlike gating tier 1's acceptance on this (measured catastrophic, see
+        // `isGoodEnough`'s own doc comment), which forces the expensive escalation in the first
+        // place. Falls back to the plain `isGoodEnough` pick when every tier-2 candidate crosses.
+        bestCandidate = candidates.find(c => isGoodEnough(c) && !anchorHopCrosses(c.route, acceptedRoutes))
+          ?? candidates.find(isGoodEnough);
       }
     }
     // Final degrade order over whichever tier ran: clear just one extra guarantee, then just
