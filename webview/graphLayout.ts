@@ -8,7 +8,7 @@ export interface Position {
   y: number;
 }
 
-interface Size {
+export interface Size {
   w: number;
   h: number;
 }
@@ -29,7 +29,7 @@ const MARGIN = 16;
  * is a value that's trivial to change and re-test (box-collision-push wants to compare 5px vs
  * 10px visually) — flip this single number and re-run, no other code needs to change.
  */
-export const BOX_MIN_GAP = 15;
+export const BOX_MIN_GAP = 25;
 
 interface KindStyle {
   strokeWidth: number;
@@ -564,38 +564,19 @@ export function computeLiveDragUpdate(input: {
   descendantsOfId?: (id: string) => readonly string[];
 }): LiveDragUpdate | undefined {
   const { layout, overrides, nodeId, position, movedDescendantIds, descendantsOfId } = input;
-  const before = layout.boxes.get(nodeId);
-  if (!before) return undefined;
-  const dx = position.x - before.x;
-  const dy = position.y - before.y;
+  if (!layout.boxes.has(nodeId)) return undefined;
 
-  const liveBoxes = new Map(boxesForRouting(layout.boxes, overrides));
-  const draggedBox = liveBoxes.get(nodeId);
-  if (!draggedBox) return undefined;
-  liveBoxes.set(nodeId, { ...draggedBox, x: position.x, y: position.y });
-  const movedIds = new Set<string>([nodeId, ...movedDescendantIds]);
-  const positions = new Map<string, Position>([[nodeId, position]]);
-  for (const descendantId of movedDescendantIds) {
-    const box = liveBoxes.get(descendantId);
-    if (!box) continue;
-    const livePosition = { x: box.x + dx, y: box.y + dy };
-    liveBoxes.set(descendantId, { ...box, ...livePosition });
-    positions.set(descendantId, livePosition);
-  }
+  // Preview and commit are ONE transition, computed by one function (see `resolveDragPositions`).
+  const { positions, boxes: liveBoxes } = resolveDragPositions({
+    boxes: layout.boxes,
+    overrides,
+    nodeId,
+    position,
+    movedDescendantIds,
+    descendantsOf: descendantsOfId,
+  });
 
-  // box-collision-push: live (mid-gesture) preview of push-away, so the pushed box(es) visually
-  // move responsively during the drag itself rather than only snapping clear on drop.
-  if (descendantsOfId) {
-    const pushed = resolveCollisions({ boxes: liveBoxes, movedIds, descendantsOf: descendantsOfId });
-    for (const [id, pushedPosition] of pushed) {
-      const box = liveBoxes.get(id);
-      if (!box) continue;
-      liveBoxes.set(id, { ...box, x: pushedPosition.x, y: pushedPosition.y });
-      positions.set(id, pushedPosition);
-      movedIds.add(id);
-    }
-  }
-
+  const movedIds = new Set(positions.keys());
   const edgeOverrides = new Map<number, { path: string; startPoint: Point; endPoint: Point }>();
   for (const edge of layout.edges) {
     if (!movedIds.has(edge.source) && !movedIds.has(edge.target)) continue;
@@ -731,6 +712,71 @@ export function resolveCollisions(input: {
 }
 
 /**
+ * THE single drag transition, shared verbatim by the live (mid-gesture) preview
+ * (`computeLiveDragUpdate`) and the drop commit (`resolveDragCommit`).
+ *
+ * Why one function instead of two (box-collision-push, fourth reported round): the preview and the
+ * commit used to be two independent implementations of the same math, and they DID drift apart.
+ * `resolveDragCommit` (fix 6fc1e4d) derives the gesture delta from each box's override-MERGED
+ * current position, while `computeLiveDragUpdate` still derived it from `layout.boxes` — the raw,
+ * never-override-merged layout slot (see `boxesForRouting`'s doc comment). The moment a container
+ * had been dragged once, every later gesture on it previewed with a delta off by its whole
+ * accumulated offset: measured on the regression fixture in `test/unit/boxCollision.test.ts`, the
+ * dragged container's own child previewed 118px OUTSIDE its parent, and the boxes the preview
+ * pushed clear previewed 88px away from where the drop actually committed them. The user was
+ * therefore aiming a whole bottom-to-top dragging session at a preview that did not match the
+ * committed result. Keeping ONE core is the structural fix: the preview cannot disagree with the
+ * commit, because it IS the commit, evaluated at the in-progress pointer position.
+ *
+ * Returns both the new absolute `positions` to apply/persist (dragged node + its D14-cascaded
+ * descendants + every box `resolveCollisions` pushed clear, with their own descendants) and the
+ * fully-updated `boxes` working set those positions were resolved against, so the caller can route
+ * edges against the exact same geometry rather than re-deriving it.
+ *
+ * `descendantsOf` is optional purely for the collision step: without it, this is a pure D14
+ * cascade with no push-out (preserving pre-collision call sites/tests unchanged).
+ */
+function resolveDragPositions(input: {
+  boxes: ReadonlyMap<string, Rect>;
+  overrides: ReadonlyMap<string, Position>;
+  nodeId: string;
+  position: Position;
+  movedDescendantIds: readonly string[];
+  descendantsOf?: (id: string) => readonly string[];
+}): { positions: Map<string, Position>; boxes: Map<string, Rect> } {
+  const { boxes, overrides, nodeId, position, movedDescendantIds, descendantsOf } = input;
+  // The ONE authoritative base: every box at its CURRENT rendered position (raw layout slot merged
+  // with any already-committed override from an earlier drag/push in this session).
+  const working = new Map(boxesForRouting(new Map(boxes), overrides));
+  const before = working.get(nodeId);
+  const dx = position.x - (before?.x ?? position.x);
+  const dy = position.y - (before?.y ?? position.y);
+  if (before) working.set(nodeId, { ...before, x: position.x, y: position.y });
+
+  const positions = new Map<string, Position>([[nodeId, position]]);
+  const movedIds = new Set<string>([nodeId]);
+  for (const descendantId of movedDescendantIds) {
+    movedIds.add(descendantId);
+    const box = working.get(descendantId);
+    if (!box) continue;
+    const moved = { x: box.x + dx, y: box.y + dy };
+    positions.set(descendantId, moved);
+    working.set(descendantId, { ...box, ...moved });
+  }
+
+  if (descendantsOf) {
+    const pushed = resolveCollisions({ boxes: working, movedIds, descendantsOf });
+    for (const [id, pushedPosition] of pushed) {
+      positions.set(id, pushedPosition);
+      const box = working.get(id);
+      if (box) working.set(id, { ...box, x: pushedPosition.x, y: pushedPosition.y });
+    }
+  }
+
+  return { positions, boxes: working };
+}
+
+/**
  * Pure "drop" counterpart to `computeLiveDragUpdate` (box-collision-push follow-up fix — see
  * apply-progress.md's "multi-drag stale-box" section). Given the pre-drag `layoutGraph` `boxes`,
  * the ALREADY-COMMITTED `overrides` from any prior drag/push in this session, the dragged node's
@@ -752,6 +798,11 @@ export function resolveCollisions(input: {
  * build the collision working set from `boxesForRouting(boxes, overrides)` — the SAME merge
  * `computeLiveDragUpdate` and edge routing already use — so both the dragged node's own dx/dy AND
  * every other box's current position are correct before `resolveCollisions` runs.
+ *
+ * Now a thin wrapper over `resolveDragPositions` — the SAME core `computeLiveDragUpdate` uses for
+ * its mid-gesture preview, so the two can never drift apart again (they did: see
+ * `resolveDragPositions`' own doc comment for the measured divergence that caused the fourth
+ * reported round of this bug).
  */
 export function resolveDragCommit(input: {
   boxes: ReadonlyMap<string, Rect>;
@@ -761,28 +812,55 @@ export function resolveDragCommit(input: {
   movedDescendantIds: readonly string[];
   descendantsOf: (id: string) => readonly string[];
 }): Map<string, Position> {
-  const { boxes, overrides, nodeId, position, movedDescendantIds, descendantsOf } = input;
-  const committedBoxes = new Map(boxesForRouting(new Map(boxes), overrides));
-  const before = committedBoxes.get(nodeId);
-  const dx = position.x - (before?.x ?? position.x);
-  const dy = position.y - (before?.y ?? position.y);
-  if (before) committedBoxes.set(nodeId, { ...before, x: position.x, y: position.y });
+  return resolveDragPositions(input).positions;
+}
 
-  const committed = new Map<string, Position>([[nodeId, position]]);
-  const movedIds = new Set<string>([nodeId]);
-  for (const descendantId of movedDescendantIds) {
-    movedIds.add(descendantId);
-    const box = committedBoxes.get(descendantId);
-    if (!box) continue;
-    const newPosition = { x: box.x + dx, y: box.y + dy };
-    committed.set(descendantId, newPosition);
-    committedBoxes.set(descendantId, { ...box, ...newPosition });
+/**
+ * Re-measure-driven push-out (box-collision-push, fourth reported round — the mechanism that
+ * needs NO drag at all and that no drag-path fix could ever have closed).
+ *
+ * `positionOverrides` pins a node to an absolute position, but `layoutGraph` re-`measure()`s every
+ * box from the entity tree on EVERY snapshot. During live testing the user edits the same files
+ * they are dragging: adding one method to `route3.py` grows `module:route3`'s measured box by one
+ * row (40px) downward, while `module:route4` stays frozen exactly where an earlier drag pinned it.
+ * The two container rects then genuinely overlap on screen and nothing ever resolves it, because
+ * `resolveCollisions` only ever runs from a drag and only considers pairs involving the
+ * dragged/pushed set. See `test/unit/boxCollision.test.ts`'s `resolveGeometryChangeOverlaps` suite
+ * for the measured reproduction (route3: 112 -> 152 tall at a pinned y, overlapping route4).
+ *
+ * The rule: a box whose OWN measured `w`/`h` changed between two layouts was moved BY THE SYSTEM,
+ * not by the user, so it is treated exactly like a dragged box — it becomes a mover, and whatever
+ * it now overlaps is pushed clear through the same `resolveCollisions` the drag path uses (same
+ * min-overlap axis, same `BOX_MIN_GAP`, same container-carries-its-descendants cascade).
+ *
+ * Deliberately conservative, so a plain re-render can never shuffle a diagram the user arranged:
+ *  - No box re-measured => empty result, always. A pre-existing overlap that no re-measure caused
+ *    is left exactly as-is (this function is not a global de-overlap pass, by design).
+ *  - Ids absent from `previousSizes` (brand-new nodes, and every node on the very first layout)
+ *    count as movers, never as push targets — on the first layout that makes every box a mover
+ *    with no pushable target at all, i.e. a guaranteed no-op.
+ *  - Collisions resolve against `boxesForRouting(boxes, overrides)` — each box's CURRENT rendered
+ *    position — the same merged base the drag transition uses.
+ *
+ * Returns the new absolute positions to persist as overrides, keyed by node id (empty when there
+ * is nothing to do). Terminates: after the pushes are applied the sizes are unchanged, so the next
+ * layout produces no movers and no further pushes.
+ */
+export function resolveGeometryChangeOverlaps(input: {
+  previousSizes: ReadonlyMap<string, Size>;
+  boxes: ReadonlyMap<string, Rect>;
+  overrides: ReadonlyMap<string, Position>;
+  descendantsOf: (id: string) => readonly string[];
+}): Map<string, Position> {
+  const { previousSizes, boxes, overrides, descendantsOf } = input;
+  const movedIds = new Set<string>();
+  for (const [id, box] of boxes) {
+    const previous = previousSizes.get(id);
+    if (!previous || previous.w !== box.w || previous.h !== box.h) movedIds.add(id);
   }
-
-  const pushed = resolveCollisions({ boxes: committedBoxes, movedIds, descendantsOf });
-  for (const [id, pushedPosition] of pushed) committed.set(id, pushedPosition);
-
-  return committed;
+  // Nothing re-measured, or everything is new: no mover/target split worth resolving.
+  if (movedIds.size === 0 || movedIds.size === boxes.size) return new Map();
+  return resolveCollisions({ boxes: boxesForRouting(new Map(boxes), overrides), movedIds, descendantsOf });
 }
 
 /** THE entry point index.tsx calls. */

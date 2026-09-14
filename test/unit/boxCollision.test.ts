@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { BOX_MIN_GAP, resolveCollisions, resolveDragCommit, type Position } from "../../webview/graphLayout.js";
+import {
+  BOX_MIN_GAP,
+  computeLiveDragUpdate,
+  layoutGraph,
+  resolveCollisions,
+  resolveDragCommit,
+  resolveGeometryChangeOverlaps,
+  type Position,
+} from "../../webview/graphLayout.js";
+import { descendantsOf as descendantsOfLayout } from "../../webview/positionOverrides.js";
 import type { Rect } from "../../webview/edgeGeometry.js";
+import type { AnalysisGraph, Entity } from "../../src/protocol.js";
 
 /**
  * Box-collision push-away (box-collision-push, direct-inline — see
@@ -352,6 +362,374 @@ describe("resolveDragCommit", () => {
     const pushedOther = result.get("other");
     expect(pushedOther).toBeDefined();
     expect(pushedOther!.x).toBeGreaterThanOrEqual(100);
+  });
+});
+
+/**
+ * Fourth reported round of "boxes end up overlapping after real usage" — this suite pins the
+ * ROOT CAUSE found for it: the live (mid-gesture) preview and the drop commit were two SEPARATE
+ * implementations of the same transition, and they disagreed.
+ *
+ * `computeLiveDragUpdate` derived the gesture's dx/dy from `layout.boxes.get(nodeId)` — the RAW,
+ * never-override-merged layout box (see `boxesForRouting`'s doc comment: `LayoutResult.boxes`
+ * always reflects each node's ORIGINAL layout slot, never a prior drag's committed position) —
+ * while `resolveDragCommit` (the 6fc1e4d fix) derives it from the override-MERGED current
+ * position. That is the exact same stale-base bug 6fc1e4d fixed on the commit path, still live on
+ * the preview path: the moment a container has been dragged once, every later gesture on it
+ * previews with a dx/dy off by its entire accumulated offset. Measured on the fixture below: the
+ * dragged container's own child previewed 118px OUTSIDE its parent, and the boxes the preview
+ * pushed clear landed 88px away from where the drop actually committed them — i.e. the user was
+ * aiming their drags at a preview that did not match the committed result, repeatedly, across a
+ * whole bottom-to-top dragging session.
+ *
+ * The invariant these tests lock in (stronger than "both happen to be right on this fixture"):
+ * for the SAME gesture inputs, the live preview and the drop commit MUST produce byte-identical
+ * position sets. They are now one shared core (`resolveDragPositions`), so they cannot drift apart
+ * again the way `resolveDragCommit` drifted away from `computeLiveDragUpdate` in 6fc1e4d.
+ */
+describe("live drag preview vs drop commit — single shared transition", () => {
+  const box = (x: number, y: number, w: number, h: number): Rect => ({ x, y, w, h });
+
+  /** Three stacked container/child pairs, shaped like the reported diagram's real geometry
+   * (248x152 root containers stacked with a 24px root gap, each wrapping one 224x112 child). */
+  function stackedFixture(): { boxes: Map<string, Rect>; descendantsOf: (id: string) => readonly string[] } {
+    const boxes = new Map<string, Rect>([
+      ["route", box(16, 16, 248, 152)],
+      ["route.child", box(28, 46, 224, 112)],
+      ["route3", box(16, 192, 248, 152)],
+      ["route3.child", box(28, 222, 224, 112)],
+      ["route4", box(16, 368, 248, 152)],
+      ["route4.child", box(28, 398, 224, 112)],
+    ]);
+    return { boxes, descendantsOf: (id) => (boxes.has(`${id}.child`) ? [`${id}.child`] : []) };
+  }
+
+  it("previews EXACTLY the positions the drop commits, for a container that was already dragged once", () => {
+    const { boxes, descendantsOf } = stackedFixture();
+    // route4 was dragged earlier in this session: it currently renders at y=250, NOT at its raw
+    // layout slot y=368. This is the state every drag after the first one starts from.
+    const overrides = new Map<string, Position>([
+      ["route4", { x: 16, y: 250 }],
+      ["route4.child", { x: 28, y: 280 }],
+    ]);
+    const gesture = { x: 16, y: 230 }; // a further small 20px nudge upward from where it really is
+
+    const live = computeLiveDragUpdate({
+      layout: { boxes, edges: [] },
+      overrides,
+      nodeId: "route4",
+      position: gesture,
+      movedDescendantIds: ["route4.child"],
+      descendantsOfId: descendantsOf,
+    });
+    const commit = resolveDragCommit({
+      boxes,
+      overrides,
+      nodeId: "route4",
+      position: gesture,
+      movedDescendantIds: ["route4.child"],
+      descendantsOf,
+    });
+
+    expect(live).toBeDefined();
+    expect([...live!.positions.keys()].sort()).toEqual([...commit.keys()].sort());
+    for (const [id, committedPosition] of commit) {
+      expect(live!.positions.get(id), `preview vs commit disagreed for ${id}`).toEqual(committedPosition);
+    }
+  });
+
+  it("keeps an already-dragged container's own child rigidly attached during the preview (stale raw-layout delta regression)", () => {
+    const { boxes, descendantsOf } = stackedFixture();
+    const overrides = new Map<string, Position>([
+      ["route4", { x: 16, y: 250 }],
+      ["route4.child", { x: 28, y: 280 }], // 30px below its container's top edge, as laid out
+    ]);
+    const live = computeLiveDragUpdate({
+      layout: { boxes, edges: [] },
+      overrides,
+      nodeId: "route4",
+      position: { x: 16, y: 230 },
+      movedDescendantIds: ["route4.child"],
+      descendantsOfId: descendantsOf,
+    })!;
+    // The container moved from y=250 to y=230 (-20), so its child must move from 280 to 260 —
+    // keeping the SAME 30px in-container offset. The stale-base bug computed the delta against the
+    // raw layout slot (368) instead, previewing the child at y=142: 118px OUTSIDE its own parent.
+    expect(live.positions.get("route4")).toEqual({ x: 16, y: 230 });
+    expect(live.positions.get("route4.child")).toEqual({ x: 28, y: 260 });
+  });
+
+  it("previews collision push-out from each box's CURRENT position, so nothing previews on top of another box", () => {
+    const { boxes, descendantsOf } = stackedFixture();
+    const overrides = new Map<string, Position>([
+      ["route4", { x: 16, y: 250 }],
+      ["route4.child", { x: 28, y: 280 }],
+    ]);
+    const live = computeLiveDragUpdate({
+      layout: { boxes, edges: [] },
+      overrides,
+      nodeId: "route4",
+      position: { x: 16, y: 230 },
+      movedDescendantIds: ["route4.child"],
+      descendantsOfId: descendantsOf,
+    })!;
+
+    const previewRect = (id: string): Rect => {
+      const base = boxes.get(id)!;
+      const preview = live.positions.get(id) ?? overrides.get(id) ?? base;
+      return { ...base, x: preview.x, y: preview.y };
+    };
+    for (const [a, b] of [
+      ["route", "route3"],
+      ["route", "route4"],
+      ["route3", "route4"],
+    ] as const) {
+      expect(rectsOverlap(previewRect(a), previewRect(b)), `${a} previewed overlapping ${b}`).toBe(false);
+    }
+  });
+
+  it("still previews a first-ever drag (no overrides at all) identically to its commit", () => {
+    const { boxes, descendantsOf } = stackedFixture();
+    const overrides = new Map<string, Position>();
+    const gesture = { x: 16, y: 120 };
+    const live = computeLiveDragUpdate({
+      layout: { boxes, edges: [] },
+      overrides,
+      nodeId: "route4",
+      position: gesture,
+      movedDescendantIds: ["route4.child"],
+      descendantsOfId: descendantsOf,
+    })!;
+    const commit = resolveDragCommit({
+      boxes,
+      overrides,
+      nodeId: "route4",
+      position: gesture,
+      movedDescendantIds: ["route4.child"],
+      descendantsOf,
+    });
+    expect([...live.positions.keys()].sort()).toEqual([...commit.keys()].sort());
+    for (const [id, committedPosition] of commit) expect(live.positions.get(id)).toEqual(committedPosition);
+  });
+});
+
+/**
+ * Cumulative-desync regression coverage: every prior fix in this feature was validated against at
+ * most one or two drag operations. The reported failure mode is an ONGOING session ("empujando
+ * desde abajo hacia arriba") of many sequential individual drags, so this suite drives a realistic
+ * 8-drag sequence through the SAME transition `onNodeDragStop` runs, re-running the real
+ * `layoutGraph` between drags exactly like the component does, and asserts the full invariant
+ * after EVERY drag: no two boxes overlap unless one contains the other, and every container still
+ * encloses all of its own descendants.
+ */
+describe("sequential multi-drag session (realistic diagram shape)", () => {
+  const snapshot = { repoId: "repo", kind: "worktree" as const, contentDigest: "sha256:x" };
+  const span = { path: "pkg/a.py", startByte: 0, endByte: 3, startLine: 1, startColumn: 0, endLine: 1, endColumn: 3 };
+
+  /** A column of sibling root containers matching the reported screenshots: `route` (class + 2
+   * methods), `route3` (class + 2 methods), `route4` (function + class + method), `route5`
+   * (class + method + function). */
+  function realisticGraph(): AnalysisGraph {
+    const nodes: Entity[] = [
+      { id: "module:route", kind: "module", qualifiedName: "route", span },
+      { id: "class:route.Route", kind: "class", qualifiedName: "route.Route", containerId: "module:route", span },
+      { id: "method:route.Route.__init__", kind: "method", qualifiedName: "route.Route.__init__", containerId: "class:route.Route", span },
+      { id: "method:route.Route.get", kind: "method", qualifiedName: "route.Route.get", containerId: "class:route.Route", span },
+      { id: "module:route3", kind: "module", qualifiedName: "route3", span },
+      { id: "class:route3.Route3", kind: "class", qualifiedName: "route3.Route3", containerId: "module:route3", span },
+      { id: "method:route3.Route3.__init__", kind: "method", qualifiedName: "route3.Route3.__init__", containerId: "class:route3.Route3", span },
+      { id: "method:route3.Route3.get_info", kind: "method", qualifiedName: "route3.Route3.get_info", containerId: "class:route3.Route3", span },
+      { id: "module:route4", kind: "module", qualifiedName: "route4", span },
+      { id: "function:route4.funcion2", kind: "function", qualifiedName: "route4.funcion2", containerId: "module:route4", span },
+      { id: "class:route4.Route4", kind: "class", qualifiedName: "route4.Route4", containerId: "module:route4", span },
+      { id: "method:route4.Route4.__init__", kind: "method", qualifiedName: "route4.Route4.__init__", containerId: "class:route4.Route4", span },
+      { id: "module:route5", kind: "module", qualifiedName: "route5", span },
+      { id: "class:route5.Route5", kind: "class", qualifiedName: "route5.Route5", containerId: "module:route5", span },
+      { id: "method:route5.Route5.__init__", kind: "method", qualifiedName: "route5.Route5.__init__", containerId: "class:route5.Route5", span },
+      { id: "function:route5.helper", kind: "function", qualifiedName: "route5.helper", containerId: "module:route5", span },
+    ];
+    return { snapshot, nodes, edges: [], diagnostics: [] };
+  }
+
+  it("never leaves two boxes overlapping across 8 sequential bottom-to-top drags", () => {
+    const graph = realisticGraph();
+    const overrides = new Map<string, Position>();
+    let layout = layoutGraph({ graph, diff: [], untrackedPaths: [], overrides: new Map(overrides) });
+    const currentRect = (id: string): Rect => {
+      const base = layout.boxes.get(id)!;
+      const override = overrides.get(id);
+      return override ? { ...base, x: override.x, y: override.y } : base;
+    };
+
+    // "Empujando desde abajo hacia arriba": the bottom containers are repeatedly dragged upward,
+    // one drag-and-drop at a time, each committing before the next begins.
+    const sequence = [
+      { id: "module:route5", dx: 0, dy: -260 },
+      { id: "module:route4", dx: 0, dy: -220 },
+      { id: "module:route3", dx: 10, dy: -180 },
+      { id: "module:route5", dx: 0, dy: -140 },
+      { id: "module:route4", dx: -10, dy: -120 },
+      { id: "module:route3", dx: 0, dy: -100 },
+      { id: "module:route5", dx: 5, dy: -90 },
+      { id: "module:route4", dx: 0, dy: -80 },
+    ];
+
+    for (const step of sequence) {
+      const from = currentRect(step.id);
+      const committed = resolveDragCommit({
+        boxes: layout.boxes,
+        overrides: new Map(overrides),
+        nodeId: step.id,
+        position: { x: from.x + step.dx, y: from.y + step.dy },
+        movedDescendantIds: descendantsOfLayout(step.id, layout),
+        descendantsOf: (id) => descendantsOfLayout(id, layout),
+      });
+      for (const [id, position] of committed) overrides.set(id, position);
+      // The component re-runs the real layout after every drop; do the same here.
+      layout = layoutGraph({ graph, diff: [], untrackedPaths: [], overrides: new Map(overrides) });
+
+      const ids = [...layout.boxes.keys()];
+      for (let i = 0; i < ids.length; i++) {
+        for (let j = i + 1; j < ids.length; j++) {
+          const a = ids[i]!;
+          const b = ids[j]!;
+          // Containment (a container and its own descendants) is expected nesting, not a collision.
+          if (descendantsOfLayout(a, layout).includes(b) || descendantsOfLayout(b, layout).includes(a)) continue;
+          expect(rectsOverlap(currentRect(a), currentRect(b)), `${a} overlaps ${b} after dragging ${step.id}`).toBe(false);
+        }
+      }
+
+      for (const container of ["module:route", "module:route3", "module:route4", "module:route5"]) {
+        const parent = currentRect(container);
+        for (const descendant of descendantsOfLayout(container, layout)) {
+          const child = currentRect(descendant);
+          expect(
+            child.x >= parent.x && child.y >= parent.y && child.x + child.w <= parent.x + parent.w && child.y + child.h <= parent.y + parent.h,
+            `${descendant} escaped ${container} after dragging ${step.id}`,
+          ).toBe(true);
+        }
+      }
+    }
+  });
+});
+
+/**
+ * The OTHER confirmed mechanism behind "two entire container boxes ended up overlapping" — one
+ * that no amount of drag-path fixing could ever close, because it needs no drag at all.
+ *
+ * `positionOverrides` pins a node to an absolute position, but `layoutGraph` re-`measure()`s every
+ * box from the tree on every snapshot. During a live-testing session the user is EDITING the very
+ * files they are dragging: adding one method to `route3.py` grows `module:route3`'s measured box
+ * by exactly one row (40px), downward, while `module:route4` stays frozen at its dragged override.
+ * Measured on the fixture below: route3 grows 112 -> 152 tall at a pinned y=152, route4 stays
+ * pinned at y=292 — the two container rects now genuinely overlap on screen, and NOTHING resolves
+ * it, because `resolveCollisions` only ever runs from a drag and only ever considers pairs
+ * involving the dragged/pushed set. The overlap simply persists for the rest of the session.
+ *
+ * `resolveGeometryChangeOverlaps` closes that: a box whose OWN measured geometry changed is
+ * treated exactly like a dragged box (it moved, the system moved it), and everything it now
+ * overlaps is pushed clear through the same `resolveCollisions` used by the drag path.
+ */
+describe("resolveGeometryChangeOverlaps", () => {
+  const box = (x: number, y: number, w: number, h: number): Rect => ({ x, y, w, h });
+  const noDescendants = () => [] as readonly string[];
+
+  it("pushes a pinned neighbour clear when a container's own measured box grows into it", () => {
+    const previousSizes = new Map([
+      ["route3", { w: 248, h: 112 }],
+      ["route4", { w: 224, h: 72 }],
+    ]);
+    // Fresh layout after the user added a method to route3.py: route3 re-measured 40px taller.
+    const boxes = new Map<string, Rect>([
+      ["route3", box(16, 152, 248, 152)],
+      ["route4", box(16, 292, 224, 72)],
+    ]);
+    // route4 is pinned by an earlier drag at exactly its layout slot; route3 now grows into it.
+    const overrides = new Map<string, Position>([["route4", { x: 16, y: 292 }]]);
+
+    const pushes = resolveGeometryChangeOverlaps({ previousSizes, boxes, overrides, descendantsOf: noDescendants });
+
+    const pushedRoute4 = pushes.get("route4");
+    expect(pushedRoute4).toBeDefined();
+    const finalRoute4 = { ...boxes.get("route4")!, x: pushedRoute4!.x, y: pushedRoute4!.y };
+    expect(rectsOverlap(boxes.get("route3")!, finalRoute4)).toBe(false);
+    expect(finalRoute4.y).toBeGreaterThanOrEqual(152 + 152 + BOX_MIN_GAP); // clear of route3's new bottom edge
+  });
+
+  it("does nothing when no box's measured geometry changed (a plain re-render must never shuffle the diagram)", () => {
+    const previousSizes = new Map([
+      ["route3", { w: 248, h: 152 }],
+      ["route4", { w: 224, h: 72 }],
+    ]);
+    const boxes = new Map<string, Rect>([
+      ["route3", box(16, 152, 248, 152)],
+      ["route4", box(16, 200, 224, 72)], // already overlapping, but NOT because anything re-measured
+    ]);
+    const pushes = resolveGeometryChangeOverlaps({
+      previousSizes,
+      boxes,
+      overrides: new Map<string, Position>([["route4", { x: 16, y: 200 }]]),
+      descendantsOf: noDescendants,
+    });
+    expect(pushes.size).toBe(0);
+  });
+
+  it("is a no-op on the very first layout, when every box is new and nothing is pinned yet", () => {
+    const boxes = new Map<string, Rect>([
+      ["route3", box(16, 16, 248, 152)],
+      ["route4", box(16, 192, 224, 72)],
+    ]);
+    const pushes = resolveGeometryChangeOverlaps({
+      previousSizes: new Map(),
+      boxes,
+      overrides: new Map<string, Position>(),
+      descendantsOf: noDescendants,
+    });
+    expect(pushes.size).toBe(0);
+  });
+
+  it("carries a pushed container's own descendants along with it", () => {
+    const previousSizes = new Map([
+      ["grower", { w: 100, h: 40 }], // the only box that re-measured
+      ["pinned", { w: 100, h: 60 }],
+      ["pinned.child", { w: 60, h: 20 }],
+    ]);
+    const boxes = new Map<string, Rect>([
+      ["grower", box(0, 0, 100, 120)], // re-measured taller, now overlapping the pinned container
+      ["pinned", box(0, 100, 100, 60)],
+      ["pinned.child", box(10, 110, 60, 20)],
+    ]);
+    const pushes = resolveGeometryChangeOverlaps({
+      previousSizes,
+      boxes,
+      overrides: new Map<string, Position>([["pinned", { x: 0, y: 100 }]]),
+      descendantsOf: (id) => (id === "pinned" ? ["pinned.child"] : []),
+    });
+    const pushedParent = pushes.get("pinned");
+    const pushedChild = pushes.get("pinned.child");
+    expect(pushedParent).toBeDefined();
+    expect(pushedChild).toBeDefined();
+    expect(pushedChild!.y - boxes.get("pinned.child")!.y).toBe(pushedParent!.y - boxes.get("pinned")!.y);
+  });
+
+  it("resolves against each box's CURRENT (override-merged) position, not its raw layout slot", () => {
+    const previousSizes = new Map([
+      ["grower", { w: 100, h: 40 }],
+      ["pinned", { w: 100, h: 60 }],
+    ]);
+    const boxes = new Map<string, Rect>([
+      ["grower", box(0, 0, 100, 120)],
+      ["pinned", box(0, 400, 100, 60)], // raw slot is far away; the user dragged it right under grower
+    ]);
+    const pushes = resolveGeometryChangeOverlaps({
+      previousSizes,
+      boxes,
+      overrides: new Map<string, Position>([["pinned", { x: 0, y: 100 }]]),
+      descendantsOf: noDescendants,
+    });
+    const pushed = pushes.get("pinned");
+    expect(pushed).toBeDefined();
+    expect(pushed!.y).toBeGreaterThanOrEqual(120 + BOX_MIN_GAP);
   });
 });
 

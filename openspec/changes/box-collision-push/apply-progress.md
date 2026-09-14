@@ -552,3 +552,149 @@ rendering/routing today), but the same "stale box" symptom class could theoretic
 there. Not reproducible in practice at this project's real diagram sizes (`NESTED_LAYOUT_LIMITS`
 tops out at 60 nodes, LRU cap is 200), so left as a documented, low-priority follow-up rather than
 in-scope for this pass.
+
+---
+
+## Round 4 — live/commit divergence + re-measure overlaps (bottom-to-top multi-drag session)
+
+Fourth live-testing report: after an ongoing session of many sequential individual drags
+(bottom-to-top), the container boxes `route3` (class + 2 methods) and `route4` (function +
+class + method) ended up with their own top-level bounding rects directly overlapping.
+
+Three hypotheses were investigated with real code reading and real reproduction probes. Two
+distinct defects were found; one hypothesis was disproved with evidence.
+
+### Hypothesis A — container box never resized for a repositioned child: TRUE but NOT causal
+
+Confirmed structurally: a container's `Rect` comes from `measure()` (`graphLayout.ts`), is
+computed once per layout from the tree, and `overrides` only ever change `x`/`y`. `buildNodes`
+passes that same rect as `data.box`, and `AcmEntityNode.tsx` renders exactly `data.box.w/h`. So a
+container's rendered rect genuinely cannot grow to enclose an independently repositioned child.
+
+It is nevertheless NOT the cause, and this is provable rather than assumed:
+
+- A child rect is always contained in its parent's rect, so `overlap(child, mover)` is a subset of
+  `overlap(container, mover)` and can never have a strictly larger area. `resolveCollisions` picks
+  the maximum-area overlap with a strict `area > bestArea`, and `working` iterates in insertion
+  order (`probeBoxes` emits a container before its children), so on a tie the CONTAINER is always
+  the chosen target. A child can therefore never be pushed independently while its own parent is a
+  valid push target.
+- Empirically: 400 seeded random 8-drag sequences over a realistic 16-node fixture produced ZERO
+  cases of a child escaping its container's rect (and zero overlapping pairs at all).
+
+No change was made for A. Scope note for the record: making a container's rendered rect derive
+from its children's CURRENT positions would be a real architectural change to the box concept
+(`measure`/`probeBoxes`/`buildNodes`/rendering), and it is not needed to fix this bug.
+
+### Hypothesis B — live preview and drop commit diverge: CONFIRMED, this is defect #1
+
+`computeLiveDragUpdate` derived the gesture delta from `layout.boxes.get(nodeId)` — the RAW,
+never-override-merged layout slot — while `resolveDragCommit` (fix 6fc1e4d) derives it from the
+override-MERGED current position. That is the exact stale-base bug 6fc1e4d fixed on the commit
+path, left untouched on the preview path. Measured divergence on a stacked 3-container fixture
+where `route4` had already been dragged once (current y=250, raw slot y=368) and is nudged 20px
+further up:
+
+| id | live preview | drop commit | divergence |
+|---|---|---|---|
+| `route4.child` | y=142 | y=260 | 118px — child previewed OUTSIDE its own parent |
+| `route3` | y=-35 | y=53 | 88px |
+| `route` | y=-212 | y=-124 | 88px |
+
+So from the second gesture onward on any given container, the user aimed every drag at a preview
+that did not match what the drop committed, for a whole bottom-to-top session.
+
+**Fix**: one shared core, `resolveDragPositions` (`graphLayout.ts`), now used by BOTH
+`computeLiveDragUpdate` and `resolveDragCommit` (the latter is now a thin wrapper). The preview
+cannot disagree with the commit because it IS the commit, evaluated at the in-progress pointer
+position. Structural, not a coincidence-of-two-implementations fix.
+
+### Hypothesis C — cumulative desync over many drags: RULED OUT at the model level
+
+A realistic 8-drag bottom-to-top sequence over a `route`/`route3`/`route4`/`route5` fixture,
+re-running the real `layoutGraph` between drops exactly like the component does, produced no
+overlapping pair and no escaped child after ANY drag. Extended to 400 seeded random 8-drag
+sequences with an all-pairs overlap check plus a containment check: zero failures. The drag
+transition itself converges. Kept as a permanent regression test.
+
+### Hypothesis D (not on the list, discovered) — re-measured box vs pinned override: defect #2
+
+The mechanism that most literally produces "two entire container boxes overlapping" needs no drag
+at all, and no drag-path fix could ever have closed it. `positionOverrides` pins a node to an
+absolute position, but `layoutGraph` re-`measure()`s every box on every snapshot, and the user was
+EDITING the same files they were dragging. Measured reproduction with the real `layoutGraph`:
+adding one method to `route3.py` grows `module:route3` from h=112 to h=152 at a pinned y=152,
+while `module:route4` stays pinned at y=292 — the two container rects overlap, and NOTHING ever
+resolves it, because `resolveCollisions` only runs from a drag and only considers pairs involving
+the dragged/pushed set.
+
+**Fix**: `resolveGeometryChangeOverlaps` (`graphLayout.ts`) + a layout effect in `index.tsx`. A box
+whose OWN measured `w`/`h` changed between layouts was moved BY THE SYSTEM, so it becomes a mover
+and pushes pinned neighbours clear through the same `resolveCollisions` (same min-overlap axis,
+same `BOX_MIN_GAP`, same descendant cascade). Deliberately conservative: no re-measure means an
+empty result (a plain re-render can never shuffle a user-arranged diagram), brand-new ids are
+movers but never targets (so the very first layout is a guaranteed no-op), and it terminates by
+construction (the pushes change only positions, so the re-layout it triggers finds no movers).
+
+### TDD Cycle Evidence
+
+| # | Task | RED | GREEN | REFACTOR |
+|---|---|---|---|---|
+| 1 | Preview == commit for an already-dragged container | `preview vs commit disagreed for route4.child: 142 vs 260` (2 failing) | pass | preview + commit collapsed into one shared `resolveDragPositions` |
+| 2 | Already-dragged container's child stays rigidly attached mid-drag | failing (y=142, 118px outside parent) | pass | — |
+| 3 | Preview pushes nothing on top of another box | pass (guard) | pass | — |
+| 4 | First-ever drag previews identically to its commit | pass (non-regression guard) | pass | — |
+| 5 | 8-drag sequential session: no overlaps, no escaped children | pass (disproved C) | pass | kept as regression |
+| 6 | Re-measured container pushes a pinned neighbour clear | 5 failing (`resolveGeometryChangeOverlaps` absent) | pass | — |
+| 7 | No re-measure => no pushes at all | failing | pass | — |
+| 8 | First layout is a no-op | failing | pass | — |
+| 9 | Pushed container carries its descendants | failing | pass | — |
+| 10 | Resolves against override-merged current positions | failing | pass | — |
+
+### Work Unit Evidence
+
+| Evidence | Result |
+|---|---|
+| Focused test command | `npx vitest run test/unit/boxCollision.test.ts` — 26/26 passed (was 21, +5 new suites/cases beyond the prior 21) |
+| Full unit suite | `npm test` — 37 files, 616/616 passed |
+| Runtime harness | `npm run test:e2e` — all VS Code extension-host scenarios passed, exit 0 |
+| Typecheck / lint | `npm run typecheck`, `npm run lint --max-warnings=0` — both clean |
+| Webview build | `npm run build:webview` — ok (`out/webview/webview/index.js`, 1.1mb) |
+| Rollback boundary | Revert this commit: `resolveDragPositions` + `resolveGeometryChangeOverlaps` in `graphLayout.ts`, the layout effect + import in `index.tsx`, and the new suites in `boxCollision.test.ts`. No other feature work is entangled. |
+
+### Performance re-verification
+
+- `[perf-probe] resolveCollisions chain-reaction across 300 boxes took 0.46ms` (budget 50ms;
+  ~16ms single-frame budget) — unchanged by this round, the new call site reuses the same resolver.
+- `[perf-probe] scoped drag-commit re-route at {nodes:300, edges:600} took 131.70ms` (budget 500ms).
+- `[perf-probe] layoutGraph({nodes:300, edges:600}) took 4815ms` (budget 10000ms) — pre-existing.
+
+### Constraints honored
+
+- Edge router untouched (`edgeGeometry.ts` / `routingGraph.ts` / `routeSearch.ts`).
+- `BOX_MIN_GAP` left at the user's current value of `25` — verified after the change, not reverted.
+- Same branch `feat/box-collision-push`; PR #51 stays the review target.
+
+### Bug class closure — honest assessment (round 4)
+
+**Partially closed, and I will not overclaim after four rounds.**
+
+Closed with evidence:
+- The drag transition now has exactly ONE implementation. The whole "preview shows one thing, drop
+  commits another" class is closed structurally, not by making two code paths agree today.
+- The drag transition provably converges: 400 randomized 8-drag sequences, all-pairs overlap +
+  containment checks, zero failures.
+- The re-measure-vs-pinned-override class (a container growing into a pinned neighbour after a
+  source edit) is now resolved automatically instead of persisting for the session.
+
+Still open, stated plainly:
+- `resolveCollisions` is still a LOCAL resolver: it only ever considers pairs involving the
+  active (moved/pushed/re-measured) set. Any overlap introduced by something OTHER than a drag or
+  a box re-measure — a filter toggle that reflows the layout under pinned overrides, a hydrated
+  override set restored against a different graph, an LRU-evicted override — is still never
+  cleaned up. A genuine global de-overlap/reflow pass over the override-merged layout would close
+  that whole class, but it is a real design decision (when may the app move boxes the user placed?
+  what anchors the reflow?) beyond a bounded bug fix, so it was deliberately NOT forced here.
+- Hypothesis A remains structurally true (a container's rendered rect is fixed by `measure()`).
+  It is not reachable through the collision path today, but it is a latent constraint: the box
+  concept assumes children always sit at their default nested offsets.

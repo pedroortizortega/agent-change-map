@@ -15,7 +15,15 @@ import {
   type NodeTypes,
 } from "@xyflow/react";
 import { bindRelationshipDetails } from "./relationshipDetails.js";
-import { computeLiveDragUpdate, layoutGraph, resolveDragCommit, type AcmEdge, type DragCommitScope, type Position } from "./graphLayout.js";
+import {
+  computeLiveDragUpdate,
+  layoutGraph,
+  resolveDragCommit,
+  resolveGeometryChangeOverlaps,
+  type AcmEdge,
+  type DragCommitScope,
+  type Position,
+} from "./graphLayout.js";
 import type { Point } from "./edgeGeometry.js";
 import { AcmEntityNode } from "./nodes/AcmEntityNode.js";
 import { AcmKindEdge } from "./edges/AcmKindEdge.js";
@@ -251,6 +259,12 @@ function App() {
    * `state.graph` snapshot landing) never accidentally replays a stale scope. */
   const edgeRoutesRef = useRef<Map<number, Point[]>>(new Map());
   const pendingDragCommitRef = useRef<DragCommitScope | undefined>(undefined);
+  /** box-collision-push: the measured `w`/`h` of every box as of the PREVIOUS `layoutGraph` run,
+   * so the effect below can tell which boxes were re-`measure()`d by a fresh snapshot (the user
+   * editing a source file adds/removes a row and changes a container's own height) — see
+   * `resolveGeometryChangeOverlaps`' doc comment for why a re-measured box has to push its pinned
+   * neighbours clear exactly like a dragged one. */
+  const previousBoxSizesRef = useRef<Map<string, { w: number; h: number }>>(new Map());
   /** Snapshot of `expandedRuns` taken right before a refresh-landing re-`inspectSources` request
    * (see the `state.pendingInspect` effect below), consumed by the `diffOps` effect so a landing
    * refresh's diff panel re-render restores the same collapse state — mirrors the old `index.ts`'s
@@ -441,6 +455,31 @@ function App() {
   // contract, minus the DOM) so a stale position for a removed node no-ops rather than resurfacing.
   useEffect(() => {
     if (layout) positionOverrides.pruneTo(layout.boxes.keys());
+  }, [layout]);
+
+  /**
+   * box-collision-push (fourth reported round): a box whose OWN measured geometry changed was
+   * moved by the SYSTEM, not by the user, so it has to push its pinned neighbours clear exactly
+   * like a dragged box does. Without this, editing a source file (adding one method grows that
+   * module's container by a row, downward) leaves the grown container visually overlapping
+   * whatever an earlier drag pinned below it, permanently: `resolveCollisions` otherwise only ever
+   * runs from a drag and only ever considers pairs involving the dragged/pushed set. See
+   * `resolveGeometryChangeOverlaps`' doc comment and its regression suite for the measured
+   * reproduction. Terminating by construction: the pushes change only positions, so the re-layout
+   * this triggers re-measures identical sizes, finds no movers, and stops.
+   */
+  useEffect(() => {
+    if (!layout) return;
+    const pushes = resolveGeometryChangeOverlaps({
+      previousSizes: previousBoxSizesRef.current,
+      boxes: layout.boxes,
+      overrides: new Map(positionOverrides.entries()),
+      descendantsOf: (id) => descendantsOf(id, layout),
+    });
+    previousBoxSizesRef.current = new Map([...layout.boxes].map(([id, box]) => [id, { w: box.w, h: box.h }]));
+    if (pushes.size === 0) return;
+    for (const [id, position] of pushes) positionOverrides.set(id, position);
+    setOverrideSeq((s) => s + 1);
   }, [layout]);
 
   /**
