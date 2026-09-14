@@ -15,7 +15,7 @@ import {
   type NodeTypes,
 } from "@xyflow/react";
 import { bindRelationshipDetails } from "./relationshipDetails.js";
-import { computeLiveDragUpdate, layoutGraph, resolveCollisions, type AcmEdge, type DragCommitScope, type Position } from "./graphLayout.js";
+import { computeLiveDragUpdate, layoutGraph, resolveDragCommit, type AcmEdge, type DragCommitScope, type Position } from "./graphLayout.js";
 import type { Point } from "./edgeGeometry.js";
 import { AcmEntityNode } from "./nodes/AcmEntityNode.js";
 import { AcmKindEdge } from "./edges/AcmKindEdge.js";
@@ -493,36 +493,27 @@ function App() {
   const onNodeDragStop = useCallback(
     (_: unknown, node: Node) => {
       if (!layout) return;
-      const before = layout.boxes.get(node.id); // pre-drag absolute box
-      const dx = node.position.x - (before?.x ?? node.position.x);
-      const dy = node.position.y - (before?.y ?? node.position.y);
-      const movedIds = new Set<string>([node.id]); // PR4: fed to the scoped re-route below
-      positionOverrides.set(node.id, { x: node.position.x, y: node.position.y }); // the dragged node itself
-      const committedBoxes = new Map(layout.boxes); // box-collision-push: local working copy for resolveCollisions
-      committedBoxes.set(node.id, { ...layout.boxes.get(node.id)!, x: node.position.x, y: node.position.y });
-      for (const descendantId of descendantsOf(node.id, layout)) {
-        // D14 — cascade
-        movedIds.add(descendantId);
-        const box = layout.boxes.get(descendantId);
-        if (box) {
-          const pushedPosition = { x: box.x + dx, y: box.y + dy };
-          positionOverrides.set(descendantId, pushedPosition);
-          committedBoxes.set(descendantId, { ...box, ...pushedPosition });
-        }
-      }
-      // box-collision-push: resolve any box(es) the drop would otherwise leave overlapping the
-      // dragged box(es), and persist THEIR new positions too, just like the dragged node's own —
-      // otherwise a pushed box would visually snap back to its pre-push (overlapping) position
-      // the moment the live-drag preview clears below.
-      const pushed = resolveCollisions({
-        boxes: committedBoxes,
-        movedIds,
+      // box-collision-push follow-up fix: `resolveDragCommit` (graphLayout.ts) resolves the
+      // drop's D14 cascade + collision push-out against each box's CURRENT position — merging in
+      // any already-committed `positionOverrides` from an earlier drag/push in this session —
+      // instead of `layoutGraph`'s raw, un-overridden `boxes` (which never reflects a prior
+      // drag's committed position, see `boxesForRouting`'s doc comment). Using the raw layout here
+      // was the confirmed root cause of a real bug: dragging multiple stacked containers
+      // bottom-to-top could leave one container's box visually overlapping a DIFFERENT,
+      // already-moved container's content, because collisions against it were checked at its
+      // stale pre-override position. See `resolveDragCommit`'s own doc comment and
+      // `test/unit/boxCollision.test.ts`'s "resolveDragCommit" suite for the full root-cause
+      // writeup and regression coverage.
+      const committed = resolveDragCommit({
+        boxes: layout.boxes,
+        overrides: new Map(positionOverrides.entries()),
+        nodeId: node.id,
+        position: { x: node.position.x, y: node.position.y },
+        movedDescendantIds: descendantsOf(node.id, layout), // D14 cascade
         descendantsOf: (id) => descendantsOf(id, layout),
       });
-      for (const [id, pushedPosition] of pushed) {
-        movedIds.add(id);
-        positionOverrides.set(id, pushedPosition);
-      }
+      const movedIds = new Set<string>(committed.keys()); // PR4: fed to the scoped re-route below
+      for (const [id, committedPosition] of committed) positionOverrides.set(id, committedPosition);
       // PR4 (design.md Block F, KEEP — measured 1.6x-18x over the 250ms budget for a full
       // re-route, see apply-progress.md's PR0 gate): only `movedIds`' own edges get genuinely
       // re-solved by the upcoming `layoutGraph` call below; every other edge carries its previous

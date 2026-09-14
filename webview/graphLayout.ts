@@ -29,7 +29,7 @@ const MARGIN = 16;
  * is a value that's trivial to change and re-test (box-collision-push wants to compare 5px vs
  * 10px visually) — flip this single number and re-run, no other code needs to change.
  */
-export const BOX_MIN_GAP = 5;
+export const BOX_MIN_GAP = 15;
 
 interface KindStyle {
   strokeWidth: number;
@@ -728,6 +728,61 @@ export function resolveCollisions(input: {
 
   for (const id of movedIds) pushed.delete(id);
   return pushed;
+}
+
+/**
+ * Pure "drop" counterpart to `computeLiveDragUpdate` (box-collision-push follow-up fix — see
+ * apply-progress.md's "multi-drag stale-box" section). Given the pre-drag `layoutGraph` `boxes`,
+ * the ALREADY-COMMITTED `overrides` from any prior drag/push in this session, the dragged node's
+ * id and DROP position, its own D14-cascaded descendant ids, and the same `descendantsOf`
+ * callback used everywhere else, returns the full set of NEW absolute positions to persist: the
+ * dragged node itself, its cascaded descendants (rigid group), and any box(es) `resolveCollisions`
+ * pushes clear (plus their own cascaded descendants, handled internally by `resolveCollisions`).
+ *
+ * Root-cause fix: `layoutGraph`'s own `LayoutResult.boxes` is INTENTIONALLY never merged with
+ * `overrides` (see `boxesForRouting`'s doc comment) — it always reflects each box's ORIGINAL,
+ * un-dragged layout position. Resolving collisions directly against that raw map (the previous
+ * behavior, inlined in `index.tsx`'s `onNodeDragStop`) meant that any box already moved by an
+ * EARLIER drag in the same session was checked against its STALE pre-override position instead of
+ * where it actually currently renders — silently missing real on-screen overlaps (or computing a
+ * push distance/direction from the wrong starting point) whenever a later drag interacts with an
+ * already-pushed/dragged box. This is the confirmed root cause of the reported bug: dragging
+ * multiple stacked containers bottom-to-top left one container's box visually overlapping a
+ * DIFFERENT container's content once a prior push's position was never accounted for. The fix:
+ * build the collision working set from `boxesForRouting(boxes, overrides)` — the SAME merge
+ * `computeLiveDragUpdate` and edge routing already use — so both the dragged node's own dx/dy AND
+ * every other box's current position are correct before `resolveCollisions` runs.
+ */
+export function resolveDragCommit(input: {
+  boxes: ReadonlyMap<string, Rect>;
+  overrides: ReadonlyMap<string, Position>;
+  nodeId: string;
+  position: Position;
+  movedDescendantIds: readonly string[];
+  descendantsOf: (id: string) => readonly string[];
+}): Map<string, Position> {
+  const { boxes, overrides, nodeId, position, movedDescendantIds, descendantsOf } = input;
+  const committedBoxes = new Map(boxesForRouting(new Map(boxes), overrides));
+  const before = committedBoxes.get(nodeId);
+  const dx = position.x - (before?.x ?? position.x);
+  const dy = position.y - (before?.y ?? position.y);
+  if (before) committedBoxes.set(nodeId, { ...before, x: position.x, y: position.y });
+
+  const committed = new Map<string, Position>([[nodeId, position]]);
+  const movedIds = new Set<string>([nodeId]);
+  for (const descendantId of movedDescendantIds) {
+    movedIds.add(descendantId);
+    const box = committedBoxes.get(descendantId);
+    if (!box) continue;
+    const newPosition = { x: box.x + dx, y: box.y + dy };
+    committed.set(descendantId, newPosition);
+    committedBoxes.set(descendantId, { ...box, ...newPosition });
+  }
+
+  const pushed = resolveCollisions({ boxes: committedBoxes, movedIds, descendantsOf });
+  for (const [id, pushedPosition] of pushed) committed.set(id, pushedPosition);
+
+  return committed;
 }
 
 /** THE entry point index.tsx calls. */

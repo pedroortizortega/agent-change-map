@@ -404,3 +404,151 @@ To switch to 10px: edit `webview/graphLayout.ts`, change `export const BOX_MIN_G
 `export const BOX_MIN_GAP = 10;`, then run `npm run build:webview` and reload the Extension
 Development Host. That is the entire diff — no test changes needed (tests already assert against
 the imported constant, not a hardcoded number).
+
+## Follow-up fix: multi-drag stale-box overlap ("route" container cutting through "route3"/"route4")
+
+### Bug description (live-testing report, post-93abc35)
+
+Dragging/pushing multiple stacked CONTAINER boxes from bottom to top (a real diagram with root
+containers "route", "route3", "route4", each with several leaf children, stacked vertically) left
+"route"'s own box visually overlapping/cutting through "route3"'s content after the drag sequence
+— route's dashed border rendered through the middle of route3, even though `resolveCollisions`
+itself (10/10 tests passing) had already been fixed twice for chain-reaction/sibling bugs.
+
+### Root cause (confirmed, not theorized)
+
+`webview/graphLayout.ts`'s `layoutGraph` computes `LayoutResult.boxes` from `probeBoxes`/`measure`
+— **always the box's ORIGINAL, un-dragged position**. This is intentional and documented on
+`boxesForRouting`'s own doc comment: `result.boxes` never gets merged with `positionOverrides`;
+only the boxes fed into edge ROUTING are merged, at the routing call site.
+
+`webview/index.tsx`'s `onNodeDragStop` (the DROP/persist path, as opposed to the live mid-drag
+preview) built its `resolveCollisions` working set as `new Map(layout.boxes)` — the RAW,
+un-overridden layout — with only the CURRENTLY-dragged node (and its own D14 descendants)
+overwritten to their commit position. Every OTHER box, including any container ALREADY moved by an
+EARLIER drag in the same session (its real position tracked only in `positionOverrides`, never
+back-written into `layout.boxes`), was checked for overlap at its STALE, pre-override position —
+not where it actually renders.
+
+Concretely, in a multi-drag sequence (drag route4, drop — pushes/moves route3 close under route,
+persisted via `positionOverrides`; THEN drag route5 later), the SECOND drag's collision resolution
+compared the new drag against route3's ORIGINAL layout position (e.g. `y=200`), not its real
+current position (e.g. `y=45`, close under "route"). A real on-screen overlap between the new drag
+and route3's ACTUAL position was therefore silently missed (or, when a chain reaction WAS
+triggered by coincidence, computed a push amount from the wrong starting point) — leaving route3
+either unresolved-overlapping the new drag, or pushed by the wrong delta straight into "route"
+above it, matching the exact reported symptom (a container's box cutting through a DIFFERENT,
+already-positioned container's content).
+
+`webview/positionOverrides.ts`'s `descendantsOf` (id-based `parentId` walk) and
+`computeChildrenOf`'s containerId-based nesting were both re-read and ruled out — "route" and
+"route3" are genuine SIBLING root containers (`containerId === undefined` for both), not
+accidentally nested; `resolveCollisions`'s own iteration/candidate logic (the greedy fixed-point
+loop, the same-batch-sibling fix, the container/descendant exclusion rule) was also re-read and is
+correct in isolation — it resolves whatever `boxes` it's given correctly. The bug was entirely in
+what `onNodeDragStop` fed it: a stale, non-current snapshot for every already-moved box.
+
+By contrast, `computeLiveDragUpdate` (the LIVE mid-drag preview path) was already correct — it
+builds its working set via `boxesForRouting(layout.boxes, overrides)`, which DOES merge in
+committed overrides. This asymmetry (live preview correct, drop/persist path buggy) is why the
+overlap could look momentarily resolved during the gesture but reappear/differ after drop, and why
+a genuinely bad result could persist across multiple further drags (each new drag's collision
+check kept comparing against the same stale positions).
+
+Proven with a RED test first, against the pre-fix behavior (temporarily reproduced by constructing
+`resolveDragCommit`'s working set from raw `boxes` only, ignoring `overrides` — the exact shape of
+the original `onNodeDragStop` bug): `test/unit/boxCollision.test.ts`'s new `resolveDragCommit`
+suite, "resolves a drop's collisions against a box's CURRENT (override-merged) position..." failed
+with `expected undefined to be defined` (route3 was never even recognized as needing a push,
+because its stale position never overlapped the new drag at all) and the dx/dy cascade test failed
+with `expected { x: 530, y: 540 } to deeply equal { x: 30, y: 40 }` (a dragged node's OWN D14
+cascade was also computed from its stale pre-override position, a second instance of the same root
+cause for the dragged node itself, not just other boxes).
+
+### Fix
+
+Extracted a new pure, exported function `resolveDragCommit` in `webview/graphLayout.ts` — the
+"drop" counterpart to the existing `computeLiveDragUpdate` ("live preview" counterpart), following
+the same established pattern. It builds its working set via
+`boxesForRouting(new Map(boxes), overrides)` (the SAME merge `computeLiveDragUpdate` and edge
+routing already use) before computing the dragged node's dx/dy, cascading its D14 descendants, and
+running `resolveCollisions` — so both the dragged node's own delta AND every other box's current
+position are correct. `webview/index.tsx`'s `onNodeDragStop` now calls this function instead of
+duplicating the (buggy) logic inline; the local `committedBoxes`/`dx`/`dy`/manual descendant loop
+that previously lived in `index.tsx` is gone, along with the direct `resolveCollisions` import
+there (now only used internally by `resolveDragCommit`).
+
+### TDD evidence
+
+RED: `test/unit/boxCollision.test.ts`'s `resolveDragCommit` describe block, written first —
+confirmed both new bug-reproducing tests failed against a raw-`boxes`-only (pre-fix-shaped)
+implementation (see exact failures above); the third ("no prior overrides") test passed
+pre-fix too, confirming it captures unchanged, correct existing behavior rather than the new fix.
+
+GREEN: implemented `resolveDragCommit` using `boxesForRouting` for the merge; all 3 new tests
+pass. Full `boxCollision.test.ts` suite (13 pre-existing + 3 new) — 16/16 passing. Rewired
+`index.tsx`'s `onNodeDragStop` to call it; full project suite re-run to confirm no regression.
+
+```
+✓ resolveDragCommit > resolves a drop's collisions against a box's CURRENT (override-merged)
+  position, not the stale pre-override layout position
+✓ resolveDragCommit > computes the dragged node's own dx/dy cascade from its CURRENT override
+  position, not the stale layout position
+✓ resolveDragCommit > still resolves correctly with no prior overrides at all (non-regression)
+```
+
+### Performance re-verification (measured, not assumed)
+
+`resolveDragCommit` wraps a single `boxesForRouting` merge (already O(overrides), cheap — existing
+edge-routing call sites already pay this cost every render) plus one `resolveCollisions` call per
+drop (unchanged cost model, re-measured):
+
+```
+[perf-probe] resolveCollisions chain-reaction across 300 boxes took 0.75ms
+```
+
+Comfortably inside the `< 50ms` assertion and the real ~16ms single-frame budget — no regression
+(run-to-run noise vs. the 93abc35 baseline of 0.63ms, same order of magnitude).
+
+### Full gate (all run for real)
+
+- `npm run typecheck` — clean.
+- `npm run lint` — clean (`eslint src test webview --max-warnings=0`).
+- `npm test` — 606/606 tests passed across 37 files (+3 new `resolveDragCommit` tests; all
+  pre-existing suites unchanged, including the two prior box-collision-push follow-up fixes,
+  D14 cascade, live-drag, PR4 scoped-reroute, and edge-router regression suites).
+- `npm run test:e2e` — all scenarios pass against a real VS Code Extension Development Host
+  instance (also rebuilds the webview as part of its own pipeline).
+- `npm run build:webview` — explicit standalone rebuild; confirmed `BOX_MIN_GAP` is still `15`
+  (unchanged, user-set value preserved) and baked into `out/webview/webview/index.js` (grep count:
+  3 occurrences).
+
+### Constraints honored (this follow-up)
+
+- Edge router untouched (`edgeGeometry.ts`/`routingGraph.ts`/`routeSearch.ts`) — only
+  `webview/graphLayout.ts` (new `resolveDragCommit` export) and `webview/index.tsx`
+  (`onNodeDragStop` rewired to call it) changed, plus `test/unit/boxCollision.test.ts`.
+- `BOX_MIN_GAP` left at its current user-set value of `15` — not reverted.
+- Same branch (`feat/box-collision-push`), additional commit on top of `93abc35`, no new branch —
+  PR #51 stays the review target.
+
+### Bug class closure — honest assessment
+
+This closes the specific class of bug where the DROP/persist collision-resolution path used a
+stale (non-current) box for anything not directly part of the CURRENT drag. `resolveDragCommit`
+now sources its entire working set from `boxesForRouting(boxes, overrides)`, the same single
+source of truth `computeLiveDragUpdate` and edge routing already rely on — there is no longer a
+second, independently-constructed "boxes" snapshot anywhere in the drag/push pipeline that could
+drift from the committed `positionOverrides`. I'm confident this specific "container box desyncing
+from its children/from a prior drag's committed position" class is closed for the DROP path (it
+was already correct for the LIVE mid-drag preview path).
+
+One remaining, explicitly out-of-scope edge case worth flagging: `positionOverrides` is an LRU-
+bounded map (`MAX_POSITION_OVERRIDES = 200`, see `positionOverrides.ts`). If a diagram ever has
+more than 200 actively-overridden nodes and an old override gets evicted, `boxesForRouting` (and
+now `resolveDragCommit`) would silently fall back to that node's stale `layout.boxes` position for
+THAT specific node — not a bug introduced by this fix (the same LRU eviction already affects
+rendering/routing today), but the same "stale box" symptom class could theoretically resurface
+there. Not reproducible in practice at this project's real diagram sizes (`NESTED_LAYOUT_LIMITS`
+tops out at 60 nodes, LRU cap is 200), so left as a documented, low-priority follow-up rather than
+in-scope for this pass.

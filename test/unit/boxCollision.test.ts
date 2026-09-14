@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BOX_MIN_GAP, resolveCollisions } from "../../webview/graphLayout.js";
+import { BOX_MIN_GAP, resolveCollisions, resolveDragCommit, type Position } from "../../webview/graphLayout.js";
 import type { Rect } from "../../webview/edgeGeometry.js";
 
 /**
@@ -254,6 +254,104 @@ describe("resolveCollisions — performance probe near OVERSIZED_THRESHOLDS ({no
     expect(result.size).toBeGreaterThan(0);
     console.log(`[perf-probe] resolveCollisions chain-reaction across 300 boxes took ${elapsedMs.toFixed(2)}ms`);
     expect(elapsedMs).toBeLessThan(50); // generous relative to the ~16ms single-frame budget; see console log for the real number
+  });
+});
+
+/**
+ * Real-world convergence bug reported via live testing on the VS Code Extension Development Host:
+ * dragging/pushing multiple stacked CONTAINER boxes from bottom to top left one container's box
+ * visually overlapping/cutting through a DIFFERENT container's content (a "route" container ended
+ * up overlapping "route3"/"route4" below it). Root cause: `onNodeDragStop`'s collision resolution
+ * ran against `layoutGraph`'s raw, un-overridden `boxes` (`LayoutResult.boxes` intentionally never
+ * reflects `positionOverrides`, see `boxesForRouting`'s doc comment) instead of each box's ACTUAL
+ * current position (including a prior drag/push's committed override) — silently missing real
+ * on-screen overlaps against anything already moved earlier in the same multi-drag session.
+ */
+describe("resolveDragCommit", () => {
+  const box = (x: number, y: number, w: number, h: number): Rect => ({ x, y, w, h });
+  const noDescendants = () => [] as readonly string[];
+
+  it("resolves a drop's collisions against a box's CURRENT (override-merged) position, not the stale pre-override layout position", () => {
+    // Three stacked containers, top to bottom: "route", "route3", "route4" — matching the
+    // reported bug's real shape. `boxes` is the RAW `layoutGraph` output (as if `route3` had
+    // never moved): route3 sits far below route4 in the original layout.
+    const boxes = new Map<string, Rect>([
+      ["route", box(0, 0, 100, 40)],
+      ["route3", box(0, 200, 100, 40)], // stale ORIGINAL layout position — far from "route"
+      ["route4", box(0, 260, 100, 40)], // stale ORIGINAL layout position — below route3
+    ]);
+    // An EARLIER drag in this session already pushed "route3" up, close under "route" — this is
+    // route3's real, currently-rendered position, persisted in `positionOverrides`.
+    const overrides = new Map<string, Position>([["route3", { x: 0, y: 45 }]]);
+
+    // Now drag "route4" up so it overlaps route3's CURRENT position (45-85), not its stale
+    // layout position (200-240) — a buggy implementation checking the stale position would see NO
+    // overlap here and never push route3 (or, transitively, "route") out of the way at all.
+    const result = resolveDragCommit({
+      boxes,
+      overrides,
+      nodeId: "route4",
+      position: { x: 0, y: 70 },
+      movedDescendantIds: [],
+      descendantsOf: noDescendants,
+    });
+
+    const finalRoute4 = { ...boxes.get("route4")!, x: 0, y: 70 };
+    const route3Position = result.get("route3");
+    expect(route3Position).toBeDefined(); // route3 MUST be recognized as pushed at all
+    const finalRoute3 = { ...boxes.get("route3")!, x: route3Position!.x, y: route3Position!.y };
+    expect(rectsOverlap(finalRoute4, finalRoute3)).toBe(false);
+
+    // Pushing route3 (already close under "route") clear of route4 can itself land route3 on top
+    // of "route" — the SAME resolveDragCommit call must resolve that chain reaction too, not leave
+    // a container's box cutting through a sibling container above it.
+    const routePosition = result.get("route") ?? { x: boxes.get("route")!.x, y: boxes.get("route")!.y };
+    const finalRoute = { ...boxes.get("route")!, x: routePosition.x, y: routePosition.y };
+    expect(rectsOverlap(finalRoute, finalRoute3)).toBe(false);
+  });
+
+  it("computes the dragged node's own dx/dy cascade from its CURRENT override position, not the stale layout position", () => {
+    // "container" was already dragged once before (override present); dragging it AGAIN must
+    // cascade its descendant by the delta from where it REALLY currently is, not from the stale
+    // original layout box.
+    const boxes = new Map<string, Rect>([
+      ["container", box(0, 0, 100, 100)],
+      ["child", box(10, 10, 20, 20)],
+    ]);
+    const overrides = new Map<string, Position>([["container", { x: 500, y: 500 }]]);
+    const descendantsOf = (id: string) => (id === "container" ? ["child"] : []);
+
+    const result = resolveDragCommit({
+      boxes,
+      overrides,
+      nodeId: "container",
+      position: { x: 520, y: 530 }, // +20/+30 from its CURRENT (override) position
+      movedDescendantIds: ["child"],
+      descendantsOf,
+    });
+
+    // Correct: child moves by the same +20/+30 delta, from ITS OWN stale layout position (child
+    // has no override, so its layout.boxes entry is still authoritative for its own base).
+    expect(result.get("child")).toEqual({ x: 30, y: 40 });
+  });
+
+  it("still resolves correctly with no prior overrides at all (non-regression)", () => {
+    const boxes = new Map<string, Rect>([
+      ["dragged", box(0, 0, 100, 50)],
+      ["other", box(80, 0, 100, 50)],
+    ]);
+    const result = resolveDragCommit({
+      boxes,
+      overrides: new Map(),
+      nodeId: "dragged",
+      position: { x: 0, y: 0 },
+      movedDescendantIds: [],
+      descendantsOf: noDescendants,
+    });
+    expect(result.get("dragged")).toEqual({ x: 0, y: 0 });
+    const pushedOther = result.get("other");
+    expect(pushedOther).toBeDefined();
+    expect(pushedOther!.x).toBeGreaterThanOrEqual(100);
   });
 });
 
