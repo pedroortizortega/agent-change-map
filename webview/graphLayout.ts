@@ -23,6 +23,14 @@ const NODE_MIN_W = 200;
 const ROOT_GAP = 24;
 const MARGIN = 16;
 
+/**
+ * Minimum clear-space gap (px) `resolveCollisions`/`pushVector` maintain between a pushed box and
+ * whatever it was pushed clear of. Intentionally a tunable CONSTANT, not a magic number: the goal
+ * is a value that's trivial to change and re-test (box-collision-push wants to compare 5px vs
+ * 10px visually) — flip this single number and re-run, no other code needs to change.
+ */
+export const BOX_MIN_GAP = 5;
+
 interface KindStyle {
   strokeWidth: number;
   dasharray?: string;
@@ -612,10 +620,13 @@ function overlapAmount(a: Rect, b: Rect): { overlapX: number; overlapY: number }
 }
 
 /**
- * Minimum-translation push vector to move `target` fully clear of `mover`, along whichever axis
- * has the SMALLER overlap (the standard AABB push-out heuristic — the shortest way to separate
- * two overlapping rectangles). Direction is away from `mover`'s center; ties (equal centers) push
- * in the positive direction, deterministically.
+ * Minimum-translation push vector to move `target` clear of `mover` by at least `BOX_MIN_GAP`
+ * px, along whichever axis has the SMALLER overlap (the standard AABB push-out heuristic — the
+ * shortest way to separate two overlapping rectangles). Direction is away from `mover`'s center;
+ * ties (equal centers) push in the positive direction, deterministically. `BOX_MIN_GAP` is added
+ * on top of the raw overlap distance so the two boxes end up with real clear space between them,
+ * not merely touching at 0px — this only pads a push that's ALREADY happening (triggered by a
+ * genuine overlap); it does not enforce a minimum gap between boxes that never overlapped.
  */
 function pushVector(mover: Rect, target: Rect, overlap: { overlapX: number; overlapY: number }): Position {
   const moverCenterX = mover.x + mover.w / 2;
@@ -624,10 +635,10 @@ function pushVector(mover: Rect, target: Rect, overlap: { overlapX: number; over
   const targetCenterY = target.y + target.h / 2;
   if (overlap.overlapX < overlap.overlapY) {
     const sign = targetCenterX >= moverCenterX ? 1 : -1;
-    return { x: sign * overlap.overlapX, y: 0 };
+    return { x: sign * (overlap.overlapX + BOX_MIN_GAP), y: 0 };
   }
   const sign = targetCenterY >= moverCenterY ? 1 : -1;
-  return { x: 0, y: sign * overlap.overlapY };
+  return { x: 0, y: sign * (overlap.overlapY + BOX_MIN_GAP) };
 }
 
 /**

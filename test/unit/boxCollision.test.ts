@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveCollisions } from "../../webview/graphLayout.js";
+import { BOX_MIN_GAP, resolveCollisions } from "../../webview/graphLayout.js";
 import type { Rect } from "../../webview/edgeGeometry.js";
 
 /**
@@ -174,6 +174,43 @@ describe("resolveCollisions", () => {
     expect(rectsOverlap(finalApp, finalRoute3)).toBe(false);
     // The actual bug: route2 and route3 must ALSO end up clear of each other, not just of "app".
     expect(rectsOverlap(finalRoute2, finalRoute3)).toBe(false);
+  });
+
+  it("maintains at least BOX_MIN_GAP px of separation after a push (horizontal case), not just 0px", () => {
+    // Same fixture as the horizontal push-out case above, but now asserting the pushed box clears
+    // a real minimum gap — not merely "no longer touching at 0px".
+    const boxes = new Map<string, Rect>([
+      ["dragged", box(0, 0, 100, 50)],
+      ["other", box(80, 0, 100, 50)],
+    ]);
+    const result = resolveCollisions({ boxes, movedIds: new Set(["dragged"]), descendantsOf: noDescendants });
+    const pushed = result.get("other");
+    expect(pushed).toBeDefined();
+    // dragged's right edge is at x=100; the pushed box's left edge must clear it by BOX_MIN_GAP.
+    expect(pushed!.x).toBeGreaterThanOrEqual(100 + BOX_MIN_GAP);
+  });
+
+  it("maintains at least BOX_MIN_GAP px of separation after a push (vertical case), not just 0px", () => {
+    const boxes = new Map<string, Rect>([
+      ["dragged", box(0, 0, 100, 50)],
+      ["other", box(0, 40, 100, 50)],
+    ]);
+    const result = resolveCollisions({ boxes, movedIds: new Set(["dragged"]), descendantsOf: noDescendants });
+    const pushed = result.get("other");
+    expect(pushed).toBeDefined();
+    // dragged's bottom edge is at y=50; the pushed box's top edge must clear it by BOX_MIN_GAP.
+    expect(pushed!.y).toBeGreaterThanOrEqual(50 + BOX_MIN_GAP);
+  });
+
+  it("does NOT push boxes that are already separated by more than BOX_MIN_GAP — this pads an existing push, it does not enforce a minimum gap globally", () => {
+    const boxes = new Map<string, Rect>([
+      ["dragged", box(0, 0, 100, 50)],
+      // Gap between dragged's right edge (100) and other's left edge (100 + BOX_MIN_GAP + 50) is
+      // comfortably more than BOX_MIN_GAP — no overlap, so no push should happen at all.
+      ["other", box(100 + BOX_MIN_GAP + 50, 0, 100, 50)],
+    ]);
+    const result = resolveCollisions({ boxes, movedIds: new Set(["dragged"]), descendantsOf: noDescendants });
+    expect(result.size).toBe(0);
   });
 
   it("never returns an entry for a mover id itself", () => {

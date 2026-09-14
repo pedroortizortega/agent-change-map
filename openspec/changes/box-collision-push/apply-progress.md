@@ -297,3 +297,110 @@ cost remains negligible at this project's `OVERSIZED_THRESHOLDS` scale (300 node
   the descendant-exclusion rule was added specifically to PRESERVE the former, not to change it.
 - Same branch (`feat/box-collision-push`), additional commit on top of `210c5b8`, no new branch —
   PR #51 stays the review target.
+
+## Follow-up: configurable minimum gap between pushed boxes (post-19c3676)
+
+The collision fix above only prevents OVERLAP (0px gap) — a pushed box lands exactly touching
+the box it was pushed clear of. User wants a real, configurable minimum visual gap instead of
+0px, to experiment with (5px first, then 10px) and see which reads better.
+
+### Design decision: constant, not a threaded parameter
+
+Considered threading a `minGap` parameter through `resolveCollisions`'s signature vs. a simple
+module-level constant. Chose a constant, matching this file's own existing convention
+(`ROOT_GAP`, `MARGIN`, `NODE_MIN_W`, etc. are all plain top-of-file `const`s) and
+`edgeGeometry.ts`'s (`LANE_GAP`, `ROUTE_CLEARANCE`). The user's explicit ask — "let it be a
+variable I can configure and try 5 then 10" — is fully satisfied by a single well-commented
+constant; threading it as a runtime parameter or exposing a setting/UI control would be
+over-engineering for a request that is really "give me one number to flip and re-test."
+
+**`BOX_MIN_GAP`** — `webview/graphLayout.ts`, declared right after `MARGIN` (~line 26), exported
+so the test suite asserts against it directly instead of duplicating the number:
+
+```ts
+export const BOX_MIN_GAP = 5;
+```
+
+To try 10px next: change that single line to `export const BOX_MIN_GAP = 10;`, then
+`npm run build:webview` to make it live-testable. No other file needs to change — this is by
+design (see the constant's own doc comment).
+
+### Scope discipline: pads an existing push, does not add a new global constraint
+
+`overlapAmount`/`pushVector` are only ever invoked when two boxes ALREADY overlap (`overlapAmount`
+returns `undefined` for non-overlapping pairs, and `resolveCollisions`'s greedy loop only ever
+picks up defined overlaps as candidates). Adding `BOX_MIN_GAP` to `pushVector`'s computed
+displacement therefore only affects boxes that were already going to be pushed — it does NOT turn
+this into a "maintain N px between all boxes everywhere" layout constraint. A new RED test
+explicitly locks this in: two boxes separated by more than `BOX_MIN_GAP` (never overlapping) are
+untouched (`result.size` stays `0`).
+
+### TDD evidence
+
+RED: added 3 tests to `test/unit/boxCollision.test.ts` importing `BOX_MIN_GAP` from
+`graphLayout.ts` (not yet exported) — confirmed 2 of the 3 failed against the current 0px-gap
+implementation (`expected 100 to be greater than or equal to NaN` / same for the vertical case,
+since `BOX_MIN_GAP` was `undefined`); the "already well-separated, not pushed" test passed
+trivially even pre-fix, confirming it captures existing (unchanged) behavior rather than the new
+feature.
+
+GREEN: added `export const BOX_MIN_GAP = 5;` near `MARGIN`; changed `pushVector` to add
+`BOX_MIN_GAP` to the computed X/Y displacement on whichever axis is chosen. All 3 new tests pass;
+full pre-existing 10-test suite (including the greedy fixed-point convergence fix from 19c3676)
+still passes unchanged — 13/13 in `boxCollision.test.ts`.
+
+```
+✓ maintains at least BOX_MIN_GAP px of separation after a push (horizontal case), not just 0px
+✓ maintains at least BOX_MIN_GAP px of separation after a push (vertical case), not just 0px
+✓ does NOT push boxes that are already separated by more than BOX_MIN_GAP — this pads an existing
+  push, it does not enforce a minimum gap globally
+```
+
+### Performance re-verification (measured, not assumed)
+
+The change is pure arithmetic (one extra addition per axis choice in `pushVector`), but measured
+the 300-box perf probe again anyway per this project's standing discipline of never assuming:
+
+```
+Before (19c3676, 0px gap, greedy model): 0.81ms
+After  (this change, BOX_MIN_GAP=5):     0.63ms  (within normal run-to-run noise; no regression)
+```
+
+Comfortably inside the `< 50ms` assertion and the real ~16ms frame budget.
+
+### Full gate (all run for real)
+
+- `npm run typecheck` — clean.
+- `npm run lint` — clean (`eslint src test webview --max-warnings=0`).
+- `npm test` — 603/603 tests passed across 37 files (+3 new tests; all pre-existing suites
+  unchanged, including D14 cascade, live-drag, PR4 scoped-reroute, edge-router regression suites,
+  and the 19c3676 same-iteration convergence-fix suite).
+- `npm run test:e2e` — all scenarios pass against a real VS Code Extension Development Host
+  instance (also rebuilds the webview as part of its own pipeline).
+- `npm run build:webview` — explicit standalone rebuild confirmed `BOX_MIN_GAP` is baked into
+  `out/webview/webview/index.js` (grep count: 3 occurrences), live-testable by reloading the
+  Extension Development Host.
+
+### Constraints honored (this follow-up)
+
+- Edge router untouched (`edgeGeometry.ts`/`routingGraph.ts`/`routeSearch.ts`) — only
+  `webview/graphLayout.ts` (`BOX_MIN_GAP` constant + `pushVector` displacement) and
+  `test/unit/boxCollision.test.ts` changed.
+- All previously-verified push behaviors preserved and re-confirmed passing unchanged: chain-
+  reaction convergence fix (19c3676), container/descendant rigid-group cascade, dragged-container-
+  as-bounding-rect.
+- Same branch (`feat/box-collision-push`), additional commit on top of `19c3676`, no new branch —
+  PR #51 stays the review target.
+- Did not build anything toward the user's secondary "might help edge crossings" hope — no edge-
+  router files touched. Brief observation (not implemented, not verified): a larger gap gives the
+  router's obstacle-clearance/anchor-hop logic more free space to route through, so a bigger
+  `BOX_MIN_GAP` MIGHT incidentally reduce some edge crossings in densely-packed layouts — but this
+  is speculative and out of scope for this pass; it should be evaluated separately, visually, once
+  5px vs 10px is compared.
+
+### Next step for the user's 5-vs-10 comparison
+
+To switch to 10px: edit `webview/graphLayout.ts`, change `export const BOX_MIN_GAP = 5;` to
+`export const BOX_MIN_GAP = 10;`, then run `npm run build:webview` and reload the Extension
+Development Host. That is the entire diff — no test changes needed (tests already assert against
+the imported constant, not a hardcoded number).
