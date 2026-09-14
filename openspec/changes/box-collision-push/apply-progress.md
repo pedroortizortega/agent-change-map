@@ -154,3 +154,146 @@ Comfortably inside a single frame's ~16ms budget (asserted `< 50ms`, with the re
   for the non-colliding case: `resolveCollisions` returns an empty map when nothing overlaps, so
   `positions`/`positionOverrides`/`movedIds` are identical to before this change whenever no
   collision occurs.
+
+## Follow-up fix: real-world convergence bug (post-PR #51 live testing)
+
+Live-testing this branch's `resolveCollisions` in the VS Code Extension Development Host
+surfaced a genuine bug: dragging a box that pushed multiple sibling boxes at once (e.g. a
+container "app" with several adjacent boxes like "route"/"route2"/"route3") could leave one of
+those siblings still visually overlapping/nested inside another box after resolution — the
+9-test suite in `test/unit/boxCollision.test.ts` did not catch this because none of the original
+fixtures had TWO boxes pushed by the SAME mover in the SAME pass whose new positions overlapped
+each other.
+
+### Root cause
+
+`resolveCollisions` iterated in per-iteration BATCHES: each iteration computed candidates as
+"every current `mover` vs every box NOT in the current `movers` set", resolved them, then set
+`movers = newMovers` (the set of boxes just pushed THIS iteration) for the next iteration.
+
+Two independent defects compounded:
+
+1. **Same-iteration siblings never checked against each other.** If a single mover overlapped
+   two different targets in the same pass, both got pushed away from the mover independently, but
+   never against EACH OTHER within that pass (each was only checked as a target of the mover, not
+   as a mover/target of the other sibling).
+2. **The very next iteration made this permanent, not just delayed.** In iteration N+1,
+   `movers = {sibling A, sibling B}` (both pushed in iteration N). The candidate-generation loop
+   had `if (movers.has(targetId)) continue;` — so sibling A (as a mover) skipped sibling B (as a
+   target) purely because B was ALSO a mover that iteration, and vice versa. That pair was then
+   never re-checked on any LATER iteration either, since after iteration N+1 neither became a
+   "new mover" (their candidate was skipped, not deferred) — a permanent blind spot, not a
+   convergence-speed problem. Raising `maxIterations` alone would not have fixed this; the
+   algorithm needed to stop batching by iteration and stop excluding same-batch siblings from each
+   other.
+
+Proven with a new RED test before any fix (`"fully resolves a same-iteration double-push..."` in
+`test/unit/boxCollision.test.ts`): a dragged "app" box overlapping two siblings "route2"/"route3"
+that, once independently pushed clear of "app", land on top of EACH OTHER. Against the pre-fix
+implementation this failed with `expected true to be false` on the
+`rectsOverlap(finalRoute2, finalRoute3)` assertion — i.e. route3 was left genuinely overlapping
+route2, matching the reported "route2 ending up inside app" symptom class exactly (a
+sibling-vs-sibling overlap surviving resolution).
+
+### Fix
+
+Replaced the per-iteration batch model with a greedy fixed-point loop: at each step, resolve the
+SINGLE globally-worst remaining overlap (by area) between any "active" box (any box ever pushed,
+plus the original movers — cumulative, never reset per iteration) and any pushable target
+(anything not an original mover). The pushed box joins the active set for future steps. This
+means two siblings pushed from the same original mover in different steps are still checked
+against each other on a later step, closing the exact blind spot above. Default `maxIterations`
+raised from 5 to 50 (still a documented, capped safety limit — not "loop forever" — with a
+stop-and-return-partial fallback for pathological non-converging clusters, same philosophy as
+before, just numerically generous enough for realistic clusters).
+
+A second regression surfaced once the greedy loop was running: a pushed container's own
+descendants (which are SUPPOSED to nest inside the container's bounding rect — rigid group
+movement) started getting re-pushed away from their own container, because the greedy scan now
+sees ANY active-box-vs-target AABB overlap as a candidate, including a container legitimately
+containing its child. Fixed by excluding container/descendant pairs from candidate generation
+in both directions (`descendantsOf(moverId).includes(targetId) || descendantsOf(targetId).includes(moverId)`)
+— this is the same containment information `resolveCollisions` already receives via the
+caller-supplied `descendantsOf`, just now also used to define "not a collision" rather than only
+"what to carry along when pushing."
+
+### Convergence guarantee, honestly stated
+
+Not an unconditional full-physics guarantee. The greedy loop is capped at `maxIterations` (default
+50) as a safety valve against pathological/never-converging clusters; if a real cluster needs more
+than 50 individual pushes to fully separate (very unlikely for realistic node counts in this
+extension's diagrams — the bug-report cluster needed 2), the function returns whatever partial
+resolution it reached rather than hanging. Each individual push is provably progress (the pushed
+pair is made non-overlapping by construction via `pushVector`), so any residual overlap after the
+cap is strictly bounded to the remaining unresolved pairs, not silent data corruption or worse
+overlap than before. Existing test `"is bounded: stops after a small fixed number of iterations..."`
+still explicitly documents (with `maxIterations: 2`) that partial, non-fully-resolved output is an
+accepted, intentional outcome of hitting the cap — this is unchanged by the fix, only the DEFAULT
+cap and the per-step resolution logic changed.
+
+### TDD evidence (this follow-up)
+
+RED: added the same-iteration double-push test first; confirmed it failed against the
+pre-fix implementation (`rectsOverlap(finalRoute2, finalRoute3)` was `true`, expected `false`).
+
+GREEN: rewrote `resolveCollisions`'s iteration model as described above; RED test passed. Running
+the full pre-existing 9-test suite alongside it then surfaced the container/descendant regression
+(`"pushes a container's descendants along with it"` failed: child moved independently of its
+container, `-20` vs expected `10`) — fixed via the descendant-exclusion rule; full suite green
+again.
+
+`test/unit/boxCollision.test.ts` — 10/10 tests passing (9 pre-existing + 1 new RED-then-GREEN):
+
+```
+✓ does not push anything when no boxes overlap
+✓ pushes an overlapped stationary box along the axis of minimum overlap (horizontal case)
+✓ pushes an overlapped stationary box along the axis of minimum overlap (vertical case)
+✓ pushes a container's descendants along with it, using descendantsOf
+✓ treats a dragged container as its full bounding rect, not its individual children
+✓ handles a bounded chain reaction: pushing B into C also pushes C clear
+✓ is bounded: stops after a small fixed number of iterations rather than chasing an unbounded chain
+✓ fully resolves a same-iteration double-push: two siblings pushed by the same dragged box must not end up overlapping EACH OTHER
+✓ never returns an entry for a mover id itself
+✓ resolves a worst-case single-drag chain-reaction across 300 densely-packed boxes well under a 16ms frame budget
+```
+
+### Performance re-verification (measured, not assumed)
+
+The fix moves from "resolve a batch of pushes per iteration" to "resolve one push per step,
+recomputing the globally-worst overlap over the full active×working set each step" — strictly
+more per-step work, so the 300-box perf probe was re-measured for real rather than assumed still
+fine:
+
+```
+Before this fix (batch model, maxIterations=5):  0.28ms  (from the original apply-progress entry)
+After this fix  (greedy model, maxIterations=50): 0.81ms  (real re-measurement, same 300-box fixture)
+```
+
+Still comfortably inside the `< 50ms` assertion and the real ~16ms single-frame budget the
+comment references (0.81ms is ~20x under budget). The increase is expected (10x more default
+iterations, each doing a full active×working scan instead of a movers-batch scan) but the absolute
+cost remains negligible at this project's `OVERSIZED_THRESHOLDS` scale (300 nodes).
+
+### Full gate (all run for real)
+
+- `npm run typecheck` — clean.
+- `npm run lint` — clean (`eslint src test webview --max-warnings=0`).
+- `npm test` — 600/600 tests passed across 37 files (the +1 new test plus all pre-existing
+  suites, including D14 cascade, live-drag, PR4 scoped-reroute, and edge-router regression suites
+  — none touched, none regressed).
+- `npm run test:e2e` — all scenarios pass against a real VS Code Extension Development Host
+  instance (selection, navigation, draft-save, refresh, run/stream, cancel — unaffected by this
+  change, run for full-gate confidence per this task's instructions).
+- `npm run build:webview` — rebuilt `out/webview/webview/index.js`/`styles.css` so the fix is
+  live-testable by reloading the Extension Development Host.
+
+### Constraints honored (this follow-up)
+
+- Edge router untouched (`edgeGeometry.ts`/`routingGraph.ts`/`routeSearch.ts`/`webview/index.tsx`
+  edge-related code) — only `resolveCollisions`'s internal iteration/candidate logic in
+  `webview/graphLayout.ts` changed, plus its doc comment.
+- "Container carries descendants" and "dragged container uses its full bounding rect" behaviors
+  both explicitly re-verified passing (pre-existing tests, unchanged assertions) after the fix —
+  the descendant-exclusion rule was added specifically to PRESERVE the former, not to change it.
+- Same branch (`feat/box-collision-push`), additional commit on top of `210c5b8`, no new branch —
+  PR #51 stays the review target.

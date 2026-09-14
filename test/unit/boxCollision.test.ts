@@ -144,6 +144,38 @@ describe("resolveCollisions", () => {
     expect(result.size).toBeLessThanOrEqual(10);
   });
 
+  it("fully resolves a same-iteration double-push: two siblings pushed by the same dragged box must not end up overlapping EACH OTHER", () => {
+    // Bug report: dragging a container ("app") pushes two sibling boxes ("route2", "route3") in
+    // the SAME resolution pass. Both are pushed clear of "app" independently, but their NEW
+    // (post-push) positions overlap each other — a chain reaction the old batch-based iteration
+    // model (movers-vs-"the rest", where "the rest" excludes anything already in the CURRENT
+    // iteration's mover set) never re-checks, because in the very next iteration both siblings are
+    // simultaneously in `movers` and are therefore skipped as targets of one another forever.
+    const boxes = new Map<string, Rect>([
+      ["app", box(0, 0, 100, 100)],
+      ["route2", box(90, 0, 50, 30)], // overlaps app by (overlapX=10, overlapY=30) -> pushed right to x=100
+      ["route3", box(90, 15, 50, 30)], // overlaps app by (overlapX=10, overlapY=30) -> pushed right to x=100
+      // route2 pushed to x[100,150] y[0,30]; route3 pushed to x[100,150] y[15,45] -> these NEWLY
+      // pushed positions overlap each other (overlapX=50, overlapY=15) even though neither
+      // overlapped the other BEFORE the push.
+    ]);
+    const result = resolveCollisions({ boxes, movedIds: new Set(["app"]), descendantsOf: noDescendants });
+
+    const pushedRoute2 = result.get("route2");
+    const pushedRoute3 = result.get("route3");
+    expect(pushedRoute2).toBeDefined();
+    expect(pushedRoute3).toBeDefined();
+
+    const finalApp = boxes.get("app")!;
+    const finalRoute2 = { ...boxes.get("route2")!, x: pushedRoute2!.x, y: pushedRoute2!.y };
+    const finalRoute3 = { ...boxes.get("route3")!, x: pushedRoute3!.x, y: pushedRoute3!.y };
+
+    expect(rectsOverlap(finalApp, finalRoute2)).toBe(false);
+    expect(rectsOverlap(finalApp, finalRoute3)).toBe(false);
+    // The actual bug: route2 and route3 must ALSO end up clear of each other, not just of "app".
+    expect(rectsOverlap(finalRoute2, finalRoute3)).toBe(false);
+  });
+
   it("never returns an entry for a mover id itself", () => {
     const boxes = new Map<string, Rect>([
       ["dragged", box(0, 0, 100, 50)],

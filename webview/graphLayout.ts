@@ -646,14 +646,26 @@ function pushVector(mover: Rect, target: Rect, overlap: { overlapX: number; over
  *    caller-supplied `descendantsOf`), consistently with the existing D14 drag cascade: a
  *    container's visual containment must never break just because it got pushed rather than
  *    dragged directly.
- *  - Chain reactions (pushing B into C, which now overlaps D) are resolved by treating every
- *    newly-pushed box as a new "mover" for the NEXT iteration, bounded by `maxIterations`
- *    (default 5). This is a deliberately bounded, "good enough" approach — not a full physics
- *    solver that iterates to a fixed point or chases an arbitrarily long chain. At each
- *    iteration, the MOST SIGNIFICANT overlap (by area) is resolved first, since resolving a
- *    smaller overlap first can occasionally still leave a bigger one unresolved this pass.
+ *  - Chain reactions (pushing B into C, which now overlaps D) are resolved by a greedy
+ *    fixed-point loop: at each step, the SINGLE most significant remaining overlap (by area)
+ *    anywhere in the CURRENT working set is resolved, and the pushed box joins the "active"
+ *    (can-push-others) set for the next step. Crucially, "active" is CUMULATIVE — every box ever
+ *    pushed stays eligible both as a future mover AND as a future target — so two boxes pushed
+ *    away from the same original mover in different steps still get re-checked against EACH
+ *    OTHER on a later step, instead of being permanently exempted from one another the moment
+ *    both happen to be "movers" at once. (An earlier version partitioned movers into per-iteration
+ *    batches and skipped any target that was itself a same-batch mover, which let two
+ *    simultaneously-pushed siblings end up overlapping each other with no later step ever
+ *    re-checking that specific pair — see `boxCollision.test.ts`'s
+ *    "same-iteration double-push" case.) The loop stops as soon as no active box overlaps any
+ *    pushable target, or after `maxIterations` steps (default 50) as a safety cap against
+ *    pathological/non-converging clusters — in that rare case the function returns whatever
+ *    partial resolution it reached rather than looping forever; callers should treat a result
+ *    that still leaves visible overlap as a signal to raise the cap or investigate the cluster,
+ *    not as silent data corruption.
  *  - Never returns an entry for a mover id itself (movers are governed by the existing
- *    drag/D14-cascade mechanism, not by this function).
+ *    drag/D14-cascade mechanism, not by this function) — an original mover can push others but is
+ *    never itself a valid push target.
  */
 export function resolveCollisions(input: {
   boxes: ReadonlyMap<string, Rect>;
@@ -661,48 +673,46 @@ export function resolveCollisions(input: {
   descendantsOf: (id: string) => readonly string[];
   maxIterations?: number;
 }): Map<string, Position> {
-  const { boxes, movedIds, descendantsOf, maxIterations = 5 } = input;
+  const { boxes, movedIds, descendantsOf, maxIterations = 50 } = input;
   const working = new Map(boxes);
   const pushed = new Map<string, Position>();
-  let movers = new Set(movedIds);
+  const active = new Set(movedIds);
 
   for (let iteration = 0; iteration < maxIterations; iteration++) {
-    const candidates: { moverId: string; targetId: string; overlapX: number; overlapY: number }[] = [];
-    for (const moverId of movers) {
+    let best: { moverId: string; targetId: string; overlapX: number; overlapY: number } | undefined;
+    let bestArea = 0;
+    for (const moverId of active) {
       const moverBox = working.get(moverId);
       if (!moverBox) continue;
       for (const [targetId, targetBox] of working) {
-        if (movers.has(targetId)) continue;
+        if (targetId === moverId || movedIds.has(targetId)) continue;
+        // A container and its own descendants are EXPECTED to nest (their bounding rects overlap
+        // by design, rigidly moving together) — that is not a collision to resolve, in either
+        // direction.
+        if (descendantsOf(moverId).includes(targetId) || descendantsOf(targetId).includes(moverId)) continue;
         const overlap = overlapAmount(moverBox, targetBox);
-        if (overlap) candidates.push({ moverId, targetId, ...overlap });
+        if (!overlap) continue;
+        const area = overlap.overlapX * overlap.overlapY;
+        if (area > bestArea) {
+          bestArea = area;
+          best = { moverId, targetId, ...overlap };
+        }
       }
     }
-    if (candidates.length === 0) break;
-    candidates.sort((a, b) => b.overlapX * b.overlapY - a.overlapX * a.overlapY);
+    if (!best) break; // no remaining overlap between any active (mover or already-pushed) box and a pushable target
 
-    const newMovers = new Set<string>();
-    const resolvedThisPass = new Set<string>();
-    for (const candidate of candidates) {
-      if (resolvedThisPass.has(candidate.targetId)) continue;
-      const moverBox = working.get(candidate.moverId);
-      const targetBox = working.get(candidate.targetId);
-      if (!moverBox || !targetBox) continue;
-      const overlap = overlapAmount(moverBox, targetBox);
-      if (!overlap) continue; // already separated by an earlier, bigger push this same pass
-      const { x: dx, y: dy } = pushVector(moverBox, targetBox, overlap);
-      const groupIds = [candidate.targetId, ...descendantsOf(candidate.targetId)];
-      for (const id of groupIds) {
-        const box = working.get(id);
-        if (!box) continue;
-        const newBox = { ...box, x: box.x + dx, y: box.y + dy };
-        working.set(id, newBox);
-        pushed.set(id, { x: newBox.x, y: newBox.y });
-        newMovers.add(id);
-      }
-      resolvedThisPass.add(candidate.targetId);
+    const moverBox = working.get(best.moverId)!;
+    const targetBox = working.get(best.targetId)!;
+    const { x: dx, y: dy } = pushVector(moverBox, targetBox, best);
+    const groupIds = [best.targetId, ...descendantsOf(best.targetId)];
+    for (const id of groupIds) {
+      const box = working.get(id);
+      if (!box) continue;
+      const newBox = { ...box, x: box.x + dx, y: box.y + dy };
+      working.set(id, newBox);
+      pushed.set(id, { x: newBox.x, y: newBox.y });
+      active.add(id);
     }
-    if (newMovers.size === 0) break;
-    movers = newMovers;
   }
 
   for (const id of movedIds) pushed.delete(id);
