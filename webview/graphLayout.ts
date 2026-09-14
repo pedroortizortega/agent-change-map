@@ -548,8 +548,14 @@ export function computeLiveDragUpdate(input: {
   nodeId: string;
   position: Position;
   movedDescendantIds: readonly string[];
+  /** box-collision-push: resolves ANOTHER box's own cascaded descendants when THAT box gets
+   * pushed (not the dragged node's own descendants — that's `movedDescendantIds`, above). Reused
+   * from `positionOverrides.ts`'s `descendantsOf`, consistently with the existing D14 cascade.
+   * Optional (defaults to no descendants) so existing call sites/tests without collision push
+   * keep working unchanged. */
+  descendantsOfId?: (id: string) => readonly string[];
 }): LiveDragUpdate | undefined {
-  const { layout, overrides, nodeId, position, movedDescendantIds } = input;
+  const { layout, overrides, nodeId, position, movedDescendantIds, descendantsOfId } = input;
   const before = layout.boxes.get(nodeId);
   if (!before) return undefined;
   const dx = position.x - before.x;
@@ -569,6 +575,19 @@ export function computeLiveDragUpdate(input: {
     positions.set(descendantId, livePosition);
   }
 
+  // box-collision-push: live (mid-gesture) preview of push-away, so the pushed box(es) visually
+  // move responsively during the drag itself rather than only snapping clear on drop.
+  if (descendantsOfId) {
+    const pushed = resolveCollisions({ boxes: liveBoxes, movedIds, descendantsOf: descendantsOfId });
+    for (const [id, pushedPosition] of pushed) {
+      const box = liveBoxes.get(id);
+      if (!box) continue;
+      liveBoxes.set(id, { ...box, x: pushedPosition.x, y: pushedPosition.y });
+      positions.set(id, pushedPosition);
+      movedIds.add(id);
+    }
+  }
+
   const edgeOverrides = new Map<number, { path: string; startPoint: Point; endPoint: Point }>();
   for (const edge of layout.edges) {
     if (!movedIds.has(edge.source) && !movedIds.has(edge.target)) continue;
@@ -579,6 +598,115 @@ export function computeLiveDragUpdate(input: {
   }
 
   return { positions, edgeOverrides };
+}
+
+/**
+ * AABB (axis-aligned bounding box) overlap amount between two rects, or `undefined` when they
+ * don't overlap. `overlapX`/`overlapY` are each strictly positive when defined.
+ */
+function overlapAmount(a: Rect, b: Rect): { overlapX: number; overlapY: number } | undefined {
+  const overlapX = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+  const overlapY = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+  if (overlapX <= 0 || overlapY <= 0) return undefined;
+  return { overlapX, overlapY };
+}
+
+/**
+ * Minimum-translation push vector to move `target` fully clear of `mover`, along whichever axis
+ * has the SMALLER overlap (the standard AABB push-out heuristic — the shortest way to separate
+ * two overlapping rectangles). Direction is away from `mover`'s center; ties (equal centers) push
+ * in the positive direction, deterministically.
+ */
+function pushVector(mover: Rect, target: Rect, overlap: { overlapX: number; overlapY: number }): Position {
+  const moverCenterX = mover.x + mover.w / 2;
+  const moverCenterY = mover.y + mover.h / 2;
+  const targetCenterX = target.x + target.w / 2;
+  const targetCenterY = target.y + target.h / 2;
+  if (overlap.overlapX < overlap.overlapY) {
+    const sign = targetCenterX >= moverCenterX ? 1 : -1;
+    return { x: sign * overlap.overlapX, y: 0 };
+  }
+  const sign = targetCenterY >= moverCenterY ? 1 : -1;
+  return { x: 0, y: sign * overlap.overlapY };
+}
+
+/**
+ * Box-collision push-away (box-collision-push, direct-inline change — see
+ * openspec/changes/box-collision-push/apply-progress.md for the full design writeup). Pure AABB
+ * push-out resolution: given the CURRENT absolute `boxes` (with every id in `movedIds` already at
+ * its live/final dragged position — the dragged box itself plus any D14-cascaded descendants,
+ * which move as a rigid group and are therefore never individually re-checked against each
+ * other), returns the NEW absolute positions for every OTHER box that must be pushed clear of a
+ * mover, plus (bounded, see below) any box pushed clear of one of THOSE pushed boxes in turn.
+ *
+ * Design choices (first version, intentionally NOT a full physics simulation):
+ *  - Push axis = the axis of MINIMUM overlap (shortest separating distance), the standard AABB
+ *    resolution heuristic — see `pushVector`.
+ *  - A pushed box that is itself a container carries its own descendants along with it (via the
+ *    caller-supplied `descendantsOf`), consistently with the existing D14 drag cascade: a
+ *    container's visual containment must never break just because it got pushed rather than
+ *    dragged directly.
+ *  - Chain reactions (pushing B into C, which now overlaps D) are resolved by treating every
+ *    newly-pushed box as a new "mover" for the NEXT iteration, bounded by `maxIterations`
+ *    (default 5). This is a deliberately bounded, "good enough" approach — not a full physics
+ *    solver that iterates to a fixed point or chases an arbitrarily long chain. At each
+ *    iteration, the MOST SIGNIFICANT overlap (by area) is resolved first, since resolving a
+ *    smaller overlap first can occasionally still leave a bigger one unresolved this pass.
+ *  - Never returns an entry for a mover id itself (movers are governed by the existing
+ *    drag/D14-cascade mechanism, not by this function).
+ */
+export function resolveCollisions(input: {
+  boxes: ReadonlyMap<string, Rect>;
+  movedIds: ReadonlySet<string>;
+  descendantsOf: (id: string) => readonly string[];
+  maxIterations?: number;
+}): Map<string, Position> {
+  const { boxes, movedIds, descendantsOf, maxIterations = 5 } = input;
+  const working = new Map(boxes);
+  const pushed = new Map<string, Position>();
+  let movers = new Set(movedIds);
+
+  for (let iteration = 0; iteration < maxIterations; iteration++) {
+    const candidates: { moverId: string; targetId: string; overlapX: number; overlapY: number }[] = [];
+    for (const moverId of movers) {
+      const moverBox = working.get(moverId);
+      if (!moverBox) continue;
+      for (const [targetId, targetBox] of working) {
+        if (movers.has(targetId)) continue;
+        const overlap = overlapAmount(moverBox, targetBox);
+        if (overlap) candidates.push({ moverId, targetId, ...overlap });
+      }
+    }
+    if (candidates.length === 0) break;
+    candidates.sort((a, b) => b.overlapX * b.overlapY - a.overlapX * a.overlapY);
+
+    const newMovers = new Set<string>();
+    const resolvedThisPass = new Set<string>();
+    for (const candidate of candidates) {
+      if (resolvedThisPass.has(candidate.targetId)) continue;
+      const moverBox = working.get(candidate.moverId);
+      const targetBox = working.get(candidate.targetId);
+      if (!moverBox || !targetBox) continue;
+      const overlap = overlapAmount(moverBox, targetBox);
+      if (!overlap) continue; // already separated by an earlier, bigger push this same pass
+      const { x: dx, y: dy } = pushVector(moverBox, targetBox, overlap);
+      const groupIds = [candidate.targetId, ...descendantsOf(candidate.targetId)];
+      for (const id of groupIds) {
+        const box = working.get(id);
+        if (!box) continue;
+        const newBox = { ...box, x: box.x + dx, y: box.y + dy };
+        working.set(id, newBox);
+        pushed.set(id, { x: newBox.x, y: newBox.y });
+        newMovers.add(id);
+      }
+      resolvedThisPass.add(candidate.targetId);
+    }
+    if (newMovers.size === 0) break;
+    movers = newMovers;
+  }
+
+  for (const id of movedIds) pushed.delete(id);
+  return pushed;
 }
 
 /** THE entry point index.tsx calls. */
