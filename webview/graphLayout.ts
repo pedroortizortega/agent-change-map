@@ -29,7 +29,7 @@ const MARGIN = 16;
  * is a value that's trivial to change and re-test (box-collision-push wants to compare 5px vs
  * 10px visually) — flip this single number and re-run, no other code needs to change.
  */
-export const BOX_MIN_GAP = 25;
+export const BOX_MIN_GAP = 35;
 
 interface KindStyle {
   strokeWidth: number;
@@ -601,25 +601,69 @@ function overlapAmount(a: Rect, b: Rect): { overlapX: number; overlapY: number }
 }
 
 /**
- * Minimum-translation push vector to move `target` clear of `mover` by at least `BOX_MIN_GAP`
- * px, along whichever axis has the SMALLER overlap (the standard AABB push-out heuristic — the
- * shortest way to separate two overlapping rectangles). Direction is away from `mover`'s center;
- * ties (equal centers) push in the positive direction, deterministically. `BOX_MIN_GAP` is added
- * on top of the raw overlap distance so the two boxes end up with real clear space between them,
- * not merely touching at 0px — this only pads a push that's ALREADY happening (triggered by a
- * genuine overlap); it does not enforce a minimum gap between boxes that never overlapped.
+ * Which side of `mover` a pushed box is being moved out towards. Recorded per box for the duration
+ * of one `resolveCollisions` run so a box can never be pushed back the way it came — see
+ * `resolveCollisions`' convergence notes.
  */
-function pushVector(mover: Rect, target: Rect, overlap: { overlapX: number; overlapY: number }): Position {
-  const moverCenterX = mover.x + mover.w / 2;
-  const moverCenterY = mover.y + mover.h / 2;
-  const targetCenterX = target.x + target.w / 2;
-  const targetCenterY = target.y + target.h / 2;
-  if (overlap.overlapX < overlap.overlapY) {
-    const sign = targetCenterX >= moverCenterX ? 1 : -1;
-    return { x: sign * (overlap.overlapX + BOX_MIN_GAP), y: 0 };
+interface PushDirection {
+  axis: "x" | "y";
+  sign: 1 | -1;
+}
+
+/** The four sides a `target` can be moved out to, in the deterministic preference order used for
+ * ties (down, up, right, left — Y before X, positive before negative, matching the original
+ * min-overlap heuristic's tie behavior). */
+const PUSH_DIRECTIONS: readonly PushDirection[] = [
+  { axis: "y", sign: 1 },
+  { axis: "y", sign: -1 },
+  { axis: "x", sign: 1 },
+  { axis: "x", sign: -1 },
+];
+
+/**
+ * EXACT signed distance `target` must travel along `direction` to end up clear of `mover` with
+ * `BOX_MIN_GAP` px of real space between them.
+ *
+ * This replaces the previous `overlap + BOX_MIN_GAP` formula, which is the true minimum
+ * translation ONLY when the two rects cross each other on that axis. When `mover` lies fully
+ * INSIDE `target`'s extent on an axis — precisely the small-box-dragged-into-a-tall-container case
+ * — the raw overlap is just the mover's own size and is far too small to separate them: the caller
+ * had to iterate, and the crawl landed the boxes a few px apart instead of `BOX_MIN_GAP`. Computed
+ * from the edges instead, one push always clears, containment or not.
+ */
+function separationDistance(mover: Rect, target: Rect, direction: PushDirection): number {
+  if (direction.axis === "x") {
+    return direction.sign === 1 ? mover.x + mover.w + BOX_MIN_GAP - target.x : mover.x - BOX_MIN_GAP - (target.x + target.w);
   }
-  const sign = targetCenterY >= moverCenterY ? 1 : -1;
-  return { x: 0, y: sign * (overlap.overlapY + BOX_MIN_GAP) };
+  return direction.sign === 1 ? mover.y + mover.h + BOX_MIN_GAP - target.y : mover.y - BOX_MIN_GAP - (target.y + target.h);
+}
+
+/**
+ * The cheapest of the four sides to push `target` out to — the genuine minimum-translation
+ * direction, by actual travel distance rather than by raw overlap extent. Ties resolve through
+ * `PUSH_DIRECTIONS`' fixed order, so the result is deterministic.
+ *
+ * For two rects that merely cross (the common case) this picks exactly what the old min-overlap
+ * heuristic picked: on each axis the cheaper side is the one away from `mover`'s center, and
+ * `distance = overlap + BOX_MIN_GAP`, so comparing distances across axes compares the overlaps.
+ */
+function minimalSeparationDirection(mover: Rect, target: Rect): PushDirection {
+  let best = PUSH_DIRECTIONS[0]!;
+  let bestDistance = Math.abs(separationDistance(mover, target, best));
+  for (const direction of PUSH_DIRECTIONS.slice(1)) {
+    const distance = Math.abs(separationDistance(mover, target, direction));
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = direction;
+    }
+  }
+  return best;
+}
+
+/** The translation that moves `target` clear of `mover` along `direction`. */
+function separationVector(mover: Rect, target: Rect, direction: PushDirection): Position {
+  const distance = separationDistance(mover, target, direction);
+  return direction.axis === "x" ? { x: distance, y: 0 } : { x: 0, y: distance };
 }
 
 /**
@@ -632,8 +676,21 @@ function pushVector(mover: Rect, target: Rect, overlap: { overlapX: number; over
  * mover, plus (bounded, see below) any box pushed clear of one of THOSE pushed boxes in turn.
  *
  * Design choices (first version, intentionally NOT a full physics simulation):
- *  - Push axis = the axis of MINIMUM overlap (shortest separating distance), the standard AABB
- *    resolution heuristic — see `pushVector`.
+ *  - Push direction = the side that needs the SHORTEST actual travel to clear the mover, measured
+ *    edge to edge — see `minimalSeparationDirection`/`separationDistance`.
+ *  - Every push is MONOTONE: the first time a box is pushed, the side it went out to is recorded,
+ *    and every later push of that box during the SAME resolution reuses it, even when some other
+ *    side would be cheaper. This is what makes the loop converge, and it is the fix for the fifth
+ *    reported round of this bug (see `boxCollision.test.ts`' "convergence" suite). Without it the
+ *    resolver has no memory of where it already pushed a box, so a SANDWICHED box — one caught
+ *    between the dragged box and a neighbour, which containers of very unequal heights produce
+ *    constantly — is pushed out of one neighbour straight into the other, then back out of that
+ *    one into the first, forever. That is a period-2 limit cycle, not a slow convergence:
+ *    `maxIterations` never "settles" it, it just freezes the cycle at whichever phase the cap
+ *    lands on, and that phase still has a real, visible overlap in it. (Measured on the reported
+ *    fixture: the pre-fix output was bit-identical for every even cap and bit-identical for every
+ *    odd cap, two states alternating forever.) With a locked direction each push moves a box
+ *    strictly further along one fixed side, so it can never return to a position it already left.
  *  - A pushed box that is itself a container carries its own descendants along with it (via the
  *    caller-supplied `descendantsOf`), consistently with the existing D14 drag cascade: a
  *    container's visual containment must never break just because it got pushed rather than
@@ -653,8 +710,9 @@ function pushVector(mover: Rect, target: Rect, overlap: { overlapX: number; over
  *    pushable target, or after `maxIterations` steps (default 50) as a safety cap against
  *    pathological/non-converging clusters — in that rare case the function returns whatever
  *    partial resolution it reached rather than looping forever; callers should treat a result
- *    that still leaves visible overlap as a signal to raise the cap or investigate the cluster,
- *    not as silent data corruption.
+ *    that still leaves visible overlap as a signal to investigate the cluster, not as silent data
+ *    corruption. With monotone pushes the cap is a true backstop rather than the thing that ends
+ *    the loop: the fuzz suites resolve every generated scene to a real fixed point well inside it.
  *  - Never returns an entry for a mover id itself (movers are governed by the existing
  *    drag/D14-cascade mechanism, not by this function) — an original mover can push others but is
  *    never itself a valid push target.
@@ -669,6 +727,8 @@ export function resolveCollisions(input: {
   const working = new Map(boxes);
   const pushed = new Map<string, Position>();
   const active = new Set(movedIds);
+  /** Per-box locked push side — the monotonicity that makes this loop converge (see above). */
+  const lockedDirection = new Map<string, PushDirection>();
 
   for (let iteration = 0; iteration < maxIterations; iteration++) {
     let best: { moverId: string; targetId: string; overlapX: number; overlapY: number } | undefined;
@@ -695,11 +755,14 @@ export function resolveCollisions(input: {
 
     const moverBox = working.get(best.moverId)!;
     const targetBox = working.get(best.targetId)!;
-    const { x: dx, y: dy } = pushVector(moverBox, targetBox, best);
+    const direction = lockedDirection.get(best.targetId) ?? minimalSeparationDirection(moverBox, targetBox);
+    const { x: dx, y: dy } = separationVector(moverBox, targetBox, direction);
+    // A container and its descendants are one rigid group, so they share one locked direction too.
     const groupIds = [best.targetId, ...descendantsOf(best.targetId)];
     for (const id of groupIds) {
       const box = working.get(id);
       if (!box) continue;
+      lockedDirection.set(id, direction);
       const newBox = { ...box, x: box.x + dx, y: box.y + dy };
       working.set(id, newBox);
       pushed.set(id, { x: newBox.x, y: newBox.y });

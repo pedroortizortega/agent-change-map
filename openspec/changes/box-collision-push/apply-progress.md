@@ -698,3 +698,155 @@ Still open, stated plainly:
 - Hypothesis A remains structurally true (a container's rendered rect is fixed by `measure()`).
   It is not reachable through the collision path today, but it is a latent constraint: the box
   concept assumes children always sit at their default nested offsets.
+
+---
+
+## Round 5 — non-convergent push loop (asymmetric container sizes, plain drag)
+
+### What was reported
+
+Fifth live-testing report of "two container boxes ended up overlapping". Explicitly a PLAIN DRAG
+(no source edit, so `resolveGeometryChangeOverlaps` is not involved) of one container toward
+another, with a large size disparity: a `route5` cluster (3 sub-containers, 2 children each) and a
+much shorter `app` container (one `app.Main` with 2 children) left sitting on top of each other.
+
+### Hypotheses investigated, and what the code actually does
+
+**Hypothesis E — asymmetric container-vs-container targeting: REFUTED, with evidence.**
+`resolveCollisions` builds its candidate list from EVERY box in the flat `boxes` map (containers
+and children alike — `probeBoxes` inserts a parent before its children), so a mover dropped into a
+large container does overlap the container's outer rect AND several of its individual children at
+once. The container always wins that competition, and provably so, not by luck: a child's rect is
+geometrically contained in its parent's rect, so `area(mover ∩ child) <= area(mover ∩ parent)`
+always, and the strict `>` tie-break plus parent-before-child insertion order resolves the equal
+case to the parent. Measured: no run in any probe ever pushed an inner child out of its own
+container, and the containment invariant never failed. The tie-break behaviour the previous round
+found for the forward case does hold for the reverse (small mover / large target) case too.
+
+**Hypothesis F — dragged box's own size vs the live preview's assumed size: REFUTED.**
+`resolveDragPositions` is the single core for both paths (1db1f79), so the preview uses the
+dragged node's real `w`/`h` exactly as the commit does. The new 200-seed size-disparity fuzz
+asserts byte-identical preview/commit position sets on every one of its 1,600 drags; zero
+mismatches, before AND after this round's fix.
+
+**Confirmed root cause — the greedy pairwise loop does not converge.**
+`resolveCollisions` keeps no memory of which way it already pushed a box. A SANDWICHED box — one
+caught between the dragged box and a neighbour — is pushed out of one neighbour straight into the
+other, then back out of that one into the first, forever. That is a period-2 limit cycle, not slow
+convergence, and `maxIterations` does not "stop a pathological cluster after a best effort": it
+freezes the cycle at whatever phase the cap lands on, and that phase still has a real, visible
+overlap in it. The function then returns it as if it were a resolution.
+
+Measured on the reproduction fixture (4 root containers, heights 152 / 112 / 192 / 392, drag
+`module:route` to `{x:16,y:352}`, a FIRST drag with no overrides at all):
+
+| maxIterations | 2 | 3 | 4 | 5 | 49 | 50 | 51 | 1000 | 20000 |
+|---|---|---|---|---|---|---|---|---|---|
+| problems left | 20 | 22 | 20 | 22 | 22 | 20 | 22 | 20 | 20 |
+
+Bit-identical output for every EVEN cap, bit-identical for every ODD cap — two states alternating
+forever. Raising the cap does nothing; the loop has no fixed point to reach.
+
+Why size disparity is what surfaced it: the taller a container is, the more likely the shortest way
+out of it points straight back at the neighbour the box just came from. The previous round's
+400-sequence fuzz used near-equal container sizes and therefore never generated the geometry.
+
+**Second, independent defect found while measuring the first.** `pushVector` used
+`overlap + BOX_MIN_GAP` as the travel distance. That is the true minimum translation only when the
+two rects CROSS on that axis. When the mover lies fully INSIDE the target's extent on an axis —
+exactly the small-box-dragged-into-a-tall-container case — the raw overlap is just the mover's own
+size, far too small to separate them, so the resolver had to crawl clear over several passes.
+Measured: a 50x50 mover inside a 400x600 container ended up **5px** away instead of the configured
+`BOX_MIN_GAP` of 35px.
+
+### The fix (`webview/graphLayout.ts`)
+
+1. `separationDistance` / `minimalSeparationDirection` / `separationVector` replace `pushVector`.
+   The push distance is now computed edge-to-edge — the EXACT distance to clear the mover with
+   `BOX_MIN_GAP` of real space — and the side is chosen by the smallest such distance among all
+   four. One push always clears, containment or not. For two rects that merely cross this is
+   identical to the old heuristic (on each axis the cheaper side is the one away from the mover's
+   centre, and `distance = overlap + BOX_MIN_GAP`, so comparing distances compares overlaps), and
+   `PUSH_DIRECTIONS`' fixed order (down, up, right, left) reproduces the old tie behaviour exactly.
+   All 26 pre-existing tests pass unchanged.
+2. A per-box **locked push direction**. The first time a box is pushed, the side it went out to is
+   recorded; every later push of that box in the SAME resolution reuses it, even when another side
+   would now be cheaper. A container and its descendants share one lock, since they move rigidly.
+   Pushes are therefore monotone — a box can never be pushed back where it came from — so the limit
+   cycle is removed by construction rather than by raising a cap. `maxIterations` stays as a true
+   backstop; every scene the fuzz generates now reaches a real fixed point well inside it.
+
+### TDD evidence
+
+| # | RED (test written first, failing) | GREEN | REFACTOR |
+|---|---|---|---|
+| 5.1 | `frees a box SANDWICHED between two movers instead of ping-ponging it between them forever` — failed: `small` still overlapped a mover | passes | — |
+| 5.2 | `reaches a genuine FIXED POINT: the same result for an odd and an even iteration cap` — failed: cap 49 != cap 50 | passes | — |
+| 5.3 | `clears a SMALL mover out of a LARGE container in one push, using the true minimum translation` — failed: landed at `{x:0,y:255}`, a 5px gap, not `{x:185,y:0}` with 35px | passes | — |
+| 5.4 | `still converges when the small box is trapped between a mover and a pushable neighbour` | passed already; kept as a guard | — |
+| 5.5 | `asymmetric container sizes — plain single drag (reported round 5)` — failed: `module:app` overlapped the dragged `module:route` | passes | — |
+| 5.6 | `size-disparity drag fuzz (200 seeds x 8 drags)` — failed: 353 invariant violations, first at seed 13 step 0 (a first-ever drag) | passes: 0 violations | memoized `descendantsOf` per layout, 4.4s -> 1.4s |
+
+RED run: 5 failed / 27 passed. GREEN run: 32 passed. The 26 tests from the previous round were
+green in BOTH runs, so this round's change is additive, not a rewrite of previously-proven
+behaviour.
+
+### New size-disparity fuzz
+
+200 deterministic seeds x 8 drags = 1,600 drags. Each diagram randomizes CONTENT (1..3
+sub-containers with 1..5 children each), so root-container heights differ by 3-5x within a single
+diagram — the fuzz logs the largest observed ratio, **5.64x**, and asserts it stays above 3x so the
+test cannot silently degrade into a near-equal-sizes fuzz. Every drag aims INTO another container's
+body (the reported gesture, not a near miss), re-runs the real `layoutGraph` between drops, and
+asserts after each one: nothing overlaps unless it nests, every container still encloses its
+descendants, and the live preview equals the drop commit. Graphs are kept under
+`NESTED_LAYOUT_LIMITS.nodes` (60) on purpose — above it `layoutGraph` falls back to the FLAT layout
+where "containers" are plain 220x32 rows that enclose nothing, which would make the containment
+invariant meaningless. (An earlier probe that ignored this limit produced 1,748 "failures" that
+were pure flat-layout artefacts; worth recording so the next round does not chase them.)
+
+### Performance re-verification
+
+`[perf-probe] resolveCollisions chain-reaction across 300 boxes took 0.38ms` (budget 50ms, single
+frame ~16ms). Unchanged from the previous round's 0.3-0.4ms: the fix adds a `Map` lookup and three
+extra arithmetic comparisons per push, and in exchange the loop now terminates instead of burning
+its full iteration budget on a cycle.
+
+### Gate
+
+`npm run typecheck` clean, `npm run lint` clean (`--max-warnings=0`), `npm test` 622/622 across 37
+files, `npm run test:e2e` all scenarios passed (exit 0), `npm run build:webview` OK.
+`BOX_MIN_GAP` remains **35** (user-set; not reverted).
+
+### Honest assessment of closure — read this before round 6
+
+This one is genuinely closed in a way the previous four were not, because the fix is a
+**termination guarantee**, not another special case: monotone pushes make a return to a previous
+position impossible, so the specific failure family "the loop cannot settle, the cap hides it"
+cannot recur. Rounds 1-4 each fixed a wrong INPUT to the resolver (stale base, preview/commit
+drift, missing re-measure trigger); this is the first round that fixed the resolver's own
+mathematics, and it fixed two independent defects in it (non-convergence, and under-push under
+containment) that had been latent since the first version.
+
+**But the class is not closed, and it would be dishonest to imply otherwise.** Greedy pairwise AABB
+push-out has a structural ceiling:
+
+- It is **local and greedy**. It resolves one pair at a time with no notion of global feasibility.
+  When no valid arrangement exists (a box that fits nowhere between two movers), it does not report
+  that — it picks a direction and shoves, and the result can be visually poor even when it is
+  formally non-overlapping.
+- **Monotonicity buys termination at the cost of optimality.** A box locked "down" that later meets
+  a cheaper escape upward still goes down, so a pathological chain can push a container much
+  further than a human would. It will never overlap, but it can drift.
+- **Order dependence remains.** The outcome depends on which pair the greedy step picks first, so
+  the same visual situation reached by two different gesture orders can settle differently.
+- It stays **local by design**: only pairs involving the active (moved/pushed/re-measured) set are
+  ever considered. Overlaps introduced by anything else — a filter toggle reflowing the layout under
+  pinned overrides, a hydrated override set restored against a different graph, an LRU-evicted
+  override — are still never cleaned up. This was already flagged in round 4 and is still open.
+
+If a round 6 arrives, the honest recommendation is to stop patching this resolver and decide
+whether the app is allowed to do a **global de-overlap / reflow pass** over the override-merged
+layout (a real product decision: when may the app move boxes the user placed, and what anchors the
+reflow?). That would replace the whole class rather than its current shape. Four narrow fixes plus
+one structural one is the point at which "one more edge case" stops being a credible prediction.

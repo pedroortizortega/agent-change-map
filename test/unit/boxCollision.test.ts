@@ -733,6 +733,322 @@ describe("resolveGeometryChangeOverlaps", () => {
   });
 });
 
+/**
+ * FIFTH reported round of "two container boxes ended up overlapping", reported from a PLAIN drag
+ * (no source edit, so `resolveGeometryChangeOverlaps` is not involved) of one container toward
+ * another with a large size disparity — a `route5` cluster (3 sub-containers x 2 children each)
+ * and a much shorter `app` container ending up on top of each other.
+ *
+ * ROOT CAUSE (measured, not theorised — see apply-progress.md "Round 5"): `resolveCollisions`'
+ * greedy pairwise loop does not converge. It has no memory of which way it already pushed a box,
+ * so a box that is SANDWICHED (between the dragged box and a neighbour, or between two movers)
+ * gets pushed out of one neighbour straight into the other, then back, forever — a period-2 limit
+ * cycle. The `maxIterations` cap does not "stop a pathological cluster after a best effort": it
+ * freezes the cycle at whatever phase iteration 50 happens to land on, and that phase still has a
+ * real, visible overlap. Proof: the resolved output for the fixture below is bit-identical for
+ * every EVEN cap (2, 4, 50, 20000) and bit-identical for every ODD cap (3, 5, 49, 51) — two
+ * alternating states, never a fixed point.
+ *
+ * Size disparity is what makes this surface so easily: the taller a container is, the more likely
+ * the shortest way out of it points back at the neighbour the box just came from.
+ *
+ * Two fixes, both in `graphLayout.ts`:
+ *  1. `separationVector` replaces the old `pushVector`: the push distance is now the EXACT
+ *     distance needed to clear the mover along the chosen side, and the side is picked by the
+ *     smallest such distance among all four. The old code used the raw overlap extent, which is
+ *     only the true minimum translation when the two rects CROSS; when the mover sits fully
+ *     inside the target along an axis (exactly the small-box-into-big-container case) it
+ *     systematically under-pushes.
+ *  2. A per-box locked push direction: the first time a box is pushed, the chosen axis+sign is
+ *     recorded, and every later push of that box in the same resolution reuses it. Pushes are
+ *     therefore monotone — a box can never be pushed back where it came from — which removes the
+ *     limit cycle by construction rather than by raising a cap.
+ */
+describe("resolveCollisions — convergence (fifth reported round: asymmetric container sizes)", () => {
+  const box = (x: number, y: number, w: number, h: number): Rect => ({ x, y, w, h });
+  const noDescendants = () => [] as readonly string[];
+
+  it("frees a box SANDWICHED between two movers instead of ping-ponging it between them forever", () => {
+    // `small` (y 90-160) pokes into `a` (y 0-100) by 10px and into `b` (y 150-250) by 10px, and the
+    // 50px gap between the two movers can never fit its 70px height. The old min-overlap push sent
+    // it down out of `a` into `b`, then up out of `b` into `a`, indefinitely; whichever phase the
+    // iteration cap cut on, it was still overlapping a mover.
+    const boxes = new Map<string, Rect>([
+      ["a", box(0, 0, 200, 100)],
+      ["b", box(0, 150, 200, 100)],
+      ["small", box(0, 90, 200, 70)],
+    ]);
+    const result = resolveCollisions({ boxes, movedIds: new Set(["a", "b"]), descendantsOf: noDescendants });
+
+    const pushed = result.get("small");
+    expect(pushed).toBeDefined();
+    const finalSmall = { ...boxes.get("small")!, x: pushed!.x, y: pushed!.y };
+    expect(rectsOverlap(boxes.get("a")!, finalSmall)).toBe(false);
+    expect(rectsOverlap(boxes.get("b")!, finalSmall)).toBe(false);
+  });
+
+  it("reaches a genuine FIXED POINT: the same result for an odd and an even iteration cap", () => {
+    // A non-converging implementation alternates between two states, so odd vs even caps disagree.
+    const boxes = new Map<string, Rect>([
+      ["a", box(0, 0, 200, 100)],
+      ["b", box(0, 150, 200, 100)],
+      ["small", box(0, 90, 200, 70)],
+    ]);
+    const run = (maxIterations: number) =>
+      JSON.stringify([...resolveCollisions({ boxes, movedIds: new Set(["a", "b"]), descendantsOf: noDescendants, maxIterations })].sort());
+
+    expect(run(49)).toBe(run(50));
+    expect(run(50)).toBe(run(51));
+    expect(run(50)).toBe(run(5000));
+  });
+
+  it("clears a SMALL mover out of a LARGE container in one push, using the true minimum translation", () => {
+    // The mover sits fully inside the big container on BOTH axes, so the raw overlap extent (the
+    // mover's own 50x50 size) is nowhere near the distance needed to separate them: the old code
+    // pushed by `overlap + gap` and needed several passes to crawl clear, landing 5px away instead
+    // of the configured BOX_MIN_GAP.
+    const mover = box(100, 200, 50, 50);
+    const big = box(0, 0, 400, 600);
+    const boxes = new Map<string, Rect>([
+      ["mover", mover],
+      ["big", big],
+    ]);
+    const result = resolveCollisions({ boxes, movedIds: new Set(["mover"]), descendantsOf: noDescendants });
+
+    const pushed = result.get("big");
+    expect(pushed).toBeDefined();
+    const finalBig = { ...big, x: pushed!.x, y: pushed!.y };
+    expect(rectsOverlap(mover, finalBig)).toBe(false);
+    // Cheapest escape is to the RIGHT: 100+50+35-0 = 185px, versus 285 down, 335 left, 435 up.
+    expect(finalBig).toEqual({ x: 185, y: 0, w: 400, h: 600 });
+    // Real clear space, not a 5px sliver.
+    expect(finalBig.x - (mover.x + mover.w)).toBe(BOX_MIN_GAP);
+  });
+
+  it("still converges when the small box is trapped between a mover and a pushable neighbour", () => {
+    const boxes = new Map<string, Rect>([
+      ["dragged", box(0, 200, 248, 152)],
+      ["small", box(0, 120, 248, 112)],
+      ["wall", box(0, 40, 248, 60)],
+    ]);
+    const result = resolveCollisions({ boxes, movedIds: new Set(["dragged"]), descendantsOf: noDescendants });
+    const rect = (id: string): Rect => {
+      const base = boxes.get(id)!;
+      const pushed = result.get(id);
+      return pushed ? { ...base, x: pushed.x, y: pushed.y } : base;
+    };
+    const ids = [...boxes.keys()];
+    for (let i = 0; i < ids.length; i++)
+      for (let j = i + 1; j < ids.length; j++)
+        expect(rectsOverlap(rect(ids[i]!), rect(ids[j]!)), `${ids[i]} overlaps ${ids[j]}`).toBe(false);
+  });
+});
+
+/**
+ * The reported gesture itself, end to end through the real `layoutGraph` + `resolveDragCommit`
+ * path, on a diagram whose containers differ in height by ~3.5x (112px .. 392px) exactly like the
+ * reported screenshot. This is a FIRST drag with no prior overrides at all — none of the earlier
+ * four fixes (stale override base, preview/commit drift, re-measure push-out) can apply to it.
+ */
+describe("asymmetric container sizes — plain single drag (reported round 5)", () => {
+  const snapshot = { repoId: "repo", kind: "worktree" as const, contentDigest: "sha256:x" };
+  const span = { path: "pkg/a.py", startByte: 0, endByte: 3, startLine: 1, startColumn: 0, endLine: 1, endColumn: 3 };
+
+  /** Root containers with deliberately unequal content: 2 children, 1 child, 3 children, and a
+   * `route5`-shaped cluster of 3 sub-containers with 2 children each. */
+  function disparateGraph(): AnalysisGraph {
+    const spec: readonly (readonly [string, number, number])[] = [
+      ["route", 1, 2],
+      ["app", 1, 1],
+      ["mid", 1, 3],
+      ["route5", 3, 2],
+    ];
+    const nodes: Entity[] = [];
+    for (const [name, classes, methods] of spec) {
+      const moduleId = `module:${name}`;
+      nodes.push({ id: moduleId, kind: "module", qualifiedName: name, span });
+      for (let c = 0; c < classes; c++) {
+        const classId = `class:${name}.C${c}`;
+        nodes.push({ id: classId, kind: "class", qualifiedName: `${name}.C${c}`, containerId: moduleId, span });
+        for (let k = 0; k < methods; k++)
+          nodes.push({ id: `method:${name}.C${c}.f${k}`, kind: "method", qualifiedName: `${name}.C${c}.f${k}`, containerId: classId, span });
+      }
+    }
+    return { snapshot, nodes, edges: [], diagnostics: [] };
+  }
+
+  it("leaves nothing overlapping when a container is dragged into a taller neighbour's body", () => {
+    const graph = disparateGraph();
+    const layout = layoutGraph({ graph, diff: [], untrackedPaths: [], overrides: new Map<string, Position>() });
+    const descendantsOf = (id: string) => descendantsOfLayout(id, layout);
+
+    // Measured layout: route 152 tall at y=16, app 112 at y=192, mid 192 at y=328, route5 392 at
+    // y=544. Dropping `route` at y=352 lands it inside `mid`'s body; resolving that pushes `mid`
+    // up into `app`, which pushes `app` down into the dragged `route` — the sandwich that used to
+    // oscillate and leave `app` overlapping `route`.
+    expect(layout.boxes.get("module:app")!.h).toBe(112);
+    expect(layout.boxes.get("module:route5")!.h).toBe(392);
+
+    const committed = resolveDragCommit({
+      boxes: layout.boxes,
+      overrides: new Map(),
+      nodeId: "module:route",
+      position: { x: 16, y: 352 },
+      movedDescendantIds: descendantsOf("module:route"),
+      descendantsOf,
+    });
+
+    const rect = (id: string): Rect => {
+      const base = layout.boxes.get(id)!;
+      const position = committed.get(id);
+      return position ? { ...base, x: position.x, y: position.y } : base;
+    };
+    const ids = [...layout.boxes.keys()];
+    for (let i = 0; i < ids.length; i++)
+      for (let j = i + 1; j < ids.length; j++) {
+        const a = ids[i]!;
+        const b = ids[j]!;
+        if (descendantsOf(a).includes(b) || descendantsOf(b).includes(a)) continue;
+        expect(rectsOverlap(rect(a), rect(b)), `${a} overlaps ${b}`).toBe(false);
+      }
+    for (const container of ids) {
+      const parent = rect(container);
+      for (const descendant of descendantsOf(container)) {
+        const child = rect(descendant);
+        expect(
+          child.x >= parent.x && child.y >= parent.y && child.x + child.w <= parent.x + parent.w && child.y + child.h <= parent.y + parent.h,
+          `${descendant} escaped ${container}`,
+        ).toBe(true);
+      }
+    }
+  });
+});
+
+/**
+ * Size-disparity fuzz. The previous round's 400-sequence fuzz used roughly equal-sized containers
+ * and therefore never produced the sandwich geometry that makes the greedy loop cycle. This one
+ * randomizes CONTENT (1..3 sub-containers with 1..5 children each, so container heights differ by
+ * 3-5x within a single diagram) and aims every drag INTO another container's body — the reported
+ * gesture — then asserts the full invariant after every drop: nothing overlaps unless it nests,
+ * every container still encloses its descendants, and the live preview equals the commit.
+ *
+ * Graphs are kept under `NESTED_LAYOUT_LIMITS.nodes` (60) on purpose: above it `layoutGraph` falls
+ * back to the FLAT layout, where "containers" are plain 220x32 rows that do not enclose anything,
+ * so the containment invariant would be meaningless there.
+ */
+describe("size-disparity drag fuzz (200 seeds x 8 drags)", () => {
+  const snapshot = { repoId: "repo", kind: "worktree" as const, contentDigest: "sha256:x" };
+  const span = { path: "pkg/a.py", startByte: 0, endByte: 3, startLine: 1, startColumn: 0, endLine: 1, endColumn: 3 };
+
+  /** Deterministic PRNG, so a failure is always reproducible from its seed. */
+  function mulberry32(seed: number): () => number {
+    let a = seed >>> 0;
+    return () => {
+      a = (a + 0x6d2b79f5) >>> 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function disparityGraph(rand: () => number): AnalysisGraph {
+    const nodes: Entity[] = [];
+    const moduleCount = 3 + Math.floor(rand() * 2);
+    let budget = 58; // stay under NESTED_LAYOUT_LIMITS.nodes so the NESTED layout is used
+    for (let m = 0; m < moduleCount && budget > 2; m++) {
+      const moduleId = `module:m${m}`;
+      nodes.push({ id: moduleId, kind: "module", qualifiedName: `m${m}`, span });
+      budget--;
+      const classCount = 1 + Math.floor(rand() * 3);
+      for (let c = 0; c < classCount && budget > 1; c++) {
+        const classId = `class:m${m}.C${c}`;
+        nodes.push({ id: classId, kind: "class", qualifiedName: `m${m}.C${c}`, containerId: moduleId, span });
+        budget--;
+        const methodCount = 1 + Math.floor(rand() * 5);
+        for (let k = 0; k < methodCount && budget > 0; k++) {
+          nodes.push({ id: `method:m${m}.C${c}.f${k}`, kind: "method", qualifiedName: `m${m}.C${c}.f${k}`, containerId: classId, span });
+          budget--;
+        }
+      }
+    }
+    return { snapshot, nodes, edges: [], diagnostics: [] };
+  }
+
+  it("never leaves an overlap, an escaped child, or a preview/commit mismatch", () => {
+    const failures: string[] = [];
+    let maxHeightRatio = 1;
+
+    for (let seed = 1; seed <= 200; seed++) {
+      const rand = mulberry32(seed);
+      const graph = disparityGraph(rand);
+      const overrides = new Map<string, Position>();
+      let layout = layoutGraph({ graph, diff: [], untrackedPaths: [], overrides: new Map(overrides) });
+      // `descendantsOf` walks the layout on every call and is hit O(boxes^2) times by the
+      // invariant check below; memoize per layout so the fuzz stays a few hundred ms, not minutes.
+      let descendantCache = new Map<string, readonly string[]>();
+      const descendantsOf = (id: string): readonly string[] => {
+        const cached = descendantCache.get(id);
+        if (cached) return cached;
+        const computed = descendantsOfLayout(id, layout);
+        descendantCache.set(id, computed);
+        return computed;
+      };
+      const moduleIds = graph.nodes.filter((node) => node.kind === "module").map((node) => node.id);
+      const heights = moduleIds.map((id) => layout.boxes.get(id)!.h);
+      maxHeightRatio = Math.max(maxHeightRatio, Math.max(...heights) / Math.min(...heights));
+
+      const rect = (id: string): Rect => {
+        const base = layout.boxes.get(id)!;
+        const override = overrides.get(id);
+        return override ? { ...base, x: override.x, y: override.y } : base;
+      };
+
+      for (let step = 0; step < 8; step++) {
+        const dragged = moduleIds[Math.floor(rand() * moduleIds.length)]!;
+        const aimedAt = moduleIds[Math.floor(rand() * moduleIds.length)]!;
+        const target = rect(aimedAt);
+        // Aim INTO the other container's body — the reported gesture, not a near miss.
+        const position = { x: target.x + Math.floor((rand() - 0.5) * 120), y: target.y + Math.floor(rand() * Math.max(1, target.h)) };
+        const movedDescendantIds = descendantsOf(dragged);
+
+        const committed = resolveDragCommit({ boxes: layout.boxes, overrides: new Map(overrides), nodeId: dragged, position, movedDescendantIds, descendantsOf });
+        const preview = computeLiveDragUpdate({ layout, overrides: new Map(overrides), nodeId: dragged, position, movedDescendantIds, descendantsOfId: descendantsOf });
+        const asSorted = (positions: Iterable<readonly [string, Position]>) => JSON.stringify([...positions].sort((a, b) => a[0].localeCompare(b[0])));
+        if (asSorted(preview?.positions ?? []) !== asSorted(committed)) failures.push(`seed=${seed} step=${step}: live preview != drop commit`);
+
+        for (const [id, committedPosition] of committed) overrides.set(id, committedPosition);
+        layout = layoutGraph({ graph, diff: [], untrackedPaths: [], overrides: new Map(overrides) });
+        descendantCache = new Map();
+
+        const ids = [...layout.boxes.keys()];
+        for (let i = 0; i < ids.length; i++)
+          for (let j = i + 1; j < ids.length; j++) {
+            const a = ids[i]!;
+            const b = ids[j]!;
+            if (descendantsOf(a).includes(b) || descendantsOf(b).includes(a)) continue;
+            if (rectsOverlap(rect(a), rect(b))) failures.push(`seed=${seed} step=${step} drag=${dragged}: ${a} overlaps ${b}`);
+          }
+        for (const container of ids) {
+          const parent = rect(container);
+          for (const descendant of descendantsOf(container)) {
+            const child = rect(descendant);
+            if (!(child.x >= parent.x && child.y >= parent.y && child.x + child.w <= parent.x + parent.w && child.y + child.h <= parent.y + parent.h))
+              failures.push(`seed=${seed} step=${step} drag=${dragged}: ${descendant} escaped ${container}`);
+          }
+        }
+      }
+    }
+
+    // Evidence that the fuzz really did exercise a large size disparity, not near-equal boxes.
+    console.log(`[fuzz] largest container height ratio within a single diagram: ${maxHeightRatio.toFixed(2)}x`);
+    expect(maxHeightRatio).toBeGreaterThan(3);
+    expect(failures.slice(0, 10)).toEqual([]);
+    expect(failures.length).toBe(0);
+    // ~1.4s standalone; the explicit budget keeps it from flaking on the default 5s timeout when
+    // the whole suite runs in parallel.
+  }, 20_000);
+});
+
 function rectsOverlap(a: Rect, b: Rect): boolean {
   const overlapX = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
   const overlapY = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
