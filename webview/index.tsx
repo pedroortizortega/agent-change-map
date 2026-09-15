@@ -15,7 +15,15 @@ import {
   type NodeTypes,
 } from "@xyflow/react";
 import { bindRelationshipDetails } from "./relationshipDetails.js";
-import { computeLiveDragUpdate, layoutGraph, type AcmEdge, type DragCommitScope, type Position } from "./graphLayout.js";
+import {
+  computeLiveDragUpdate,
+  layoutGraph,
+  resolveDragCommit,
+  resolveGeometryChangeOverlaps,
+  type AcmEdge,
+  type DragCommitScope,
+  type Position,
+} from "./graphLayout.js";
 import type { Point } from "./edgeGeometry.js";
 import { AcmEntityNode } from "./nodes/AcmEntityNode.js";
 import { AcmKindEdge } from "./edges/AcmKindEdge.js";
@@ -251,6 +259,12 @@ function App() {
    * `state.graph` snapshot landing) never accidentally replays a stale scope. */
   const edgeRoutesRef = useRef<Map<number, Point[]>>(new Map());
   const pendingDragCommitRef = useRef<DragCommitScope | undefined>(undefined);
+  /** box-collision-push: the measured `w`/`h` of every box as of the PREVIOUS `layoutGraph` run,
+   * so the effect below can tell which boxes were re-`measure()`d by a fresh snapshot (the user
+   * editing a source file adds/removes a row and changes a container's own height) — see
+   * `resolveGeometryChangeOverlaps`' doc comment for why a re-measured box has to push its pinned
+   * neighbours clear exactly like a dragged one. */
+  const previousBoxSizesRef = useRef<Map<string, { w: number; h: number }>>(new Map());
   /** Snapshot of `expandedRuns` taken right before a refresh-landing re-`inspectSources` request
    * (see the `state.pendingInspect` effect below), consumed by the `diffOps` effect so a landing
    * refresh's diff panel re-render restores the same collapse state — mirrors the old `index.ts`'s
@@ -444,6 +458,31 @@ function App() {
   }, [layout]);
 
   /**
+   * box-collision-push (fourth reported round): a box whose OWN measured geometry changed was
+   * moved by the SYSTEM, not by the user, so it has to push its pinned neighbours clear exactly
+   * like a dragged box does. Without this, editing a source file (adding one method grows that
+   * module's container by a row, downward) leaves the grown container visually overlapping
+   * whatever an earlier drag pinned below it, permanently: `resolveCollisions` otherwise only ever
+   * runs from a drag and only ever considers pairs involving the dragged/pushed set. See
+   * `resolveGeometryChangeOverlaps`' doc comment and its regression suite for the measured
+   * reproduction. Terminating by construction: the pushes change only positions, so the re-layout
+   * this triggers re-measures identical sizes, finds no movers, and stops.
+   */
+  useEffect(() => {
+    if (!layout) return;
+    const pushes = resolveGeometryChangeOverlaps({
+      previousSizes: previousBoxSizesRef.current,
+      boxes: layout.boxes,
+      overrides: new Map(positionOverrides.entries()),
+      descendantsOf: (id) => descendantsOf(id, layout),
+    });
+    previousBoxSizesRef.current = new Map([...layout.boxes].map(([id, box]) => [id, { w: box.w, h: box.h }]));
+    if (pushes.size === 0) return;
+    for (const [id, position] of pushes) positionOverrides.set(id, position);
+    setOverrideSeq((s) => s + 1);
+  }, [layout]);
+
+  /**
    * Live re-routing during a drag (design.md §4 — previously documented but never implemented:
    * `<ReactFlow>` had no `onNodesChange` handler at all, so edges only snapped to their correct
    * routing on drop, never tracking the node visually mid-drag). React Flow itself already moves
@@ -474,6 +513,9 @@ function App() {
         nodeId: dragChange.id,
         position: dragChange.position!,
         movedDescendantIds: descendantsOf(dragChange.id, layout), // D14 cascade, mirrored for the live preview
+        // box-collision-push: reuses the SAME `descendantsOf` (D14 cascade) to carry a PUSHED
+        // container's own descendants along with it, live, during the gesture.
+        descendantsOfId: (id) => descendantsOf(id, layout),
       });
       if (!update) return;
       // Merging BOTH the dragged node's (and its cascaded descendants') live positions and the
@@ -490,22 +532,33 @@ function App() {
   const onNodeDragStop = useCallback(
     (_: unknown, node: Node) => {
       if (!layout) return;
-      const before = layout.boxes.get(node.id); // pre-drag absolute box
-      const dx = node.position.x - (before?.x ?? node.position.x);
-      const dy = node.position.y - (before?.y ?? node.position.y);
-      const movedIds = new Set<string>([node.id]); // PR4: fed to the scoped re-route below
-      positionOverrides.set(node.id, { x: node.position.x, y: node.position.y }); // the dragged node itself
-      for (const descendantId of descendantsOf(node.id, layout)) {
-        // D14 — cascade
-        movedIds.add(descendantId);
-        const box = layout.boxes.get(descendantId);
-        if (box) positionOverrides.set(descendantId, { x: box.x + dx, y: box.y + dy });
-      }
+      // box-collision-push follow-up fix: `resolveDragCommit` (graphLayout.ts) resolves the
+      // drop's D14 cascade + collision push-out against each box's CURRENT position — merging in
+      // any already-committed `positionOverrides` from an earlier drag/push in this session —
+      // instead of `layoutGraph`'s raw, un-overridden `boxes` (which never reflects a prior
+      // drag's committed position, see `boxesForRouting`'s doc comment). Using the raw layout here
+      // was the confirmed root cause of a real bug: dragging multiple stacked containers
+      // bottom-to-top could leave one container's box visually overlapping a DIFFERENT,
+      // already-moved container's content, because collisions against it were checked at its
+      // stale pre-override position. See `resolveDragCommit`'s own doc comment and
+      // `test/unit/boxCollision.test.ts`'s "resolveDragCommit" suite for the full root-cause
+      // writeup and regression coverage.
+      const committed = resolveDragCommit({
+        boxes: layout.boxes,
+        overrides: new Map(positionOverrides.entries()),
+        nodeId: node.id,
+        position: { x: node.position.x, y: node.position.y },
+        movedDescendantIds: descendantsOf(node.id, layout), // D14 cascade
+        descendantsOf: (id) => descendantsOf(id, layout),
+      });
+      const movedIds = new Set<string>(committed.keys()); // PR4: fed to the scoped re-route below
+      for (const [id, committedPosition] of committed) positionOverrides.set(id, committedPosition);
       // PR4 (design.md Block F, KEEP — measured 1.6x-18x over the 250ms budget for a full
       // re-route, see apply-progress.md's PR0 gate): only `movedIds`' own edges get genuinely
       // re-solved by the upcoming `layoutGraph` call below; every other edge carries its previous
       // raw waypoints (`edgeRoutesRef.current`, kept in sync by the effect above) forward
-      // unchanged instead of being re-routed from scratch.
+      // unchanged instead of being re-routed from scratch. Pushed boxes' own edges must be part
+      // of `movedIds` too (already ensured above), or they'd keep stale pre-push routes.
       pendingDragCommitRef.current = { movedIds, previousRoutes: edgeRoutesRef.current };
       setLiveDrag(undefined); // the drop below re-runs the (now scoped) coordinated layout
       setLiveEdgeOverrides(undefined); // the drop below re-runs the coordinated router
